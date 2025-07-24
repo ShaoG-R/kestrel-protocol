@@ -24,4 +24,7 @@ pub trait CongestionControl: Send + Sync + 'static {
     ///
     /// 获取当前的拥塞窗口大小（以包为单位）。
     fn congestion_window(&self) -> u32;
-} 
+}
+
+#[cfg(test)]
+mod tests; 

@@ -583,6 +583,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_sack_range_generation_complex() {
+        let mut reliability = ReliabilityLayer::new(test_config());
+
+        // Receive packets with multiple, large gaps
+        let received_seqs = [0, 1, 5, 6, 7, 10, 12, 13, 15];
+        for &seq in &received_seqs {
+            reliability.receive_push(seq, Bytes::new());
+        }
+
+        // Reassemble pulls out the contiguous block at the start (0, 1)
+        let _ = reliability.reassemble();
+        assert_eq!(reliability.recv_buffer.next_sequence(), 2);
+
+        // Check the remaining SACK ranges
+        // Should be [5, 7], [10, 10], [12, 13], [15, 15]
+        let (sack_ranges, next_ack, _) = reliability.get_ack_info();
+
+        assert_eq!(next_ack, 2);
+        assert_eq!(
+            sack_ranges,
+            vec![
+                SackRange { start: 5, end: 7 },
+                SackRange { start: 10, end: 10 },
+                SackRange { start: 12, end: 13 },
+                SackRange { start: 15, end: 15 },
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn test_handle_ack_and_rtt_update() {
         let mut reliability = ReliabilityLayer::new(test_config());

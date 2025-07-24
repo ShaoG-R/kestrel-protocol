@@ -10,7 +10,7 @@ use tracing::debug;
 
 /// The state of the congestion controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
+pub(crate) enum State {
     SlowStart,
     CongestionAvoidance,
 }
@@ -20,11 +20,30 @@ enum State {
 /// 一个类Vegas的拥塞控制器。
 #[derive(Debug)]
 pub struct Vegas {
+    #[cfg(test)]
+    pub(crate) congestion_window: u32,
+    #[cfg(not(test))]
     congestion_window: u32,
+
+    #[cfg(test)]
+    pub(crate) slow_start_threshold: u32,
+    #[cfg(not(test))]
     slow_start_threshold: u32,
+
+    #[cfg(test)]
+    pub(crate) state: State,
+    #[cfg(not(test))]
     state: State,
+
+    #[cfg(test)]
+    pub(crate) min_rtt: Duration,
+    #[cfg(not(test))]
     min_rtt: Duration,
+
     config: Config,
+    
+    /// An accumulator for the additive increase part of congestion avoidance.
+    additive_increase_accumulator: f32,
 }
 
 impl Vegas {
@@ -35,6 +54,7 @@ impl Vegas {
             state: State::SlowStart,
             min_rtt: Duration::from_secs(u64::MAX),
             config,
+            additive_increase_accumulator: 0.0,
         }
     }
 }
@@ -63,7 +83,12 @@ impl CongestionControl for Vegas {
                 self.state = State::CongestionAvoidance;
             }
         } else {
-            self.congestion_window += (1.0 / self.congestion_window as f32).max(1.0) as u32;
+            // Congestion Avoidance: additive increase
+            self.additive_increase_accumulator += 1.0 / self.congestion_window as f32;
+            if self.additive_increase_accumulator >= 1.0 {
+                self.congestion_window += 1;
+                self.additive_increase_accumulator -= 1.0;
+            }
         }
     }
 
