@@ -1,14 +1,8 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! The root of the reliable UDP protocol library.
+//! 可靠UDP协议库的根。
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub mod buffer;
+pub mod connection;
+pub mod error;
+pub mod packet;
+pub mod socket;

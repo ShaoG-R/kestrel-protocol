@@ -131,6 +131,26 @@ graph TD
     UserApp[User Application] <--|read()| Conn1ToUser[mpsc::recv] <-- C1_Logic
 ```
 
+### 3.3. 用户接口：流式传输 (User-Facing API: Stream Interface)
+
+最终目标是提供一个抽象的、类似 `tokio::net::TcpStream` 的流式接口。用户不应感知到底层的包、ACK或重传逻辑。他们将通过 `Connection` 对象上的 `AsyncRead` 和 `AsyncWrite` trait 实现的方法进行连续字节流的读写。库的内部负责将字节流分割成 `PUSH` 包，并在接收端重新组装成有序的字节流。
+
+### 3.4. 模块结构风格 (Module Structure Style)
+
+为保持项目结构的清晰和现代化，本项目遵循 Rust 2018 Edition 的模块路径风格：
+*   **禁止使用 `mod.rs` 文件。**
+*   对于一个目录模块（例如 `packet` 目录），应创建一个同名的 `packet.rs` 文件来声明其子模块。
+
+**示例:**
+```
+src/
+├── lib.rs
+└── packet/
+    ├── command.rs
+    └── header.rs
+└── packet.rs       # 内容为: pub mod command; pub mod header;
+```
+
 ## 4. 开发步骤 (Development Phases)
 
 请按以下顺序逐步实现功能，每一步完成后进行充分测试。
