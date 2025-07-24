@@ -321,19 +321,35 @@ mod tests {
     use super::*;
     use crate::packet::command::Command;
     use bytes::Bytes;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use std::sync::Once;
     use std::time::Duration;
-    
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     /// Helper to initialize tracing for tests.
     fn init_tracing() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("protocol=debug")
-            .try_init();
+        static TRACING_INIT: Once = Once::new();
+        TRACING_INIT.call_once(|| {
+            tracing_subscriber::fmt()
+                .with_env_filter("protocol=trace")
+                .with_test_writer()
+                .init();
+        });
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_bind_and_log() {
+        init_tracing();
+        info!("--- Starting test_bind_and_log ---");
+        let addr = "127.0.0.1:0".parse().unwrap(); // Use port 0 to get a random available port
+        let bind_result = ReliableUdpSocket::bind(addr).await;
+        assert!(bind_result.is_ok());
+        info!("--- Finished test_bind_and_log ---");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_server_accept() {
         // 1. Setup a listener socket
+        init_tracing();
         let listener_addr = "127.0.0.1:9999".parse().unwrap();
         let (socket, mut listener) = ReliableUdpSocket::bind(listener_addr).await.unwrap();
         let socket_arc = Arc::new(socket);
@@ -385,7 +401,7 @@ mod tests {
     }
 
     
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_full_connection_lifecycle() {
         init_tracing();
 
