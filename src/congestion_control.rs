@@ -9,13 +9,9 @@
 //! 该算法融合了传统的TCP拥塞控制（慢启动、拥塞避免）和受TCP Vegas启发的
 //! 基于延迟的方法。它旨在在高抖动和高丢包率的网络中保持稳定。
 
+use crate::config::Config;
 use std::time::Duration;
-
-const INITIAL_CWND_PACKETS: u32 = 32;
-const MIN_CWND_PACKETS: u32 = 4;
-const INITIAL_SSTHRESH: u32 = u32::MAX;
-const LATENCY_THRESHOLD_RATIO: f32 = 0.1; // 10% increase over min_rtt
-const CWND_DECREASE_FACTOR: f32 = 0.9; // Decrease cwnd by 10%
+use tracing::debug;
 
 /// The state of the congestion controller.
 /// 拥塞控制器的状态。
@@ -46,17 +42,21 @@ pub struct CongestionController {
     /// The minimum RTT observed so far.
     /// 到目前为止观察到的最小RTT。
     min_rtt: Duration,
+    /// A reference to the connection's configuration.
+    /// 对连接配置的引用。
+    config: Config,
 }
 
 impl CongestionController {
     /// Creates a new `CongestionController`.
     /// 创建一个新的 `CongestionController`。
-    pub fn new() -> Self {
+    pub fn new(config: Config) -> Self {
         Self {
-            congestion_window: INITIAL_CWND_PACKETS,
-            slow_start_threshold: INITIAL_SSTHRESH,
+            congestion_window: config.initial_cwnd_packets,
+            slow_start_threshold: config.initial_ssthresh,
             state: State::SlowStart,
             min_rtt: Duration::from_secs(u64::MAX),
+            config,
         }
     }
 
@@ -83,13 +83,13 @@ impl CongestionController {
         // We only do this in CongestionAvoidance to avoid shrinking the window too early.
         if self.state == State::CongestionAvoidance {
             let rtt_increase = rtt.as_secs_f32() - self.min_rtt.as_secs_f32();
-            if rtt_increase > self.min_rtt.as_secs_f32() * LATENCY_THRESHOLD_RATIO {
+            if rtt_increase > self.min_rtt.as_secs_f32() * self.config.latency_threshold_ratio {
                 // RTT is increasing, potential congestion.
                 // Gently reduce the congestion window.
                 self.congestion_window =
-                    ((self.congestion_window as f32) * CWND_DECREASE_FACTOR) as u32;
-                self.congestion_window = self.congestion_window.max(MIN_CWND_PACKETS);
-                println!(
+                    ((self.congestion_window as f32) * self.config.cwnd_decrease_factor) as u32;
+                self.congestion_window = self.congestion_window.max(self.config.min_cwnd_packets);
+                debug!(
                     "Latency-based congestion avoidance triggered. New cwnd: {}",
                     self.congestion_window
                 );
@@ -127,10 +127,11 @@ impl CongestionController {
     pub fn on_packet_loss(&mut self) {
         // This is a congestion event.
         // 这是一个拥塞事件。
-        self.slow_start_threshold = (self.congestion_window / 2).max(MIN_CWND_PACKETS);
+        self.slow_start_threshold =
+            (self.congestion_window / 2).max(self.config.min_cwnd_packets);
         self.congestion_window = self.slow_start_threshold;
         self.state = State::SlowStart;
-        println!(
+        debug!(
             "Congestion event! New ssthresh: {}, New cwnd: {}",
             self.slow_start_threshold, self.congestion_window
         );

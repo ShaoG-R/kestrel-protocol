@@ -8,6 +8,7 @@ use crate::packet::frame::Frame;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::time::{self, Duration, pause};
+use crate::config::Config;
 
 pub const TEST_CLIENT_ADDR: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
@@ -35,8 +36,9 @@ impl TestHarness {
         let (tx_to_peer, rx_from_conn) = mpsc::channel::<SendCommand>(128);
         let (tx_to_conn, rx_from_peer) = mpsc::channel::<Frame>(128);
 
+        let config = Config::default();
         let (worker, handle) =
-            connection::ConnectionWorker::new(TEST_SERVER_ADDR, 1, initial_state, tx_to_peer, rx_from_peer);
+            connection::ConnectionWorker::new(TEST_SERVER_ADDR, 1, initial_state, config, tx_to_peer, rx_from_peer);
 
         let harness = Self {
             worker,

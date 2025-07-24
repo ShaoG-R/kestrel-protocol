@@ -2,6 +2,7 @@
 //! 可靠UDP协议库的根。
 
 pub mod buffer;
+pub mod config;
 pub mod connection;
 pub mod error;
 pub mod packet;

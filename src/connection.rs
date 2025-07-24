@@ -6,6 +6,7 @@ use crate::congestion_control::CongestionController;
 use crate::error::{Error, Result};
 use crate::packet::frame::Frame;
 use crate::packet::sack::{decode_sack_ranges, encode_sack_ranges};
+use crate::config::Config;
 use bytes::{Bytes, BytesMut};
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -14,12 +15,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
-
-const INITIAL_RTO: Duration = Duration::from_millis(1000);
-const MIN_RTO: Duration = Duration::from_millis(500);
-const FAST_RETX_THRESHOLD: u16 = 3;
-const MAX_PAYLOAD_SIZE: usize = 1200; // A reasonable payload size for UDP
-const ACK_THRESHOLD: u16 = 2; // Send an ACK for every 2 packets received
+use tracing::{debug, info, trace, warn};
 
 // --- Public API ---
 
@@ -76,11 +72,11 @@ struct RttEstimator {
 }
 
 impl RttEstimator {
-    fn new() -> Self {
+    fn new(initial_rto: Duration) -> Self {
         Self {
             srtt: Duration::from_secs(0),
             rttvar: Duration::from_secs(0),
-            rto: INITIAL_RTO,
+            rto: initial_rto,
         }
     }
 
@@ -90,7 +86,7 @@ impl RttEstimator {
 
     /// Updates the RTO based on a new RTT sample.
     /// 根据一个新的RTT样本更新RTO。
-    fn update(&mut self, rtt: Duration) {
+    fn update(&mut self, rtt: Duration, min_rto: Duration) {
         if self.srtt == Duration::from_secs(0) {
             // First sample
             self.srtt = rtt;
@@ -105,7 +101,7 @@ impl RttEstimator {
             self.rttvar = (3 * self.rttvar + delta) / 4;
             self.srtt = (7 * self.srtt + rtt) / 8;
         }
-        self.rto = (self.srtt + 4 * self.rttvar).max(MIN_RTO);
+        self.rto = (self.srtt + 4 * self.rttvar).max(min_rto);
     }
 }
 
@@ -173,6 +169,9 @@ struct ConnectionState {
     /// Waker for the writing task.
     /// 写入任务的 Waker。
     write_waker: Option<std::task::Waker>,
+    /// The configuration for this connection.
+    /// 此连接的配置。
+    config: Config,
 }
 
 impl ConnectionWorker {
@@ -181,6 +180,7 @@ impl ConnectionWorker {
         remote_addr: SocketAddr,
         connection_id: u32,
         initial_state: State,
+        config: Config,
         sender: mpsc::Sender<SendCommand>,
         // Channel for the main socket task to send frames to this connection's worker.
         receiver: mpsc::Receiver<Frame>,
@@ -197,12 +197,13 @@ impl ConnectionWorker {
             recv_buffer: ReceiveBuffer::new(),
             sender,
             sequence_number_counter: 0,
-            rto_estimator: RttEstimator::new(),
-            peer_recv_window: 32,
-            congestion_controller: CongestionController::new(),
+            rto_estimator: RttEstimator::new(config.initial_rto),
+            peer_recv_window: 32, // This should probably be in Config as well
+            congestion_controller: CongestionController::new(config.clone()),
             ack_eliciting_packets_since_last_ack: 0,
             ack_pending: false,
             write_waker: None,
+            config,
         };
 
         let worker = Self {
@@ -252,6 +253,7 @@ impl ConnectionWorker {
                 }
             };
 
+            trace!("Connection worker loop selected");
             tokio::select! {
                 // An incoming frame from the remote peer.
                 Some(frame) = self.receiver.recv() => {
@@ -260,6 +262,7 @@ impl ConnectionWorker {
 
                 // A command from the public-facing handle.
                 Some(cmd) = self.rx_from_handle.recv() => {
+                    trace!("Received command from handle: {:?}", cmd);
                     match cmd {
                         WorkerCommand::SendData(data) => {
                             self.state.send_buffer.write_to_stream(&data);
@@ -277,6 +280,7 @@ impl ConnectionWorker {
                     // Check if we need to send a piggybacked ACK.
                     if self.state.ack_pending {
                         let ack_frame = self.state.create_ack_frame();
+                        trace!(seq = ?ack_frame.sequence_number(), "Created piggybacked ACK frame");
                         frames_to_send.push(ack_frame);
                         self.state.ack_pending = false;
                         self.state.ack_eliciting_packets_since_last_ack = 0;
@@ -284,6 +288,7 @@ impl ConnectionWorker {
 
                     while self.state.can_send_more() {
                         if let Some(frame) = self.state.send_buffer.pop_next_frame() {
+                            trace!(seq = ?frame.sequence_number(), "Popped frame from send queue");
                             frames_to_send.push(frame);
                         } else {
                             break; // No more frames to send
@@ -308,6 +313,7 @@ impl ConnectionWorker {
                 }
 
                 else => {
+                    info!(addr = %self.state.remote_addr, "Connection worker loop terminating");
                     break;
                 }
             }
@@ -317,7 +323,7 @@ impl ConnectionWorker {
             }
         }
 
-        println!("Connection to {} closed.", self.state.remote_addr);
+        info!(addr = %self.state.remote_addr, "Connection closed.");
         self.state.state = State::Closed;
         Ok(())
     }
@@ -394,8 +400,8 @@ impl ConnectionState {
     fn packetize_stream_data(&mut self) {
         // In connecting state, the first data packet becomes a SYN with payload.
         if self.state == State::Connecting && self.sequence_number_counter == 0 {
-            if let Some(chunk) = self.send_buffer.create_chunk(MAX_PAYLOAD_SIZE) {
-                println!("Sending 0-RTT data in SYN packet.");
+            if let Some(chunk) = self.send_buffer.create_chunk(self.config.max_payload_size) {
+                debug!(bytes = chunk.len(), "Sending 0-RTT data in SYN packet.");
                 let syn_header = crate::packet::header::LongHeader {
                     command: crate::packet::command::Command::Syn,
                     protocol_version: 0,
@@ -412,7 +418,7 @@ impl ConnectionState {
             return; // Only send one SYN
         }
 
-        while let Some(chunk) = self.send_buffer.create_chunk(MAX_PAYLOAD_SIZE) {
+        while let Some(chunk) = self.send_buffer.create_chunk(self.config.max_payload_size) {
             let push_header = crate::packet::header::ShortHeader {
                 command: crate::packet::command::Command::Push,
                 connection_id: self.connection_id,
@@ -435,9 +441,11 @@ impl ConnectionState {
     /// Handles a single incoming frame based on the current state.
     /// 根据当前状态处理单个传入的帧。
     async fn handle_frame(&mut self, frame: Frame) -> Result<()> {
-        println!(
-            "Connection to {} in state {:?} received frame: {:?}",
-            self.remote_addr, self.state, frame
+        trace!(
+            addr = %self.remote_addr,
+            state = ?self.state,
+            "Received frame: {:?}",
+            frame
         );
 
         match self.state {
@@ -445,12 +453,12 @@ impl ConnectionState {
                 Frame::Syn { header: _, payload } => {
                     // This is the server-side logic for an incoming connection.
                     // 这是服务器端处理新连接的逻辑。
-                    println!("Transitioning to Established state.");
+                    info!(addr = %self.remote_addr, "Transitioning to Established state.");
                     self.state = State::Established;
 
                     if !payload.is_empty() {
                         // This is 0-RTT data.
-                        println!("Received 0-RTT data ({} bytes).", payload.len());
+                        debug!(addr = %self.remote_addr, bytes = payload.len(), "Received 0-RTT data.");
                         self.recv_buffer.receive(0, payload);
                         // The `run` loop will call reassemble and send to handle.
                     }
@@ -469,7 +477,7 @@ impl ConnectionState {
                 Frame::SynAck { header: _ } => {
                     // This is the client-side logic when receiving the server's ack.
                     // 这是客户端收到服务器ack时的逻辑。
-                    println!("Received SYN-ACK, connection established.");
+                    info!(addr = %self.remote_addr, "Received SYN-ACK, connection established.");
                     self.state = State::Established;
                     // Our SYN is implicitly acknowledged. The data sent in it can be
                     // considered "in-flight" but since there's no sequence number,
@@ -483,17 +491,18 @@ impl ConnectionState {
                 Frame::Push { header, payload } => {
                     // Pass the data to the receive buffer for reordering and delivery.
                     // 将数据传递给接收缓冲区进行重排和交付。
-                    println!(
-                        "Received PUSH with seq={} and {} bytes of payload.",
-                        header.sequence_number,
-                        payload.len()
+                    debug!(
+                        addr = %self.remote_addr,
+                        seq = header.sequence_number,
+                        bytes = payload.len(),
+                        "Received PUSH frame."
                     );
                     self.recv_buffer.receive(header.sequence_number, payload);
                     // The main run loop will handle reassembly and sending to the handle.
 
                     // Mark that we owe an ACK, and check if we should send one immediately.
                     self.ack_pending = true;
-                    if self.ack_eliciting_packets_since_last_ack >= ACK_THRESHOLD
+                    if self.ack_eliciting_packets_since_last_ack >= self.config.ack_threshold
                         && !self.recv_buffer.get_sack_ranges().is_empty()
                     {
                         self.send_ack_if_needed().await?;
@@ -503,7 +512,7 @@ impl ConnectionState {
                     self.handle_ack(header, payload).await?;
                 }
                 Frame::Fin { header: _ } => {
-                    println!("Received FIN, entering FIN_WAIT and sending ACK.");
+                    info!(addr = %self.remote_addr, "Received FIN, entering FIN_WAIT and sending ACK.");
                     // Acknowledge their FIN.
                     self.send_ack_for_fin().await?;
                     // Transition to FinWait, waiting for our side to close.
@@ -511,7 +520,7 @@ impl ConnectionState {
                 }
                 _ => {
                     // Ignore other unexpected packets in this state.
-                    println!("Ignoring unexpected frame in Established state: {:?}", frame);
+                    warn!(addr = %self.remote_addr, ?frame, "Ignoring unexpected frame in Established state");
                 }
             },
             State::Closing => match frame {
@@ -519,7 +528,7 @@ impl ConnectionState {
                     self.handle_ack(header, payload).await?;
                 }
                 Frame::Fin { header: _ } => {
-                    println!("Received FIN while Closing, sending ACK.");
+                    info!(addr = %self.remote_addr, "Received FIN while Closing, sending ACK.");
                     self.send_ack_for_fin().await?;
                     // If our FIN is acknowledged and we have received and acknowledged their FIN,
                     // we can move to closed. This check happens implicitly as the ACK processing
@@ -530,7 +539,7 @@ impl ConnectionState {
                     }
                 }
                 _ => {
-                    println!("Ignoring unexpected frame in Closing state: {:?}", frame);
+                    warn!(addr = %self.remote_addr, ?frame, "Ignoring unexpected frame in Closing state");
                 }
             },
             State::FinWait => match frame {
@@ -540,7 +549,7 @@ impl ConnectionState {
                     self.handle_ack(header, payload).await?;
                 }
                 _ => {
-                    println!("Ignoring unexpected frame in FinWait state: {:?}", frame);
+                    warn!(addr = %self.remote_addr, ?frame, "Ignoring unexpected frame in FinWait state");
                 }
             },
             State::Closed => {
@@ -560,7 +569,7 @@ impl ConnectionState {
         self.peer_recv_window = header.recv_window_size;
 
         let sack_ranges = decode_sack_ranges(payload);
-        println!("Received ACK with SACK ranges: {:?}", sack_ranges);
+        trace!(addr = %self.remote_addr, ?sack_ranges, "Received ACK with SACK ranges");
 
         if sack_ranges.is_empty() {
             return Ok(()); // Nothing to do
@@ -585,13 +594,14 @@ impl ConnectionState {
                 if acked_seq_numbers.contains(&seq) {
                     // This packet is acknowledged. Update RTO and remove it.
                     let rtt = now.duration_since(packet.last_sent_at);
-                    self.rto_estimator.update(rtt);
+                    self.rto_estimator.update(rtt, self.config.min_rto);
                     self.congestion_controller.on_ack(rtt);
-                    println!(
-                        "Packet with seq={} acked. RTT: {:?}, New RTO: {:?}",
+                    debug!(
+                        addr = %self.remote_addr,
                         seq,
-                        rtt,
-                        self.rto_estimator.rto()
+                        rtt = ?rtt,
+                        new_rto = ?self.rto_estimator.rto(),
+                        "Packet acknowledged."
                     );
                     return false; // Remove from in_flight
                 }
@@ -612,8 +622,8 @@ impl ConnectionState {
             if let Some(seq) = packet.frame.sequence_number() {
                 if seq < highest_acked_seq {
                     packet.fast_retx_count += 1;
-                    if packet.fast_retx_count >= FAST_RETX_THRESHOLD {
-                        println!("Fast retransmitting packet with seq={}", seq);
+                    if packet.fast_retx_count >= self.config.fast_retx_threshold {
+                        info!(addr = %self.remote_addr, seq, "Fast retransmitting packet");
                         frames_to_fast_retx.push(packet.frame.clone());
                         packet.last_sent_at = now;
                         packet.fast_retx_count = 0; // Reset count
@@ -636,7 +646,7 @@ impl ConnectionState {
         // 当我们处于'Closing'状态（我们已经发送了一个FIN），并且在途缓冲区变空时，
         // 这意味着我们的FIN包已经被对端确认。此时，我们这边的连接就完成了。
         if self.state == State::Closing && self.send_buffer.in_flight.is_empty() {
-            println!("Our FIN has been acknowledged. Closing connection.");
+            info!(addr = %self.remote_addr, "Our FIN has been acknowledged. Closing connection.");
             self.state = State::Closed;
         }
         Ok(())
@@ -677,7 +687,7 @@ impl ConnectionState {
                 };
                 self.sequence_number_counter += 1;
 
-                println!("Sending FIN with seq={}", fin_header.sequence_number);
+                debug!(addr = %self.remote_addr, seq = fin_header.sequence_number, "Sending FIN");
                 let fin_frame = Frame::Fin { header: fin_header };
 
                 self.send_buffer.queue_frame(fin_frame);
@@ -699,7 +709,7 @@ impl ConnectionState {
     /// Immediately sends an ACK frame if one is needed.
     /// 如果需要，立即发送一个ACK帧。
     async fn send_ack_if_needed(&mut self) -> Result<()> {
-        if self.ack_eliciting_packets_since_last_ack >= ACK_THRESHOLD
+        if self.ack_eliciting_packets_since_last_ack >= self.config.ack_threshold
             && !self.recv_buffer.get_sack_ranges().is_empty()
         {
             let ack_frame = self.create_ack_frame();
@@ -753,9 +763,10 @@ impl ConnectionState {
 
         for packet in self.send_buffer.iter_in_flight_mut() {
             if now.duration_since(packet.last_sent_at) > rto {
-                println!(
-                    "Retransmitting packet with seq={:?}",
-                    packet.frame.sequence_number()
+                warn!(
+                    addr = %self.remote_addr,
+                    seq = ?packet.frame.sequence_number(),
+                    "RTO exceeded. Retransmitting packet"
                 );
                 // Collect the frame to resend it later.
                 frames_to_resend.push(packet.frame.clone());

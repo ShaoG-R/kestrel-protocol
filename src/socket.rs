@@ -4,12 +4,14 @@
 use crate::connection::{self, Connection, SendCommand};
 use crate::error::Result;
 use crate::packet::frame::Frame;
+use crate::config::Config;
 use dashmap::DashMap;
 use rand::RngCore;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
 
 /// A reliable UDP socket.
 ///
@@ -63,6 +65,13 @@ impl ReliableUdpSocket {
     /// 这会创建一个新的 `Connection` 实例并生成其事件循环。
     /// 该连接可以立即用于写入0-RTT数据。
     pub async fn connect(&self, remote_addr: SocketAddr) -> Result<Connection> {
+        self.connect_with_config(remote_addr, Config::default()).await
+    }
+
+    /// Establishes a new reliable connection to the given remote address with custom configuration.
+    ///
+    /// 使用自定义配置建立一个到指定远程地址的新的可靠连接。
+    pub async fn connect_with_config(&self, remote_addr: SocketAddr, config: Config) -> Result<Connection> {
         let mut rng = rand::rng();
         let conn_id = rng.next_u32();
 
@@ -73,6 +82,7 @@ impl ReliableUdpSocket {
             remote_addr,
             conn_id,
             connection::State::Connecting,
+            config,
             self.send_tx.clone(),
             rx_from_worker,
         );
@@ -80,7 +90,7 @@ impl ReliableUdpSocket {
         // Spawn a new task for the connection to run in.
         tokio::spawn(async move {
             if let Err(e) = worker.run().await {
-                eprintln!("Connection to {} closed with error: {}", remote_addr, e);
+                error!(addr = %remote_addr, "Connection closed with error: {}", e);
             }
         });
 
@@ -103,7 +113,7 @@ impl ReliableUdpSocket {
                 Ok(val) => val,
                 Err(e) => {
                     // Log the error but continue running. A single recv error is not fatal.
-                    eprintln!("Failed to receive from socket: {}", e);
+                    error!("Failed to receive from socket: {}", e);
                     continue;
                 }
             };
@@ -113,7 +123,7 @@ impl ReliableUdpSocket {
                 Some(frame) => frame,
                 None => {
                     // Log and drop invalid packets.
-                    eprintln!("Received an invalid packet from {}", remote_addr);
+                    warn!(addr = %remote_addr, "Received an invalid packet");
                     continue;
                 }
             };
@@ -135,15 +145,18 @@ impl ReliableUdpSocket {
                 payload: _,
             } = &frame
             {
-                println!("Received SYN from {}, creating new connection.", remote_addr);
+                info!(addr = %remote_addr, "Received SYN, creating new connection.");
                 let conn_id = header.connection_id;
 
                 let (tx_to_worker, rx_from_worker) = mpsc::channel(128);
 
+                // TODO: Allow server-side configuration
+                let config = Config::default();
                 let (mut worker, _handle) = connection::ConnectionWorker::new(
                     remote_addr,
                     conn_id,
                     connection::State::Connecting,
+                    config,
                     self.send_tx.clone(),
                     rx_from_worker,
                 );
@@ -151,7 +164,7 @@ impl ReliableUdpSocket {
                 // Spawn a new task for the connection to run in.
                 tokio::spawn(async move {
                     if let Err(e) = worker.run().await {
-                        eprintln!("Connection to {} closed with error: {}", remote_addr, e);
+                        error!(addr = %remote_addr, "Connection closed with error: {}", e);
                     }
                 });
 
@@ -165,8 +178,7 @@ impl ReliableUdpSocket {
                 }
             } else {
                 // Ignore packets from unknown addresses that are not SYN.
-                // 忽略来自未知地址的非SYN包。
-                println!(
+                debug!(
                     "Ignoring non-SYN packet from unknown address {}: {:?}",
                     remote_addr, frame
                 );
@@ -195,9 +207,10 @@ async fn sender_task(socket: Arc<UdpSocket>, mut rx: mpsc::Receiver<SendCommand>
 
         if let Err(e) = socket.send_to(&send_buf, cmd.remote_addr).await {
             // A single send error is not fatal to the whole socket.
-            eprintln!(
-                "Failed to send packet to {}: {}",
-                cmd.remote_addr, e
+            error!(
+                addr = %cmd.remote_addr,
+                "Failed to send packet: {}",
+                e
             );
         }
     }
