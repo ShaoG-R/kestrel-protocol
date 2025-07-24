@@ -168,7 +168,14 @@ impl Endpoint {
                     let syn_ack_frame = Frame::SynAck {
                         header: syn_ack_header,
                     };
-                    self.send_frames(vec![syn_ack_frame]).await?;
+                    let cmd = SendCommand {
+                        remote_addr: self.remote_addr,
+                        frames: vec![syn_ack_frame],
+                    };
+                    if self.sender.send(cmd).await.is_err() {
+                        warn!(cid = self.local_cid, "Failed to send command to socket sender task");
+                        return Err(Error::ChannelClosed);
+                    }
                 }
             }
             Frame::SynAck { header } => {
@@ -216,6 +223,7 @@ impl Endpoint {
             Frame::Fin { header: _ } => {
                 self.state = State::FinWait;
                 self.send_standalone_ack().await?;
+                ack_was_sent = true;
             }
             _ => {
                 // TODO: Handle other frame types
@@ -440,7 +448,7 @@ impl Endpoint {
             connection_id: self.peer_cid,
             recv_window_size: window_size,
             timestamp: self.start_time.elapsed().as_millis() as u32,
-            sequence_number: self.reliability.next_sequence_number(),
+            sequence_number: 0, // ACK frames do not consume a sequence number.
             recv_next_sequence: recv_next,
         };
 
@@ -449,7 +457,17 @@ impl Endpoint {
             payload: ack_payload.freeze(),
         };
 
-        self.send_frames(vec![ack_frame]).await?;
+        let cmd = SendCommand {
+            remote_addr: self.remote_addr,
+            frames: vec![ack_frame],
+        };
+        if self.sender.send(cmd).await.is_err() {
+            // This indicates the socket's sender task has shut down,
+            // which is a fatal error for this connection.
+            warn!(cid = self.local_cid, "Failed to send command to socket sender task");
+            return Err(Error::ChannelClosed);
+        }
+
         self.reliability.on_ack_sent();
         Ok(())
     }
