@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
 use tracing::{debug, error, info, warn};
 
@@ -24,6 +24,36 @@ pub struct SendCommand {
     /// The frames to send.
     /// 要发送的帧。
     pub frames: Vec<Frame>,
+}
+
+/// A listener for incoming reliable UDP connections.
+///
+/// This is created by `ReliableUdpSocket::bind` and can be used to accept
+/// new incoming connections.
+///
+/// 用于传入可靠UDP连接的监听器。
+///
+/// 这是由 `ReliableUdpSocket::bind` 创建的，可以用来接受新的传入连接。
+pub struct ConnectionListener {
+    /// A receiver for newly accepted connections.
+    /// 用于新接受连接的接收端。
+    accept_rx: mpsc::Receiver<(Stream, SocketAddr)>,
+}
+
+impl ConnectionListener {
+    /// Waits for a new incoming connection.
+    ///
+    /// This method will block until a new connection is established.
+    ///
+    /// 等待一个新的传入连接。
+    ///
+    /// 此方法将阻塞直到一个新连接建立。
+    pub async fn accept(&mut self) -> Result<(Stream, SocketAddr)> {
+        self.accept_rx
+            .recv()
+            .await
+            .ok_or(crate::error::Error::ChannelClosed)
+    }
 }
 
 /// A reliable UDP socket.
@@ -46,17 +76,19 @@ pub struct ReliableUdpSocket {
     /// A sender for newly accepted connections.
     /// 用于新接受连接的发送端。
     accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
-    /// A receiver for newly accepted connections. Wrapped in a Mutex to allow
-    /// `accept` to be called on `&self`.
-    /// 用于新接受连接的接收端。包裹在Mutex中以允许在`&self`上调用`accept`。
-    accept_rx: Mutex<mpsc::Receiver<(Stream, SocketAddr)>>,
 }
 
 impl ReliableUdpSocket {
     /// Creates a new `ReliableUdpSocket` and binds it to the given address.
     ///
+    /// Returns a `ReliableUdpSocket` for managing connections and a
+    /// `ConnectionListener` for accepting them.
+    ///
     /// 创建一个新的 `ReliableUdpSocket` 并将其绑定到给定的地址。
-    pub async fn new(addr: SocketAddr) -> Result<Self> {
+    ///
+    /// 返回一个用于管理连接的 `ReliableUdpSocket` 和一个用于接受连接的
+    /// `ConnectionListener`。
+    pub async fn bind(addr: SocketAddr) -> Result<(Self, ConnectionListener)> {
         let socket = UdpSocket::bind(addr).await?;
         let socket = Arc::new(socket);
         let connections = Arc::new(DashMap::new());
@@ -72,13 +104,15 @@ impl ReliableUdpSocket {
         tokio::spawn(sender_task(socket_clone, send_rx));
 
         info!(addr = ?socket.local_addr().ok(), "ReliableUdpSocket created and running");
-        Ok(Self {
+        let socket_handle = Self {
             socket,
             connections,
             send_tx,
             accept_tx,
-            accept_rx: Mutex::new(accept_rx),
-        })
+        };
+        let listener = ConnectionListener { accept_rx };
+
+        Ok((socket_handle, listener))
     }
 
     /// Establishes a new reliable connection to the given remote address.
@@ -130,21 +164,6 @@ impl ReliableUdpSocket {
         // Create and return the user-facing Stream handle
         let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
         Ok(stream)
-    }
-
-    /// Waits for a new incoming connection.
-    ///
-    /// This method will block until a new connection is established.
-    ///
-    /// 等待一个新的传入连接。
-    ///
-    /// 此方法将阻塞直到一个新连接建立。
-    pub async fn accept(&self) -> Result<(Stream, SocketAddr)> {
-        let mut guard = self.accept_rx.lock().await;
-        guard
-            .recv()
-            .await
-            .ok_or(crate::error::Error::ChannelClosed)
     }
 
     /// Runs the socket's main loop to receive and dispatch packets.
@@ -316,13 +335,13 @@ mod tests {
     async fn test_server_accept() {
         // 1. Setup a listener socket
         let listener_addr = "127.0.0.1:9999".parse().unwrap();
-        let listener = ReliableUdpSocket::new(listener_addr).await.unwrap();
-        let listener_arc = Arc::new(listener);
+        let (socket, mut listener) = ReliableUdpSocket::bind(listener_addr).await.unwrap();
+        let socket_arc = Arc::new(socket);
 
         // 2. Spawn the listener's run loop
-        let listener_run = listener_arc.clone();
+        let socket_run = socket_arc.clone();
         let run_handle = tokio::spawn(async move {
-            listener_run.run().await;
+            socket_run.run().await;
         });
 
         // 3. Setup a "client" socket to send a SYN
@@ -351,7 +370,7 @@ mod tests {
         // It should unblock and return a connection.
         // Use a timeout to prevent test from hanging.
         let accept_result =
-            tokio::time::timeout(Duration::from_secs(1), listener_arc.accept()).await;
+            tokio::time::timeout(Duration::from_secs(1), listener.accept()).await;
 
         assert!(accept_result.is_ok(), "accept() timed out");
         let (conn, remote_addr) = accept_result.unwrap().unwrap();
@@ -372,13 +391,17 @@ mod tests {
 
         // 1. Setup server
         let server_addr = "127.0.0.1:9998".parse().unwrap();
-        let server = Arc::new(ReliableUdpSocket::new(server_addr).await.unwrap());
+        let (server_socket, mut server_listener) =
+            ReliableUdpSocket::bind(server_addr).await.unwrap();
+        let server = Arc::new(server_socket);
         let server_run = server.clone();
         tokio::spawn(async move { server_run.run().await });
 
         // 2. Setup client
         let client_addr = "127.0.0.1:9997".parse().unwrap();
-        let client = Arc::new(ReliableUdpSocket::new(client_addr).await.unwrap());
+        let (client_socket, _client_listener) =
+            ReliableUdpSocket::bind(client_addr).await.unwrap();
+        let client = Arc::new(client_socket);
         let client_run = client.clone();
         tokio::spawn(async move { client_run.run().await });
 
@@ -387,7 +410,7 @@ mod tests {
 
         // 3. Concurrently connect and accept
         let server_handle = tokio::spawn(async move {
-            let (stream, _addr) = server.accept().await.unwrap();
+            let (stream, _addr) = server_listener.accept().await.unwrap();
             server_stream_tx.send(stream).await.unwrap();
         });
 
