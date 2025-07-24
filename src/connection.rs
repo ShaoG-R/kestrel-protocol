@@ -3,17 +3,22 @@
 
 use crate::buffer::{ReceiveBuffer, SendBuffer};
 use crate::congestion_control::CongestionController;
+use crate::error::{Error, Result};
 use crate::packet::frame::Frame;
 use crate::packet::sack::{decode_sack_ranges, encode_sack_ranges};
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
 const INITIAL_RTO: Duration = Duration::from_millis(1000);
 const MIN_RTO: Duration = Duration::from_millis(500);
 const FAST_RETX_THRESHOLD: u16 = 3;
 const MAX_PAYLOAD_SIZE: usize = 1200; // A reasonable payload size for UDP
+const ACK_THRESHOLD: u16 = 2; // Send an ACK for every 2 packets received
 
 /// An estimator for the round-trip time (RTT).
 ///
@@ -118,6 +123,15 @@ struct ConnectionState {
     /// The congestion controller.
     /// 拥塞控制器。
     congestion_controller: CongestionController,
+    /// Counts the number of packets received that should trigger an ACK.
+    /// 记录收到的、应当触发ACK的包的数量。
+    ack_eliciting_packets_since_last_ack: u16,
+    /// Waker for the reading task.
+    /// 读取任务的 Waker。
+    read_waker: Option<std::task::Waker>,
+    /// Waker for the writing task.
+    /// 写入任务的 Waker。
+    write_waker: Option<std::task::Waker>,
 }
 
 /// Represents a single reliable connection.
@@ -167,6 +181,9 @@ impl Connection {
             // Initialize with a small default window until we hear from the peer.
             peer_recv_window: 32,
             congestion_controller: CongestionController::new(),
+            ack_eliciting_packets_since_last_ack: 0,
+            read_waker: None,
+            write_waker: None,
         };
         let connection = Self {
             state,
@@ -185,53 +202,15 @@ impl Connection {
     ///
     /// 这会发送一个FIN包，并将连接转换到`Closing`状态。
     /// 一旦FIN被确认并且对端也关闭了它的连接，连接将被完全关闭。
-    pub async fn close(&mut self) -> std::io::Result<()> {
-        self.state.shutdown().await;
+    pub async fn close(&mut self) -> Result<()> {
+        self.state.shutdown();
         Ok(())
-    }
-
-    /// Writes a slice of bytes to the connection.
-    ///
-    /// This will segment the data into one or more PUSH frames and queue them for sending.
-    ///
-    /// 向连接写入一个字节切片。
-    ///
-    /// 这会将数据分段成一个或多个PUSH帧，并将它们排队等待发送。
-    pub async fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if self.state.state == State::Closed || self.state.state == State::Closing {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionAborted,
-                "Connection is closing or closed",
-            ));
-        }
-
-        for chunk in buf.chunks(MAX_PAYLOAD_SIZE) {
-            let payload = bytes::Bytes::copy_from_slice(chunk);
-            let push_header = crate::packet::header::ShortHeader {
-                command: crate::packet::command::Command::Push,
-                connection_id: self.state.connection_id,
-                recv_window_size: self.state.recv_buffer.window_size(),
-                timestamp: self.state.start_time.elapsed().as_millis() as u32,
-                sequence_number: self.state.sequence_number_counter,
-                recv_next_sequence: self.state.recv_buffer.next_sequence(),
-            };
-            self.state.sequence_number_counter += 1;
-
-            let frame = Frame::Push {
-                header: push_header,
-                payload,
-            };
-
-            self.state.send_buffer.queue_frame(frame);
-        }
-
-        Ok(buf.len())
     }
 
     /// Runs the connection's main loop to process incoming frames.
     ///
     /// 运行连接的主循环以处理传入的帧。
-    pub async fn run(&mut self) {
+    pub async fn run(&mut self) -> Result<()> {
         let state = &mut self.state;
         let receiver = &mut self.receiver;
         let mut rto_timer = tokio::time::interval(state.rto_estimator.rto());
@@ -239,12 +218,14 @@ impl Connection {
         loop {
             // By splitting the struct, the borrow checker now understands
             // that we are operating on disjoint parts.
+            state.packetize_stream_data();
+
             tokio::select! {
                 Some(frame) = receiver.recv() => {
-                    state.handle_frame(frame).await;
+                    state.handle_frame(frame).await?;
                 }
 
-                _ = async {
+                res = async {
                     let mut frames_to_send = Vec::new();
                     while state.can_send_more() {
                         if let Some(frame) = state.send_buffer.pop_next_frame() {
@@ -259,12 +240,16 @@ impl Connection {
                         for frame in &frames_to_send {
                             state.send_buffer.add_in_flight(frame.clone(), now);
                         }
-                        state.send_frames(frames_to_send).await;
+                        state.send_frames(frames_to_send).await?;
                     }
-                }, if !state.send_buffer.is_empty() && state.can_send_more() => {}
+                    let res: Result<()> = Ok(());
+                    res
+                }, if state.send_buffer.has_data_to_send() && state.can_send_more() => {
+                    res?;
+                }
 
                 _ = rto_timer.tick() => {
-                    state.check_for_retransmissions().await;
+                    state.check_for_retransmissions().await?;
                 }
 
                 else => {
@@ -279,13 +264,117 @@ impl Connection {
 
         println!("Connection to {} closed.", state.remote_addr);
         state.state = State::Closed;
+        Ok(())
+    }
+}
+
+impl AsyncRead for Connection {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let state = &mut self.get_mut().state;
+
+        // Try to read from the reassembled buffer first.
+        let bytes_read = state.recv_buffer.read_from_stream(buf.initialize_unfilled());
+        if bytes_read > 0 {
+            buf.advance(bytes_read);
+            return Poll::Ready(Ok(()));
+        }
+
+        // If no data is available, check connection state.
+        if state.state == State::Closed || state.state == State::FinWait {
+            // If the connection is closed and the buffer is empty, it's EOF.
+            return Poll::Ready(Ok(()));
+        }
+
+        // If no data is available and the connection is still open,
+        // store the waker and return Pending.
+        state.read_waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+impl AsyncWrite for Connection {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let state = &mut self.get_mut().state;
+
+        if state.state == State::Closed || state.state == State::Closing {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "Connection is closing or closed",
+            )));
+        }
+
+        let bytes_written = state.send_buffer.write_to_stream(buf);
+
+        if bytes_written == 0 {
+            // Buffer is full, store waker and return pending.
+            state.write_waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+
+        Poll::Ready(Ok(bytes_written))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        // Since packetization and sending happens in the background `run` task,
+        // a flush can be considered successful if the data has been moved to the
+        // internal buffer. For a more "correct" flush, we would need to wait
+        // until the send_buffer is empty, which requires another waker mechanism.
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let state = &mut self.get_mut().state;
+
+        if state.state == State::Established {
+            state.shutdown();
+        }
+
+        if state.send_buffer.has_data_to_send() {
+            // Still data to send, wait.
+            state.write_waker = Some(cx.waker().clone());
+            Poll::Pending
+        } else {
+            // Buffer is empty, shutdown is complete.
+            Poll::Ready(Ok(()))
+        }
     }
 }
 
 impl ConnectionState {
+    /// Turns data from the stream buffer into PUSH packets.
+    /// 将流缓冲区的数据打包成PUSH包。
+    fn packetize_stream_data(&mut self) {
+        while let Some(chunk) = self.send_buffer.create_chunk(MAX_PAYLOAD_SIZE) {
+            let push_header = crate::packet::header::ShortHeader {
+                command: crate::packet::command::Command::Push,
+                connection_id: self.connection_id,
+                recv_window_size: self.recv_buffer.window_size(),
+                timestamp: self.start_time.elapsed().as_millis() as u32,
+                sequence_number: self.sequence_number_counter,
+                recv_next_sequence: self.recv_buffer.next_sequence(),
+            };
+            self.sequence_number_counter += 1;
+
+            let frame = Frame::Push {
+                header: push_header,
+                payload: chunk,
+            };
+
+            self.send_buffer.queue_frame(frame);
+        }
+    }
+
     /// Handles a single incoming frame based on the current state.
     /// 根据当前状态处理单个传入的帧。
-    async fn handle_frame(&mut self, frame: Frame) {
+    async fn handle_frame(&mut self, frame: Frame) -> Result<()> {
         println!(
             "Connection to {} in state {:?} received frame: {:?}",
             self.remote_addr, self.state, frame
@@ -311,7 +400,7 @@ impl ConnectionState {
                         header: syn_ack_header,
                     };
 
-                    self.send_frames(vec![syn_ack_frame]).await;
+                    self.send_frames(vec![syn_ack_frame]).await?;
                 }
             }
             State::Established => match frame {
@@ -324,20 +413,29 @@ impl ConnectionState {
                         payload.len()
                     );
                     self.recv_buffer.receive(header.sequence_number, payload);
+                    if self.recv_buffer.reassemble() {
+                        // New data is available for reading, wake up the reader task.
+                        if let Some(waker) = self.read_waker.take() {
+                            waker.wake();
+                        }
+                    }
 
-                    // Immediate ACK logic
-                    // 如果我们有需要确认的范围，就立即发送ACK
-                    if !self.recv_buffer.get_sack_ranges().is_empty() {
-                         self.send_ack().await;
+                    // Immediate ACK logic with threshold.
+                    // 带阈值的即时ACK逻辑。
+                    self.ack_eliciting_packets_since_last_ack += 1;
+                    if self.ack_eliciting_packets_since_last_ack >= ACK_THRESHOLD
+                        && !self.recv_buffer.get_sack_ranges().is_empty()
+                    {
+                        self.send_ack().await?;
                     }
                 }
                 Frame::Ack { header, payload } => {
-                    self.handle_ack(header, payload).await;
+                    self.handle_ack(header, payload).await?;
                 }
                 Frame::Fin { header } => {
                     println!("Received FIN, entering FIN_WAIT and sending ACK.");
                     // Acknowledge their FIN.
-                    self.send_ack_for_fin(&header).await;
+                    self.send_ack_for_fin(&header).await?;
                     // Transition to FinWait, waiting for our side to close.
                     self.state = State::FinWait;
                 }
@@ -348,12 +446,12 @@ impl ConnectionState {
             },
             State::Closing => match frame {
                 Frame::Ack { header, payload } => {
-                    self.handle_ack(header, payload).await;
+                    self.handle_ack(header, payload).await?;
                     // The peer might also send a FIN in this state.
                 }
                 Frame::Fin { header } => {
                     println!("Received FIN while Closing, sending ACK.");
-                    self.send_ack_for_fin(&header).await;
+                    self.send_ack_for_fin(&header).await?;
                     // If our FIN is acknowledged and we have received and acknowledged their FIN,
                     // we can move to closed. This check happens implicitly as the ACK processing
                     // will clear the in-flight buffer. We might need a more explicit check.
@@ -370,7 +468,7 @@ impl ConnectionState {
                 // Application has called close(), now we send our FIN.
                 // We shouldn't be receiving data frames here, but handle ACKs.
                 Frame::Ack { header, payload } => {
-                    self.handle_ack(header, payload).await;
+                    self.handle_ack(header, payload).await?;
                 }
                 _ => {
                     println!("Ignoring unexpected frame in FinWait state: {:?}", frame);
@@ -380,6 +478,7 @@ impl ConnectionState {
                 // Should not receive frames in closed state.
             }
         }
+        Ok(())
     }
 
     /// Handles an incoming ACK frame, processing SACK ranges and fast retransmissions.
@@ -388,14 +487,14 @@ impl ConnectionState {
         &mut self,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
-    ) {
+    ) -> Result<()> {
         self.peer_recv_window = header.recv_window_size;
 
         let sack_ranges = decode_sack_ranges(payload);
         println!("Received ACK with SACK ranges: {:?}", sack_ranges);
 
         if sack_ranges.is_empty() {
-            return; // Nothing to do
+            return Ok(()); // Nothing to do
         }
 
         let mut acked_seq_numbers = BTreeSet::new();
@@ -409,6 +508,8 @@ impl ConnectionState {
 
         let now = Instant::now();
         let mut frames_to_fast_retx = Vec::new();
+
+        let previously_in_flight = self.send_buffer.in_flight.len();
 
         self.send_buffer.in_flight.retain(|packet| {
             if let Some(seq) = packet.frame.sequence_number() {
@@ -429,6 +530,14 @@ impl ConnectionState {
             true // Keep in in_flight
         });
 
+        // If packets were acknowledged, the send window may have opened up.
+        // Wake the writer task if it's waiting.
+        if self.send_buffer.in_flight.len() < previously_in_flight {
+            if let Some(waker) = self.write_waker.take() {
+                waker.wake();
+            }
+        }
+
         // After removing acknowledged packets, check for fast retransmissions
         for packet in self.send_buffer.iter_in_flight_mut() {
             if let Some(seq) = packet.frame.sequence_number() {
@@ -445,20 +554,28 @@ impl ConnectionState {
             }
         }
 
-        for frame in frames_to_fast_retx {
-            self.send_frames(vec![frame]).await;
+        if !frames_to_fast_retx.is_empty() {
+            self.send_frames(frames_to_fast_retx).await?;
         }
 
-        // If we are in Closing state and the FIN has been acknowledged, we can close.
+        // This is the primary way a connection moves to the Closed state.
+        // When we are in the 'Closing' state (we have sent a FIN), and the in-flight
+        // buffer becomes empty, it means our FIN packet has been acknowledged by the peer.
+        // At this point, our side of the connection is done.
+        //
+        // 这是连接进入Closed状态的主要途径。
+        // 当我们处于'Closing'状态（我们已经发送了一个FIN），并且在途缓冲区变空时，
+        // 这意味着我们的FIN包已经被对端确认。此时，我们这边的连接就完成了。
         if self.state == State::Closing && self.send_buffer.in_flight.is_empty() {
             println!("Our FIN has been acknowledged. Closing connection.");
             self.state = State::Closed;
         }
+        Ok(())
     }
 
-    /// Sends a FIN packet to initiate connection shutdown.
-    /// 发送一个FIN包来发起连接关闭。
-    async fn shutdown(&mut self) {
+    /// Initiates connection shutdown.
+    /// 发起连接关闭。
+    fn shutdown(&mut self) {
         if self.state == State::Established || self.state == State::FinWait {
             let mut should_send_fin = false;
             if self.state == State::Established {
@@ -495,16 +612,23 @@ impl ConnectionState {
 
     /// Sends an ACK in response to a FIN.
     /// 发送一个ACK来响应FIN。
-    async fn send_ack_for_fin(&mut self, fin_header: &crate::packet::header::ShortHeader) {
+    async fn send_ack_for_fin(
+        &mut self,
+        _fin_header: &crate::packet::header::ShortHeader,
+    ) -> Result<()> {
         let ack_frame = self.create_ack_frame();
-        self.send_frames(vec![ack_frame]).await;
+        self.send_frames(vec![ack_frame]).await?;
+        self.ack_eliciting_packets_since_last_ack = 0;
+        Ok(())
     }
 
     /// Creates and sends an ACK frame.
     /// 创建并发送一个ACK帧。
-    async fn send_ack(&mut self) {
+    async fn send_ack(&mut self) -> Result<()> {
         let ack_frame = self.create_ack_frame();
-        self.send_frames(vec![ack_frame]).await;
+        self.send_frames(vec![ack_frame]).await?;
+        self.ack_eliciting_packets_since_last_ack = 0;
+        Ok(())
     }
 
     /// Creates an ACK frame with the current SACK ranges.
@@ -544,7 +668,7 @@ impl ConnectionState {
 
     /// Checks for any in-flight packets that have timed out and retransmits them.
     /// 检查是否有任何在途数据包已超时并进行重传。
-    async fn check_for_retransmissions(&mut self) {
+    async fn check_for_retransmissions(&mut self) -> Result<()> {
         let rto = self.rto_estimator.rto();
         let now = Instant::now();
         let mut frames_to_resend = Vec::new();
@@ -563,26 +687,25 @@ impl ConnectionState {
             }
         }
 
-        for frame in frames_to_resend {
-            self.send_frames(vec![frame]).await;
+        if !frames_to_resend.is_empty() {
+            self.send_frames(frames_to_resend).await?;
         }
+        Ok(())
     }
 
     /// Sends a frame to the central sender task.
     /// 发送一个帧到中央发送任务。
-    async fn send_frames(&self, frames: Vec<Frame>) {
+    async fn send_frames(&self, frames: Vec<Frame>) -> Result<()> {
         if frames.is_empty() {
-            return;
+            return Ok(());
         }
         let cmd = SendCommand {
             remote_addr: self.remote_addr,
             frames,
         };
         if self.sender.send(cmd).await.is_err() {
-            eprintln!(
-                "Failed to send frame to {}: sender task is dead.",
-                self.remote_addr
-            );
+            return Err(Error::ChannelClosed);
         }
+        Ok(())
     }
 }

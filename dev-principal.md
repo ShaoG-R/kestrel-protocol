@@ -1,3 +1,60 @@
+# 项目现状分析报告 (Project Status Report) - 2024-08-01
+
+**注意: 本报告是基于对 `src` 目录代码的自动分析生成，旨在同步当前实现状态与设计文档，并指导后续开发。**
+
+## 1. 项目状态摘要 (Project Status Summary)
+
+当前项目已经实现了一个功能相当完备的可靠UDP协议核心。协议栈的底层设计，包括包结构、无锁并发模型、连接生命周期管理、基于SACK的可靠传输以及基于延迟的拥塞控制，都已基本完成。
+
+然而，项目在高层API抽象、错误处理和自动化测试方面存在明显缺失。因此，项目目前的核心协议功能已接近完成，但距离一个健壮、可用的库还有差距。
+
+## 2. 当前阶段评估 (Current Phase Assessment)
+
+根据 `dev-principal.md` 的阶段划分，项目当前的状态是：
+
+**已完成 Phase 1-5 的核心功能，即将进入 Phase 6。**
+
+*   **完成度高的部分**:
+    *   包的序列化/反序列化 (Phase 1)
+    *   基于MPSC的无锁并发模型 (Phase 1, 3.2)
+    *   连接建立与四次挥手关闭 (Phase 2)
+    *   动态RTO、超时重传、快速重传 (Phase 3)
+    *   基于SACK的高效确认机制 (Phase 4)
+    *   滑动窗口流量控制 (Phase 4)
+    *   基于延迟的拥塞控制 (Phase 5)
+
+*   **未完成或不完整的部分**:
+    *   面向用户的流式API (`AsyncRead`/`AsyncWrite`) (Phase 6)
+    *   单元测试和集成测试 (Phase 6)
+    *   基于 `thiserror` 的标准化错误处理 (Phase 5, `Other Requirements`)
+    *   0-RTT 连接 (Phase 2)
+    *   包聚合/粘连未被充分利用 (Phase 5)
+
+## 3. 存在的问题与和设计文档的偏差 (Identified Issues & Deviations)
+
+1.  **【高优先级】缺少流式API (Missing Stream API):** `Connection` 结构体没有实现 `tokio::io::AsyncRead` 和 `AsyncWrite` trait。当前的 `write` 方法是基于包的，并且没有暴露给用户的 `read` 方法。这是 Phase 6 最核心的未尽事宜。
+
+2.  **【高优先级】完全缺失测试 (No Tests):** 项目中没有任何单元测试或集成测试代码。这使得回归验证和功能迭代变得非常困难和危险。
+
+3.  **【高优先级】错误处理不完善 (Incomplete Error Handling):** `src/error.rs` 文件为空，代码中直接使用了 `std::io::Error`，并未按照设计文档要求使用 `thiserror` 定义详细的错误类型。
+
+4.  **【中优先级】未实现0-RTT (0-RTT Not Implemented):** `SYN` 帧的定义中不包含数据载荷，连接建立逻辑也不支持在第一个包中发送业务数据，与 Phase 2 的“快速连接建立”目标不完全相符。
+
+5.  **【中优先级】包聚合/粘连未充分利用 (Packet Coalescing Underutilized):** 虽然底层的 `sender_task` 支持在单个UDP包中发送多个Frame，但上层 `Connection` 的逻辑（如 `send_ack`）倾向于立即发送单个帧，而不是等待机会将ACK与其他数据（如PUSH）捆绑在一起发送。
+
+6.  **【低优先级】`FIN` 包头部类型与文档不符 (FIN Header Mismatch):**
+    *   **设计文档 (`dev-principal.md`):** 将 `FIN` 归类为**长头部**。
+    *   **当前实现 (`packet/command.rs`, `packet/frame.rs`):** 将 `FIN` 实现为**短头部**。
+    *   这是一个明显的实现与文档的矛盾，需要统一。
+
+7.  **【信息】分发键不同 (Different Demultiplexing Key):**
+    *   **设计文档 (3.2节):** 描述使用 `HashMap<u32, mpsc::Sender<Packet>>`，意味着使用 `connection_id` 作为分发键。
+    *   **当前实现 (`socket.rs`):** 使用 `DashMap<SocketAddr, mpsc::Sender<Frame>>`，意味着使用远端网络地址 `SocketAddr` 作为分发键。
+    *   这个改动是合理的，尤其对于服务器端来说，在连接建立之前必须依赖`SocketAddr`。但这是一个值得记录的架构决策差异。
+
+---
+<br/>
+
 # 可靠UDP传输协议AI开发指南 (AI Development Guide for Reliable UDP Protocol)
 
 ## 1. 项目概述 (Project Overview)

@@ -2,6 +2,7 @@
 //! Contains the top-level Socket interface for the protocol.
 
 use crate::connection::{self, Connection, SendCommand};
+use crate::error::Result;
 use crate::packet::frame::Frame;
 use dashmap::DashMap;
 use std::net::SocketAddr;
@@ -32,7 +33,7 @@ impl ReliableUdpSocket {
     /// Creates a new `ReliableUdpSocket` and binds it to the given address.
     ///
     /// 创建一个新的 `ReliableUdpSocket` 并将其绑定到给定的地址。
-    pub async fn new(addr: SocketAddr) -> std::io::Result<Self> {
+    pub async fn new(addr: SocketAddr) -> Result<Self> {
         let socket = UdpSocket::bind(addr).await?;
         let socket = Arc::new(socket);
         let connections = Arc::new(DashMap::new());
@@ -63,6 +64,7 @@ impl ReliableUdpSocket {
             let (len, remote_addr) = match self.socket.recv_from(&mut recv_buf).await {
                 Ok(val) => val,
                 Err(e) => {
+                    // Log the error but continue running. A single recv error is not fatal.
                     eprintln!("Failed to receive from socket: {}", e);
                     continue;
                 }
@@ -72,6 +74,7 @@ impl ReliableUdpSocket {
             let frame = match Frame::decode(data) {
                 Some(frame) => frame,
                 None => {
+                    // Log and drop invalid packets.
                     eprintln!("Received an invalid packet from {}", remote_addr);
                     continue;
                 }
@@ -103,7 +106,9 @@ impl ReliableUdpSocket {
                 // Spawn a new task for the connection to run in.
                 // 为连接生成一个新任务来运行。
                 tokio::spawn(async move {
-                    connection.run().await;
+                    if let Err(e) = connection.run().await {
+                        eprintln!("Connection to {} closed with error: {}", remote_addr, e);
+                    };
                 });
 
                 // Store the sender so we can route future packets to it.
@@ -146,6 +151,7 @@ async fn sender_task(socket: Arc<UdpSocket>, mut rx: mpsc::Receiver<SendCommand>
         }
 
         if let Err(e) = socket.send_to(&send_buf, cmd.remote_addr).await {
+            // A single send error is not fatal to the whole socket.
             eprintln!(
                 "Failed to send packet to {}: {}",
                 cmd.remote_addr, e

@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 const DEFAULT_RECV_BUFFER_CAPACITY: usize = 256; // In packets
+const DEFAULT_SEND_BUFFER_CAPACITY_BYTES: usize = 1024 * 1024; // 1 MB
 
 /// A packet that has been sent but not yet acknowledged (in-flight).
 /// 一个已发送但尚未确认的包（在途）。
@@ -27,7 +28,7 @@ pub struct InFlightPacket {
 
 /// Manages outgoing data, tracking which packets have been sent and acknowledged.
 /// 管理待发送的数据，追踪哪些包已被发送和确认。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SendBuffer {
     /// A queue of frames that haven't been sent yet.
     /// 尚未发送的帧队列。
@@ -37,11 +38,49 @@ pub struct SendBuffer {
     /// 在途的包队列（已发送但未被确认）。
     /// 此队列按序列号排序。
     pub(crate) in_flight: VecDeque<InFlightPacket>,
+    /// A buffer for stream data waiting to be packetized.
+    /// 等待打包的流数据缓冲区。
+    stream_buffer: VecDeque<u8>,
+    /// The capacity of the stream buffer in bytes.
+    /// 流缓冲区的容量（以字节为单位）。
+    stream_buffer_capacity: usize,
+}
+
+impl Default for SendBuffer {
+    fn default() -> Self {
+        Self {
+            to_send: VecDeque::new(),
+            in_flight: VecDeque::new(),
+            stream_buffer: VecDeque::new(),
+            stream_buffer_capacity: DEFAULT_SEND_BUFFER_CAPACITY_BYTES,
+        }
+    }
 }
 
 impl SendBuffer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Writes data to the stream buffer. Returns the number of bytes written.
+    /// 将数据写入流缓冲区。返回写入的字节数。
+    pub fn write_to_stream(&mut self, buf: &[u8]) -> usize {
+        let space_available = self
+            .stream_buffer_capacity
+            .saturating_sub(self.stream_buffer.len());
+        let bytes_to_write = std::cmp::min(buf.len(), space_available);
+        self.stream_buffer.extend(&buf[..bytes_to_write]);
+        bytes_to_write
+    }
+
+    /// Creates a data chunk of up to `max_size` from the stream buffer.
+    /// 从流缓冲区创建一个最大为 `max_size` 的数据块。
+    pub fn create_chunk(&mut self, max_size: usize) -> Option<Bytes> {
+        let chunk_size = std::cmp::min(self.stream_buffer.len(), max_size);
+        if chunk_size == 0 {
+            return None;
+        }
+        Some(self.stream_buffer.drain(..chunk_size).collect())
     }
 
     /// Queues a frame to be sent for the first time.
@@ -76,10 +115,10 @@ impl SendBuffer {
         self.in_flight.iter_mut()
     }
 
-    /// Checks if there are any frames queued to be sent.
-    /// 检查是否有任何帧在排队等待发送。
-    pub fn is_empty(&self) -> bool {
-        self.to_send.is_empty()
+    /// Checks if there are any frames queued to be sent or stream data to be packetized.
+    /// 检查是否有任何帧在排队等待发送或有流数据待打包。
+    pub fn has_data_to_send(&self) -> bool {
+        !self.to_send.is_empty() || !self.stream_buffer.is_empty()
     }
 }
 
@@ -98,6 +137,9 @@ pub struct ReceiveBuffer {
     /// The total capacity of the buffer in packets.
     /// 缓冲区的总容量（以包为单位）。
     capacity: usize,
+    /// A buffer for reassembled data, ready to be read by the application.
+    /// 重组后的数据缓冲区，准备好被应用程序读取。
+    stream_buffer: VecDeque<u8>,
 }
 
 impl Default for ReceiveBuffer {
@@ -106,6 +148,7 @@ impl Default for ReceiveBuffer {
             next_sequence: 0,
             received: BTreeMap::new(),
             capacity: DEFAULT_RECV_BUFFER_CAPACITY,
+            stream_buffer: VecDeque::new(),
         }
     }
 }
@@ -139,35 +182,44 @@ impl ReceiveBuffer {
         }
     }
 
-    /// Reads a contiguous block of data starting from the `next_sequence`.
-    /// Returns the combined payload and advances the `next_sequence`.
-    ///
-    /// 读取从 `next_sequence` 开始的连续数据块。
-    /// 返回组合的载荷并推进 `next_sequence`。
-    pub fn read(&mut self) -> Option<Bytes> {
-        // This is not yet a complete implementation for a stream-like API,
-        // but it correctly assembles contiguous packets.
-        let mut contiguous_payloads = Vec::new();
-        let mut last_seq = self.next_sequence;
+    /// Reads a contiguous block of data from the internal stream buffer.
+    /// 从内部流缓冲区中读取一个连续的数据块。
+    pub fn read_from_stream(&mut self, buf: &mut [u8]) -> usize {
+        let bytes_to_copy = std::cmp::min(buf.len(), self.stream_buffer.len());
+        for (i, byte) in self.stream_buffer.drain(..bytes_to_copy).enumerate() {
+            buf[i] = byte;
+        }
+        bytes_to_copy
+    }
 
-        while let Some((seq, _payload)) = self.received.first_key_value() {
-            if *seq == last_seq {
-                contiguous_payloads.push(self.received.pop_first().unwrap().1);
-                last_seq += 1;
-            } else {
-                break;
+    /// Tries to reassemble contiguous packets into the stream buffer.
+    /// Returns true if any new data was added to the stream.
+    ///
+    /// 尝试将连续的数据包重组到流缓冲区中。
+    /// 如果有任何新数据被添加到流中，则返回true。
+    pub fn reassemble(&mut self) -> bool {
+        let mut made_progress = false;
+        while let Some(payload) = self.try_pop_next_contiguous() {
+            self.stream_buffer.extend(payload.iter());
+            made_progress = true;
+        }
+        made_progress
+    }
+
+    /// Checks for the next contiguous packet, removes it from the buffer,
+    /// advances the sequence number, and returns its payload.
+    ///
+    /// 检查下一个连续的数据包，将其从缓冲区中移除，
+    /// 推进序列号，并返回其载荷。
+    fn try_pop_next_contiguous(&mut self) -> Option<Bytes> {
+        if let Some((seq, _payload)) = self.received.first_key_value() {
+            if *seq == self.next_sequence {
+                self.next_sequence += 1;
+                // Use remove_entry to get ownership of the key and value
+                return Some(self.received.pop_first().unwrap().1);
             }
         }
-
-        self.next_sequence = last_seq;
-
-        if contiguous_payloads.is_empty() {
-            None
-        } else {
-            // This is a simplification. For a real stream, we'd handle
-            // partial reads and buffer concatenation more carefully.
-            Some(Bytes::from(contiguous_payloads.concat()))
-        }
+        None
     }
 
     /// Generates a list of SACK ranges based on the currently received packets.

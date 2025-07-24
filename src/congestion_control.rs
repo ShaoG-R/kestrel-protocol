@@ -9,7 +9,7 @@
 //! 该算法融合了传统的TCP拥塞控制（慢启动、拥塞避免）和受TCP Vegas启发的
 //! 基于延迟的方法。它旨在在高抖动和高丢包率的网络中保持稳定。
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const INITIAL_CWND_PACKETS: u32 = 32;
 const MIN_CWND_PACKETS: u32 = 4;
