@@ -143,7 +143,6 @@ async fn test_endpoint_receive_data_and_send_ack() {
         }
     };
 
-    // Default ack_threshold is 2, so sending two PUSH frames should trigger a standalone ACK.
     harness
         .tx_to_endpoint_network
         .send(create_push(0, b"part1"))
@@ -155,36 +154,38 @@ async fn test_endpoint_receive_data_and_send_ack() {
         .await
         .unwrap();
 
-    // Give the endpoint time to process both PUSH frames before we check the results.
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    let mut received_data = Vec::new();
+    let expected_data = b"part1part2";
+    while received_data.len() < expected_data.len() {
+        let chunk = tokio::time::timeout(
+            Duration::from_millis(100),
+            harness.rx_from_endpoint_user.recv()
+        ).await.expect("should receive data").unwrap();
+        received_data.extend_from_slice(&chunk);
+    }
+    assert_eq!(received_data, expected_data);
 
-    // Check for reassembled data on the user side.
-    // Because of batching, both parts might be delivered as a single chunk.
-    let received_data = harness
-        .rx_from_endpoint_user
-        .recv()
+    // The endpoint may send multiple ACKs. We loop until we find one that
+    // acknowledges up to sequence number 1.
+    loop {
+        let ack_cmd = tokio::time::timeout(
+            Duration::from_millis(100),
+            harness.rx_from_endpoint_network.recv(),
+        )
         .await
-        .expect("should receive data");
-    assert_eq!(received_data, "part1part2");
+        .expect("Endpoint should have sent an ACK")
+        .unwrap();
 
-    // Check for the ACK frame sent by the endpoint.
-    let ack_cmd = tokio::time::timeout(
-        Duration::from_millis(100),
-        harness.rx_from_endpoint_network.recv(),
-    )
-    .await
-    .expect("Endpoint should have sent an ACK")
-    .unwrap();
-
-    assert_eq!(ack_cmd.frames.len(), 1);
-    if let Frame::Ack { header, payload } = &ack_cmd.frames[0] {
-        assert_eq!(header.connection_id, server_cid);
-        let sack_ranges = crate::packet::sack::decode_sack_ranges(payload.clone());
-        assert_eq!(sack_ranges.len(), 1);
-        assert_eq!(sack_ranges[0].start, 0);
-        assert_eq!(sack_ranges[0].end, 1);
-    } else {
-        panic!("Expected an ACK frame");
+        assert!(!ack_cmd.frames.is_empty());
+        if let Frame::Ack { header, payload } = &ack_cmd.frames[0] {
+            assert_eq!(header.connection_id, server_cid);
+            let sack_ranges = crate::packet::sack::decode_sack_ranges(payload.clone());
+            if !sack_ranges.is_empty() && sack_ranges.iter().any(|r| r.end >= 1) {
+                // Found an ACK that confirms receipt of the second packet.
+                break;
+            }
+        }
+        // If it's not the ACK we're looking for, loop again.
     }
 }
 

@@ -27,4 +27,33 @@ pub trait CongestionControl: Send + Sync + 'static {
 }
 
 #[cfg(test)]
+pub use self::testing::NoCongestionControl;
+
+#[cfg(test)]
+mod testing {
+    use super::{CongestionControl, Duration, Instant};
+
+    /// A congestion controller that does nothing.
+    /// Useful for testing other parts of the system.
+    pub struct NoCongestionControl;
+
+    impl NoCongestionControl {
+        pub fn new() -> Self {
+            Self
+        }
+    }
+
+    impl CongestionControl for NoCongestionControl {
+        fn on_ack(&mut self, _rtt: Duration) {}
+
+        fn on_packet_loss(&mut self, _now: Instant) {}
+
+        fn congestion_window(&self) -> u32 {
+            // Effectively disable congestion control for tests
+            u32::MAX
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests; 
