@@ -83,9 +83,16 @@ pub enum State {
     /// The connection is established and ready for data transfer.
     /// 连接已建立，可以传输数据。
     Established,
-    /// The connection is closing.
-    /// 正在关闭连接。
+    /// We have sent a FIN and are waiting for it to be acknowledged.
+    /// The peer may still be sending data.
+    /// 我们发送了一个FIN，正在等待它的确认。
+    /// 对端可能仍在发送数据。
     Closing,
+    /// We have received a FIN from the peer and acknowledged it.
+    /// We are waiting for the application to close the connection from our side.
+    /// 我们收到了来自对端的FIN并已确认。
+    /// 我们正在等待应用程序从我们这边关闭连接。
+    FinWait,
     /// The connection is closed.
     /// 连接已关闭。
     Closed,
@@ -162,6 +169,21 @@ impl Connection {
         (connection, in_tx)
     }
 
+    /// Initiates a graceful shutdown of the connection.
+    ///
+    /// This sends a FIN packet and transitions the connection to the `Closing` state.
+    /// The connection will be fully closed once the FIN is acknowledged and the
+    /// peer has also closed its side.
+    ///
+    /// 发起连接的优雅关闭。
+    ///
+    /// 这会发送一个FIN包，并将连接转换到`Closing`状态。
+    /// 一旦FIN被确认并且对端也关闭了它的连接，连接将被完全关闭。
+    pub async fn close(&mut self) -> std::io::Result<()> {
+        self.state.shutdown().await;
+        Ok(())
+    }
+
     /// Writes a slice of bytes to the connection.
     ///
     /// This will segment the data into one or more PUSH frames and queue them for sending.
@@ -233,6 +255,10 @@ impl Connection {
                     break;
                 }
             }
+
+            if state.state == State::Closed {
+                break;
+            }
         }
 
         println!("Connection to {} closed.", state.remote_addr);
@@ -272,113 +298,189 @@ impl ConnectionState {
                     self.send_frame(syn_ack_frame).await;
                 }
             }
-            State::Established => {
-                match frame {
-                    Frame::Push { header, payload } => {
-                        // Pass the data to the receive buffer for reordering and delivery.
-                        // 将数据传递给接收缓冲区进行重排和交付。
-                        println!(
-                            "Received PUSH with seq={} and {} bytes of payload.",
-                            header.sequence_number,
-                            payload.len()
-                        );
-                        self.recv_buffer.receive(header.sequence_number, payload);
-                    }
-                    Frame::Ack { header, payload } => {
-                        self.peer_recv_window = header.recv_window_size;
-
-                        let sack_ranges = decode_sack_ranges(payload);
-                        println!("Received ACK with SACK ranges: {:?}", sack_ranges);
-
-                        let mut acked_seq_numbers = BTreeSet::new();
-                        for range in sack_ranges {
-                            for seq in range.start..=range.end {
-                                acked_seq_numbers.insert(seq);
-                            }
-                        }
-
-                        if acked_seq_numbers.is_empty() {
-                            return; // Nothing to do
-                        }
-
-                        let highest_acked_seq = *acked_seq_numbers.iter().next_back().unwrap();
-
-                        let now = Instant::now();
-                        let mut frames_to_fast_retx = Vec::new();
-
-                        self.send_buffer.in_flight.retain(|packet| {
-                            if let Some(seq) = packet.frame.sequence_number() {
-                                if acked_seq_numbers.contains(&seq) {
-                                    // This packet is acknowledged. Update RTO and remove it.
-                                    let rtt = now.duration_since(packet.last_sent_at);
-                                    self.rto_estimator.update(rtt);
-                                    println!(
-                                        "Packet with seq={} acked. RTT: {:?}, New RTO: {:?}",
-                                        seq,
-                                        rtt,
-                                        self.rto_estimator.rto()
-                                    );
-                                    return false; // Remove from in_flight
-                                }
-                            }
-                            true // Keep in in_flight
-                        });
-
-                        // After removing acknowledged packets, check for fast retransmissions
-                        for packet in self.send_buffer.iter_in_flight_mut() {
-                            if let Some(seq) = packet.frame.sequence_number() {
-                                if seq < highest_acked_seq {
-                                    packet.fast_retx_count += 1;
-                                    if packet.fast_retx_count >= FAST_RETX_THRESHOLD {
-                                        println!("Fast retransmitting packet with seq={}", seq);
-                                        frames_to_fast_retx.push(packet.frame.clone());
-                                        packet.last_sent_at = now;
-                                        packet.fast_retx_count = 0; // Reset count
-                                    }
-                                }
-                            }
-                        }
-
-                        for frame in frames_to_fast_retx {
-                            self.send_frame(frame).await;
-                        }
-                    }
-                    Frame::Fin { header } => {
-                        println!("Received FIN, closing connection and sending ACK.");
-                        self.state = State::Closing;
-                        // Respond with an ACK to their FIN. This is part of the 4-way handshake.
-                        let mut ack_payload = bytes::BytesMut::new();
-                        let sack_ranges = self.recv_buffer.get_sack_ranges();
-                        encode_sack_ranges(&sack_ranges, &mut ack_payload);
-
-                        let ack_header = crate::packet::header::ShortHeader {
-                            command: crate::packet::command::Command::Ack,
-                            connection_id: header.connection_id,
-                            recv_window_size: self.recv_buffer.window_size(),
-                            timestamp: 0,        // TODO
-                            sequence_number: self.sequence_number_counter,
-                            recv_next_sequence: self.recv_buffer.next_sequence(),
-                        };
-                        self.sequence_number_counter += 1;
-                        let ack_frame = Frame::Ack {
-                            header: ack_header,
-                            payload: ack_payload.freeze(),
-                        };
-                        self.send_frame(ack_frame).await;
-                    }
-                    _ => {
-                        // Ignore other unexpected packets in this state.
-                        println!("Ignoring unexpected frame in Established state: {:?}", frame);
-                    }
+            State::Established => match frame {
+                Frame::Push { header, payload } => {
+                    // Pass the data to the receive buffer for reordering and delivery.
+                    // 将数据传递给接收缓冲区进行重排和交付。
+                    println!(
+                        "Received PUSH with seq={} and {} bytes of payload.",
+                        header.sequence_number,
+                        payload.len()
+                    );
+                    self.recv_buffer.receive(header.sequence_number, payload);
                 }
-            }
-            State::Closing => {
-                // TODO: Handle FINs, ACKs during closing phase.
-            }
+                Frame::Ack { header, payload } => {
+                    self.handle_ack(header, payload).await;
+                }
+                Frame::Fin { header } => {
+                    println!("Received FIN, entering FIN_WAIT and sending ACK.");
+                    // Acknowledge their FIN.
+                    self.send_ack_for_fin(&header).await;
+                    // Transition to FinWait, waiting for our side to close.
+                    self.state = State::FinWait;
+                }
+                _ => {
+                    // Ignore other unexpected packets in this state.
+                    println!("Ignoring unexpected frame in Established state: {:?}", frame);
+                }
+            },
+            State::Closing => match frame {
+                Frame::Ack { header, payload } => {
+                    self.handle_ack(header, payload).await;
+                    // The peer might also send a FIN in this state.
+                }
+                Frame::Fin { header } => {
+                    println!("Received FIN while Closing, sending ACK.");
+                    self.send_ack_for_fin(&header).await;
+                    // If our FIN is acknowledged and we have received and acknowledged their FIN,
+                    // we can move to closed. This check happens implicitly as the ACK processing
+                    // will clear the in-flight buffer. We might need a more explicit check.
+                    // For now, let's assume if we get a FIN here, we can close.
+                    // TODO: A more robust check is needed. We should only close if our FIN is acked.
+                    self.state = State::Closed;
+                }
+                _ => {
+                    println!("Ignoring unexpected frame in Closing state: {:?}", frame);
+                }
+            },
+            State::FinWait => match frame {
+                // Application has called close(), now we send our FIN.
+                // We shouldn't be receiving data frames here, but handle ACKs.
+                Frame::Ack { header, payload } => {
+                    self.handle_ack(header, payload).await;
+                }
+                _ => {
+                    println!("Ignoring unexpected frame in FinWait state: {:?}", frame);
+                }
+            },
             State::Closed => {
                 // Should not receive frames in closed state.
             }
         }
+    }
+
+    /// Handles an incoming ACK frame, processing SACK ranges and fast retransmissions.
+    /// 处理传入的ACK帧，处理SACK范围和快速重传。
+    async fn handle_ack(
+        &mut self,
+        header: crate::packet::header::ShortHeader,
+        payload: bytes::Bytes,
+    ) {
+        self.peer_recv_window = header.recv_window_size;
+
+        let sack_ranges = decode_sack_ranges(payload);
+        println!("Received ACK with SACK ranges: {:?}", sack_ranges);
+
+        if sack_ranges.is_empty() {
+            return; // Nothing to do
+        }
+
+        let mut acked_seq_numbers = BTreeSet::new();
+        for range in sack_ranges {
+            for seq in range.start..=range.end {
+                acked_seq_numbers.insert(seq);
+            }
+        }
+
+        let highest_acked_seq = *acked_seq_numbers.iter().next_back().unwrap();
+
+        let now = Instant::now();
+        let mut frames_to_fast_retx = Vec::new();
+
+        self.send_buffer.in_flight.retain(|packet| {
+            if let Some(seq) = packet.frame.sequence_number() {
+                if acked_seq_numbers.contains(&seq) {
+                    // This packet is acknowledged. Update RTO and remove it.
+                    let rtt = now.duration_since(packet.last_sent_at);
+                    self.rto_estimator.update(rtt);
+                    println!(
+                        "Packet with seq={} acked. RTT: {:?}, New RTO: {:?}",
+                        seq,
+                        rtt,
+                        self.rto_estimator.rto()
+                    );
+                    return false; // Remove from in_flight
+                }
+            }
+            true // Keep in in_flight
+        });
+
+        // After removing acknowledged packets, check for fast retransmissions
+        for packet in self.send_buffer.iter_in_flight_mut() {
+            if let Some(seq) = packet.frame.sequence_number() {
+                if seq < highest_acked_seq {
+                    packet.fast_retx_count += 1;
+                    if packet.fast_retx_count >= FAST_RETX_THRESHOLD {
+                        println!("Fast retransmitting packet with seq={}", seq);
+                        frames_to_fast_retx.push(packet.frame.clone());
+                        packet.last_sent_at = now;
+                        packet.fast_retx_count = 0; // Reset count
+                    }
+                }
+            }
+        }
+
+        for frame in frames_to_fast_retx {
+            self.send_frame(frame).await;
+        }
+
+        // If we are in Closing state and the FIN has been acknowledged, we can close.
+        if self.state == State::Closing && self.send_buffer.in_flight.is_empty() {
+            println!("Our FIN has been acknowledged. Closing connection.");
+            self.state = State::Closed;
+        }
+    }
+
+    /// Sends a FIN packet to initiate connection shutdown.
+    /// 发送一个FIN包来发起连接关闭。
+    async fn shutdown(&mut self) {
+        if self.state == State::Established || self.state == State::FinWait {
+            if self.state == State::Established {
+                self.state = State::Closing;
+            } else {
+                // We were in FinWait, now both sides have sent FINs.
+                self.state = State::Closed;
+            }
+
+            let fin_header = crate::packet::header::ShortHeader {
+                command: crate::packet::command::Command::Fin,
+                connection_id: 0, // TODO: This should be the real connection ID
+                recv_window_size: self.recv_buffer.window_size(),
+                timestamp: 0, // TODO
+                sequence_number: self.sequence_number_counter,
+                recv_next_sequence: self.recv_buffer.next_sequence(),
+            };
+            self.sequence_number_counter += 1;
+
+            println!("Sending FIN with seq={}", fin_header.sequence_number);
+            let fin_frame = Frame::Fin { header: fin_header };
+
+            self.send_buffer.queue_frame(fin_frame);
+            // The main loop will pick it up and send it.
+        }
+    }
+
+    /// Sends an ACK in response to a FIN.
+    /// 发送一个ACK来响应FIN。
+    async fn send_ack_for_fin(&mut self, fin_header: &crate::packet::header::ShortHeader) {
+        let mut ack_payload = bytes::BytesMut::new();
+        let sack_ranges = self.recv_buffer.get_sack_ranges();
+        encode_sack_ranges(&sack_ranges, &mut ack_payload);
+
+        let ack_header = crate::packet::header::ShortHeader {
+            command: crate::packet::command::Command::Ack,
+            connection_id: fin_header.connection_id,
+            recv_window_size: self.recv_buffer.window_size(),
+            timestamp: 0, // TODO
+            sequence_number: self.sequence_number_counter,
+            recv_next_sequence: self.recv_buffer.next_sequence(),
+        };
+        self.sequence_number_counter += 1;
+        let ack_frame = Frame::Ack {
+            header: ack_header,
+            payload: ack_payload.freeze(),
+        };
+        self.send_frame(ack_frame).await;
     }
 
     /// Checks if we are allowed to send more packets based on flow and congestion control.

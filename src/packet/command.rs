@@ -14,8 +14,8 @@ pub enum Command {
     /// (Long Header) Connection acknowledgment.
     /// (长头) 连接确认。
     SynAck = 0x02,
-    /// (Long Header) Unilateral connection closing.
-    /// (长头) 单向关闭连接。
+    /// (Short Header) Unilateral connection closing.
+    /// (短头) 单向关闭连接。
     Fin = 0x03,
     /// (Short Header) Data packet.
     /// (短头) 数据包。
@@ -46,7 +46,7 @@ impl Command {
     /// 检查命令是否使用长头。
     /// Checks if the command uses a Long Header.
     pub fn is_long_header(&self) -> bool {
-        matches!(self, Command::Syn | Command::SynAck | Command::Fin)
+        matches!(self, Command::Syn | Command::SynAck)
     }
 }
 

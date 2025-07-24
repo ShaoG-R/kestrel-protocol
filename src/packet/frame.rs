@@ -32,7 +32,7 @@ pub enum Frame {
     SynAck { header: LongHeader },
     /// A FIN frame to close a connection.
     /// 用于关闭连接的 FIN 帧。
-    Fin { header: LongHeader },
+    Fin { header: ShortHeader },
 }
 
 impl Frame {
@@ -55,7 +55,6 @@ impl Frame {
             match header.command {
                 command::Command::Syn => Some(Frame::Syn { header }),
                 command::Command::SynAck => Some(Frame::SynAck { header }),
-                command::Command::Fin => Some(Frame::Fin { header }),
                 _ => None, // Unreachable, as is_long_header is checked
             }
         } else {
@@ -68,6 +67,7 @@ impl Frame {
                 command::Command::Push => Some(Frame::Push { header, payload }),
                 command::Command::Ack => Some(Frame::Ack { header, payload }),
                 command::Command::Ping => Some(Frame::Ping { header }),
+                command::Command::Fin => Some(Frame::Fin { header }),
                 _ => None, // 不应该是长头指令
             }
         }
