@@ -90,16 +90,6 @@ impl ReceiveBuffer {
         None
     }
 
-    /// Processes all contiguous packets at the start of the buffer, advancing
-    /// `next_sequence`. This is critical for acknowledging packets like FIN
-    /// that don't carry data and thus might not trigger a `reassemble` call.
-    pub fn process_next_contiguous(&mut self) {
-        while self.received.first_key_value().map_or(false, |(&s, _)| s == self.next_sequence) {
-            self.received.pop_first();
-            self.next_sequence += 1;
-        }
-    }
-
     /// Generates a vector of SACK ranges based on the currently buffered packets.
     ///
     /// 根据当前缓冲的数据包生成一个 SACK 范围的向量。

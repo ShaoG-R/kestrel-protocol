@@ -60,7 +60,7 @@ pub struct Endpoint {
     receiver: mpsc::Receiver<Frame>,
     sender: mpsc::Sender<SendCommand>,
     rx_from_stream: mpsc::Receiver<StreamCommand>,
-    tx_to_stream: mpsc::Sender<Bytes>,
+    tx_to_stream: Option<mpsc::Sender<Bytes>>,
 }
 
 impl Endpoint {
@@ -97,7 +97,7 @@ impl Endpoint {
             receiver,
             sender,
             rx_from_stream,
-            tx_to_stream,
+            tx_to_stream: Some(tx_to_stream),
         };
 
         (endpoint, tx_to_endpoint, rx_from_endpoint)
@@ -132,7 +132,7 @@ impl Endpoint {
             receiver,
             sender,
             rx_from_stream,
-            tx_to_stream,
+            tx_to_stream: Some(tx_to_stream),
         };
 
         (endpoint, tx_to_endpoint, rx_from_endpoint)
@@ -185,13 +185,17 @@ impl Endpoint {
 
             // 5. Reassemble data and send to the user stream
             if let Some(data) = self.reliability.reassemble() {
-                if self.tx_to_stream.send(data).await.is_err() {
-                    self.state = State::Closed; // Handle dropped
+                if let Some(tx) = self.tx_to_stream.as_ref() {
+                    if tx.send(data).await.is_err() {
+                        // User's stream handle has been dropped. We can no longer send.
+                        self.tx_to_stream = None;
+                        self.state = State::Closing;
+                    }
                 }
             }
 
             // 6. Packetize and send any pending user data, but only if established.
-            if self.state == State::Established {
+            if self.state == State::Established || self.state == State::FinWait {
                 self.packetize_and_send().await?;
             }
             
@@ -255,10 +259,14 @@ impl Endpoint {
                 self.reliability.receive_fin(header.sequence_number);
                 self.send_standalone_ack().await?;
                 // The other side has closed their writing end. We can no longer receive
-                // any more data. We signal this to the user stream by closing the channel.
-                // The Endpoint will shut down shortly after.
-                self.tx_to_stream.closed().await;
-                self.state = State::Closed;
+                // any more data. We signal this to the user stream by dropping the sender.
+                // This will cause `stream.read()` to return `Ok(0)`.
+                self.tx_to_stream.take();
+
+                // Transition to FinWait to allow sending any remaining data before closing.
+                if self.state == State::Established {
+                    self.state = State::FinWait;
+                }
             }
             _ => {}
         }
@@ -304,7 +312,9 @@ impl Endpoint {
             info!(cid = self.local_cid, "All data ACKed, closing now.");
             self.state = State::Closed;
         }
-        self.state == State::Closed
+        // Endpoint should terminate if the connection is fully closed, or if it's
+        // in FinWait and the user stream has also been dropped.
+        self.state == State::Closed || (self.state == State::FinWait && self.tx_to_stream.is_none())
     }
 
     fn shutdown(&mut self) {

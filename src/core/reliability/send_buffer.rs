@@ -115,41 +115,42 @@ impl SendBuffer {
         now: Instant,
     ) -> Vec<Frame> {
         let mut acked_seq_numbers = BTreeSet::new();
-
-        // 1. Process SACK ranges for out-of-order packets.
         for range in sack_ranges {
             for seq in range.start..=range.end {
                 acked_seq_numbers.insert(seq);
             }
         }
 
-        // 2. Process cumulative ACK for in-order packets.
-        // All packets with sequence numbers less than `recv_next_seq` are considered acknowledged.
-        // We only need to check up to the highest acked number we've seen to avoid redundant work.
-        let highest_acked_in_set = acked_seq_numbers.iter().next_back().copied().unwrap_or(0);
-        let highest_overall_acked = std::cmp::max(recv_next_seq, highest_acked_in_set);
+        // Determine the highest sequence number acknowledged in this specific ACK.
+        let highest_acked_in_this_ack = acked_seq_numbers.iter().max().copied().unwrap_or(0);
 
-        // Remove acknowledged packets from the in-flight queue.
-        self.in_flight.retain(|p| {
-            let seq = p.frame.sequence_number().unwrap_or(u32::MAX);
-            // Keep if sequence number is >= cumulative ack number AND not in SACK ranges.
-            seq >= recv_next_seq && !acked_seq_numbers.contains(&seq)
-        });
-
-        // Identify frames for fast retransmission.
-        let mut frames_to_fast_retx = Vec::new();
+        // Increment fast retransmit counter for unacknowledged packets that
+        // are "lower" than the highest acknowledged packet in this ACK.
         for packet in self.in_flight.iter_mut() {
             if let Some(seq) = packet.frame.sequence_number() {
-                if seq < highest_overall_acked {
+                if seq < highest_acked_in_this_ack && !acked_seq_numbers.contains(&seq) {
                     packet.fast_retx_count += 1;
-                    if packet.fast_retx_count >= fast_retx_threshold {
-                        frames_to_fast_retx.push(packet.frame.clone());
-                        packet.last_sent_at = now;
-                        packet.fast_retx_count = 0; // Reset after retransmission
-                    }
                 }
             }
         }
+
+        // Now, remove acknowledged packets from the in-flight queue.
+        self.in_flight.retain(|p| {
+            let seq = p.frame.sequence_number().unwrap_or(u32::MAX);
+            let acked = seq < recv_next_seq || acked_seq_numbers.contains(&seq);
+            !acked
+        });
+
+        // Check for any packets that have now crossed the retransmission threshold.
+        let mut frames_to_fast_retx = Vec::new();
+        for packet in self.in_flight.iter_mut() {
+            if packet.fast_retx_count >= fast_retx_threshold {
+                frames_to_fast_retx.push(packet.frame.clone());
+                packet.last_sent_at = now;
+                packet.fast_retx_count = 0; // Reset count after retransmitting.
+            }
+        }
+
         frames_to_fast_retx
     }
 
@@ -214,27 +215,28 @@ mod tests {
     async fn test_fast_retransmission() {
         let mut buffer = SendBuffer::new();
         let now = Instant::now();
+        let threshold = 2; // Let's use 2 for this test.
 
         for i in 0..=3 {
             buffer.add_in_flight(create_push_frame(i), now);
         }
 
-        // ACK for 0 removes it. recv_next_seq becomes 1.
-        buffer.handle_ack(1, &[SackRange { start: 0, end: 0 }], 2, now);
-        assert_eq!(buffer.in_flight_count(), 3);
+        // ACK for 0. Nothing happens to packet 1's count yet.
+        buffer.handle_ack(1, &[SackRange { start: 0, end: 0 }], threshold, now);
+        assert_eq!(buffer.in_flight.front().unwrap().fast_retx_count, 0);
 
         // Receive ACK for packet 2, implies 1 is lost. fast_retx_count for packet 1 becomes 1.
-        // recv_next_seq is still 1, but we get a SACK for 2.
-        let retx1 = buffer.handle_ack(1, &[SackRange { start: 2, end: 2 }], 2, now);
+        let retx1 = buffer.handle_ack(1, &[SackRange { start: 2, end: 2 }], threshold, now);
         assert!(retx1.is_empty());
         assert_eq!(buffer.in_flight.front().unwrap().fast_retx_count, 1);
 
         // Receive ACK for packet 3. fast_retx_count for packet 1 becomes 2. Threshold met.
-        // recv_next_seq is still 1, but we get a SACK for 2 and 3.
-        let retx2 = buffer.handle_ack(1, &[SackRange { start: 2, end: 3 }], 2, now);
-        assert_eq!(retx2.len(), 1);
+        let retx2 = buffer.handle_ack(1, &[SackRange { start: 3, end: 3 }], threshold, now);
+        assert_eq!(retx2.len(), 1, "Should retransmit packet 1");
         assert_eq!(retx2[0].sequence_number().unwrap(), 1);
-        assert_eq!(buffer.in_flight.front().unwrap().fast_retx_count, 0); // Reset
+
+        // After retransmission, the count should be reset, and the packet should still be in flight.
+        assert_eq!(buffer.in_flight.front().unwrap().fast_retx_count, 0);
     }
 
     #[tokio::test]

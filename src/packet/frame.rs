@@ -116,6 +116,7 @@ impl Frame {
             Frame::Push { header, .. } => Some(header.sequence_number),
             Frame::Ack { header, .. } => Some(header.sequence_number),
             Frame::Ping { header } => Some(header.sequence_number),
+            Frame::Fin { header } => Some(header.sequence_number),
             _ => None,
         }
     }
