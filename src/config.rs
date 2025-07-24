@@ -44,6 +44,12 @@ pub struct Config {
     /// congestion avoidance.
     /// 在基于延迟的拥塞避免期间，拥塞窗口减小的因子。
     pub cwnd_decrease_factor: f32,
+    /// The maximum time a connection can be idle before it's considered timed out.
+    /// An idle connection is one with no packets being sent or received.
+    ///
+    /// 连接在被视为空闲超时之前可以处于空闲状态的最长时间。
+    /// 空闲连接是指没有发送或接收数据包的连接。
+    pub idle_timeout: Duration,
 }
 
 impl Default for Config {
@@ -60,6 +66,7 @@ impl Default for Config {
             initial_ssthresh: u32::MAX,
             latency_threshold_ratio: 0.1, // 10%
             cwnd_decrease_factor: 0.9,    // 10% decrease
+            idle_timeout: Duration::from_secs(5),
         }
     }
 } 

@@ -55,6 +55,8 @@ pub struct Endpoint {
     /// The receive window of the peer, in packets.
     peer_recv_window: u32,
     config: Config,
+    /// Tracks when the last packet was received from the peer.
+    last_recv_time: Instant,
     /// Receives frames from the main socket task.
     receiver: mpsc::Receiver<Frame>,
     /// Sends commands to the central socket sender task.
@@ -90,6 +92,7 @@ impl Endpoint {
             congestion_control,
             peer_recv_window: 32, // Default initial value
             config,
+            last_recv_time: Instant::now(),
             receiver,
             sender,
             rx_from_stream,
@@ -124,6 +127,7 @@ impl Endpoint {
             congestion_control,
             peer_recv_window: 32, // Default initial value
             config,
+            last_recv_time: Instant::now(),
             receiver,
             sender,
             rx_from_stream,
@@ -136,6 +140,7 @@ impl Endpoint {
     /// Helper function to process a single incoming frame.
     async fn handle_frame(&mut self, frame: Frame) -> Result<()> {
         debug!(cid = self.local_cid, ?frame, "Handling frame");
+        self.last_recv_time = Instant::now();
         match frame {
             Frame::Syn { header, payload } => {
                 // This is the server-side logic for an incoming connection.
@@ -233,16 +238,18 @@ impl Endpoint {
             // Packetize any available stream data.
             self.packetize_and_send().await?;
 
-            let rto_deadline = self.reliability.next_rto_deadline();
-            let sleep_future = async {
-                if let Some(deadline) = rto_deadline {
-                    tokio::time::sleep_until(deadline.into()).await;
-                } else {
-                    // No packets in flight, so sleep indefinitely until another event.
-                    std::future::pending::<()>().await;
-                }
-            };
-            debug!(cid = self.local_cid, ?rto_deadline, "Waiting for event...");
+            let now = Instant::now();
+            let next_wakeup = self
+                .reliability
+                .next_rto_deadline()
+                .unwrap_or_else(|| now + self.config.idle_timeout);
+
+            let sleep_future = tokio::time::sleep_until(next_wakeup.into());
+            debug!(
+                cid = self.local_cid,
+                ?next_wakeup,
+                "Waiting for event..."
+            );
 
             tokio::select! {
                 Some(mut frame) = self.receiver.recv() => {
@@ -285,6 +292,12 @@ impl Endpoint {
                     }
                     if !frames_to_resend.is_empty() {
                         self.send_frames(frames_to_resend).await?;
+                    }
+
+                    // Check for idle timeout
+                    if now.saturating_duration_since(self.last_recv_time) > self.config.idle_timeout {
+                        info!(cid = self.local_cid, "Connection timed out due to inactivity.");
+                        self.state = State::Closed;
                     }
                 }
 
