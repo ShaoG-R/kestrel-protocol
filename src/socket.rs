@@ -2,7 +2,8 @@
 //! Contains the top-level Socket interface for the protocol.
 
 use crate::config::Config;
-use crate::connection::{self, Connection, SendCommand};
+use crate::core::endpoint::Endpoint;
+use crate::core::stream::Stream;
 use crate::error::Result;
 use crate::packet::frame::Frame;
 use dashmap::DashMap;
@@ -12,6 +13,18 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
+
+/// A command for the central socket sender task.
+/// 用于中央套接字发送任务的命令。
+#[derive(Debug)]
+pub struct SendCommand {
+    /// The destination address.
+    /// 目标地址。
+    pub remote_addr: SocketAddr,
+    /// The frames to send.
+    /// 要发送的帧。
+    pub frames: Vec<Frame>,
+}
 
 /// A reliable UDP socket.
 ///
@@ -32,11 +45,11 @@ pub struct ReliableUdpSocket {
     send_tx: mpsc::Sender<SendCommand>,
     /// A sender for newly accepted connections.
     /// 用于新接受连接的发送端。
-    accept_tx: mpsc::Sender<(Connection, SocketAddr)>,
+    accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
     /// A receiver for newly accepted connections. Wrapped in a Mutex to allow
     /// `accept` to be called on `&self`.
     /// 用于新接受连接的接收端。包裹在Mutex中以允许在`&self`上调用`accept`。
-    accept_rx: Mutex<mpsc::Receiver<(Connection, SocketAddr)>>,
+    accept_rx: Mutex<mpsc::Receiver<(Stream, SocketAddr)>>,
 }
 
 impl ReliableUdpSocket {
@@ -69,14 +82,14 @@ impl ReliableUdpSocket {
 
     /// Establishes a new reliable connection to the given remote address.
     ///
-    /// This will create a new `Connection` instance and spawn its event loop.
+    /// This will create a new `Stream` instance and spawn its event loop.
     /// The connection can be used immediately to write 0-RTT data.
     ///
     /// 建立一个到指定远程地址的新的可靠连接。
     ///
-    /// 这会创建一个新的 `Connection` 实例并生成其事件循环。
+    /// 这会创建一个新的 `Stream` 实例并生成其事件循环。
     /// 该连接可以立即用于写入0-RTT数据。
-    pub async fn connect(&self, remote_addr: SocketAddr) -> Result<Connection> {
+    pub async fn connect(&self, remote_addr: SocketAddr) -> Result<Stream> {
         self.connect_with_config(remote_addr, Config::default())
             .await
     }
@@ -88,36 +101,37 @@ impl ReliableUdpSocket {
         &self,
         remote_addr: SocketAddr,
         config: Config,
-    ) -> Result<Connection> {
+    ) -> Result<Stream> {
         let local_cid = rand::rng().next_u32();
         // For the client, the peer's CID is initially unknown, so we use 0.
         // The server will tell us its CID in the SYN-ACK.
         let peer_cid = 0;
 
-        let (tx_to_worker, rx_from_worker) = mpsc::channel(128);
+        let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
-        // Create a new connection in the `Connecting` state.
-        let (mut worker, handle) = connection::ConnectionWorker::new(
+        // Create a new Endpoint and get the stream handles
+        let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) = Endpoint::new(
+            config,
             remote_addr,
             local_cid,
             peer_cid,
-            connection::State::Connecting,
-            config,
+            rx_from_socket,
             self.send_tx.clone(),
-            rx_from_worker,
         );
 
         // Spawn a new task for the connection to run in.
         tokio::spawn(async move {
-            if let Err(e) = worker.run().await {
-                error!(addr = %remote_addr, "Connection closed with error: {}", e);
+            if let Err(e) = endpoint.run().await {
+                error!(addr = %remote_addr, "Endpoint closed with error: {}", e);
             }
         });
 
         // Insert the sender into the map so that incoming packets can be routed.
-        self.connections.insert(remote_addr, tx_to_worker);
+        self.connections.insert(remote_addr, tx_to_endpoint);
 
-        Ok(handle)
+        // Create and return the user-facing Stream handle
+        let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
+        Ok(stream)
     }
 
     /// Waits for a new incoming connection.
@@ -127,7 +141,7 @@ impl ReliableUdpSocket {
     /// 等待一个新的传入连接。
     ///
     /// 此方法将阻塞直到一个新连接建立。
-    pub async fn accept(&self) -> Result<(Connection, SocketAddr)> {
+    pub async fn accept(&self) -> Result<(Stream, SocketAddr)> {
         let mut guard = self.accept_rx.lock().await;
         guard
             .recv()
@@ -194,39 +208,40 @@ impl ReliableUdpSocket {
                 // The client's CID is in the source_cid field. The destination is our future CID.
                 let peer_cid = header.source_cid;
                 let local_cid = rand::rng().next_u32();
-                let (tx_to_worker, rx_from_worker) = mpsc::channel(128);
+                let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
-                let (mut worker, handle) = connection::ConnectionWorker::new(
-                    remote_addr,
-                    local_cid,
-                    peer_cid,
-                    connection::State::Connecting,
-                    config,
-                    self.send_tx.clone(),
-                    rx_from_worker,
-                );
+                let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
+                    Endpoint::new(
+                        config,
+                        remote_addr,
+                        local_cid,
+                        peer_cid,
+                        rx_from_socket,
+                        self.send_tx.clone(),
+                    );
 
                 // Spawn a new task for the connection to run in.
                 tokio::spawn(async move {
-                    if let Err(e) = worker.run().await {
-                        error!(addr = %remote_addr, "Connection closed with error: {}", e);
+                    if let Err(e) = endpoint.run().await {
+                        error!(addr = %remote_addr, "Endpoint closed with error: {}", e);
                     }
                 });
 
                 // Insert into map so future packets are routed.
                 self.connections
-                    .insert(remote_addr, tx_to_worker.clone());
+                    .insert(remote_addr, tx_to_endpoint.clone());
 
                 // Send the initial frame to the newly created connection.
-                if tx_to_worker.send(frame.clone()).await.is_err() {
+                if tx_to_endpoint.send(frame.clone()).await.is_err() {
                     // Worker died immediately.
                     self.connections.remove(&remote_addr);
                     warn!(addr = %remote_addr, "Failed to send initial SYN to newly created worker.");
                     continue;
                 }
 
-                // Send handle to the user calling accept().
-                if self.accept_tx.send((handle, remote_addr)).await.is_err() {
+                // Create the stream handle and send it to the user calling accept().
+                let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
+                if self.accept_tx.send((stream, remote_addr)).await.is_err() {
                     // No one is listening for new connections.
                     info!(
                         "No active listener on accept(), dropping new connection from {}",
