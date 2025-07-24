@@ -260,3 +260,190 @@ impl ReceiveBuffer {
         ranges
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::packet::command::Command;
+    use crate::packet::header::ShortHeader;
+    use bytes::Bytes;
+
+    fn create_dummy_push_frame(seq: u32) -> Frame {
+        Frame::Push {
+            header: ShortHeader {
+                command: Command::Push,
+                connection_id: 1,
+                recv_window_size: 100,
+                timestamp: 0,
+                sequence_number: seq,
+                recv_next_sequence: 0,
+            },
+            payload: Bytes::from_static(b"hello"),
+        }
+    }
+
+    #[test]
+    fn send_buffer_write_and_chunk() {
+        let mut send_buffer = SendBuffer::new();
+        let data1 = b"hello world";
+        let data2 = b"goodbye world";
+
+        // Write data
+        assert_eq!(send_buffer.write_to_stream(data1), data1.len());
+        assert_eq!(send_buffer.write_to_stream(data2), data2.len());
+        assert_eq!(
+            send_buffer.stream_buffer.len(),
+            data1.len() + data2.len()
+        );
+
+        // Create a chunk smaller than the total data
+        let chunk1 = send_buffer.create_chunk(10).unwrap();
+        assert_eq!(chunk1.as_ref(), &data1[..10]);
+        assert_eq!(
+            send_buffer.stream_buffer.len(),
+            data1.len() + data2.len() - 10
+        );
+
+        // Create another chunk
+        let chunk2 = send_buffer.create_chunk(100).unwrap(); // ask for more than is there
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&data1[10..]);
+        expected.extend_from_slice(data2);
+        assert_eq!(chunk2.as_ref(), expected.as_slice());
+
+        // Buffer should be empty now
+        assert!(send_buffer.stream_buffer.is_empty());
+        assert!(send_buffer.create_chunk(10).is_none());
+    }
+
+    #[test]
+    fn send_buffer_capacity() {
+        let mut send_buffer = SendBuffer::new();
+        send_buffer.stream_buffer_capacity = 20;
+
+        let data1 = &[0; 15];
+        let data2 = &[1; 10];
+
+        assert_eq!(send_buffer.write_to_stream(data1), 15);
+        // Only 5 bytes of space left
+        assert_eq!(send_buffer.write_to_stream(data2), 5);
+        // Cant write more
+        assert_eq!(send_buffer.write_to_stream(data2), 0);
+
+        assert_eq!(send_buffer.stream_buffer.len(), 20);
+    }
+
+    #[test]
+    fn send_buffer_has_data() {
+        let mut send_buffer = SendBuffer::new();
+        assert!(!send_buffer.has_data_to_send());
+
+        send_buffer.write_to_stream(b"some data");
+        assert!(send_buffer.has_data_to_send());
+        send_buffer.create_chunk(100);
+        assert!(!send_buffer.has_data_to_send());
+
+        send_buffer.queue_frame(create_dummy_push_frame(1));
+        assert!(send_buffer.has_data_to_send());
+        send_buffer.pop_next_frame();
+        assert!(!send_buffer.has_data_to_send());
+    }
+
+    #[test]
+    fn receive_buffer_in_order() {
+        let mut recv_buffer = ReceiveBuffer::new();
+        assert_eq!(recv_buffer.next_sequence(), 0);
+
+        let payload1 = Bytes::from_static(b"hello");
+        let payload2 = Bytes::from_static(b" world");
+
+        recv_buffer.receive(0, payload1.clone());
+        assert!(recv_buffer.reassemble());
+
+        let mut read_buf = [0u8; 20];
+        assert_eq!(recv_buffer.read_from_stream(&mut read_buf), payload1.len());
+        assert_eq!(&read_buf[..payload1.len()], payload1.as_ref());
+        assert_eq!(recv_buffer.next_sequence(), 1);
+
+        recv_buffer.receive(1, payload2.clone());
+        assert!(recv_buffer.reassemble());
+
+        assert_eq!(recv_buffer.read_from_stream(&mut read_buf), payload2.len());
+        assert_eq!(&read_buf[..payload2.len()], payload2.as_ref());
+        assert_eq!(recv_buffer.next_sequence(), 2);
+    }
+
+    #[test]
+    fn receive_buffer_out_of_order() {
+        let mut recv_buffer = ReceiveBuffer::new();
+        let payload1 = Bytes::from_static(b"hello");
+        let payload2 = Bytes::from_static(b" world");
+        let payload3 = Bytes::from_static(b"!");
+
+        // Receive 2, then 0, then 1
+        recv_buffer.receive(2, payload3.clone());
+        assert!(!recv_buffer.reassemble()); // Nothing to reassemble yet
+
+        recv_buffer.receive(0, payload1.clone());
+        assert!(recv_buffer.reassemble()); // Reassembles packet 0
+
+        let mut read_buf = [0u8; 5];
+        assert_eq!(recv_buffer.read_from_stream(&mut read_buf), payload1.len());
+        assert_eq!(&read_buf, payload1.as_ref());
+        assert_eq!(recv_buffer.next_sequence(), 1);
+
+        // stream buffer is empty now, but packet 2 is still held
+        assert_eq!(recv_buffer.read_from_stream(&mut read_buf), 0);
+
+        recv_buffer.receive(1, payload2.clone());
+        assert!(recv_buffer.reassemble()); // Reassembles 1 and 2
+
+        let mut read_buf_full = [0u8; 20];
+        let expected_len = payload2.len() + payload3.len();
+        assert_eq!(
+            recv_buffer.read_from_stream(&mut read_buf_full),
+            expected_len
+        );
+
+        let mut expected_data = Vec::new();
+        expected_data.extend_from_slice(&payload2);
+        expected_data.extend_from_slice(&payload3);
+        assert_eq!(
+            &read_buf_full[..expected_len],
+            expected_data.as_slice()
+        );
+        assert_eq!(recv_buffer.next_sequence(), 3);
+    }
+
+    #[test]
+    fn receive_buffer_sack_ranges() {
+        let mut recv_buffer = ReceiveBuffer::new();
+
+        // No packets
+        assert!(recv_buffer.get_sack_ranges().is_empty());
+
+        // One block
+        recv_buffer.receive(2, Bytes::new());
+        recv_buffer.receive(3, Bytes::new());
+        recv_buffer.receive(4, Bytes::new());
+        assert_eq!(
+            recv_buffer.get_sack_ranges(),
+            vec![SackRange { start: 2, end: 4 }]
+        );
+
+        // Two disjoint blocks
+        recv_buffer.receive(6, Bytes::new());
+        recv_buffer.receive(7, Bytes::new());
+        assert_eq!(
+            recv_buffer.get_sack_ranges(),
+            vec![SackRange { start: 2, end: 4 }, SackRange { start: 6, end: 7 }]
+        );
+
+        // Fill the gap
+        recv_buffer.receive(5, Bytes::new());
+        assert_eq!(
+            recv_buffer.get_sack_ranges(),
+            vec![SackRange { start: 2, end: 7 }]
+        );
+    }
+}
