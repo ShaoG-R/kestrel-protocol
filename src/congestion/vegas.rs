@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::congestion::CongestionControl;
 use std::time::Duration;
 use tokio::time::Instant;
-use tracing::debug;
+use tracing::{debug, trace};
 
 /// The state of the congestion controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,10 +40,10 @@ pub struct Vegas {
     #[cfg(not(test))]
     min_rtt: Duration,
 
+    /// The last measured RTT. Used to help determine the nature of packet loss.
+    last_rtt: Duration,
+
     config: Config,
-    
-    /// An accumulator for the additive increase part of congestion avoidance.
-    additive_increase_accumulator: f32,
 }
 
 impl Vegas {
@@ -53,54 +53,91 @@ impl Vegas {
             slow_start_threshold: config.initial_ssthresh,
             state: State::SlowStart,
             min_rtt: Duration::from_secs(u64::MAX),
+            last_rtt: Duration::from_secs(u64::MAX),
             config,
-            additive_increase_accumulator: 0.0,
         }
     }
 }
 
 impl CongestionControl for Vegas {
     fn on_ack(&mut self, rtt: Duration) {
+        self.last_rtt = rtt;
         self.min_rtt = self.min_rtt.min(rtt);
-
-        if self.state == State::CongestionAvoidance {
-            let rtt_increase = rtt.as_secs_f32() - self.min_rtt.as_secs_f32();
-            if rtt_increase > self.min_rtt.as_secs_f32() * self.config.latency_threshold_ratio {
-                self.congestion_window =
-                    ((self.congestion_window as f32) * self.config.cwnd_decrease_factor) as u32;
-                self.congestion_window = self.congestion_window.max(self.config.min_cwnd_packets);
-                debug!(
-                    "Latency-based congestion avoidance triggered. New cwnd: {}",
-                    self.congestion_window
-                );
-                return;
-            }
-        }
 
         if self.state == State::SlowStart {
             self.congestion_window += 1;
+            trace!(
+                cwnd = self.congestion_window,
+                "Slow Start: cwnd increased"
+            );
             if self.congestion_window >= self.slow_start_threshold {
                 self.state = State::CongestionAvoidance;
+                trace!("State changed to CongestionAvoidance");
             }
         } else {
-            // Congestion Avoidance: additive increase
-            self.additive_increase_accumulator += 1.0 / self.congestion_window as f32;
-            if self.additive_increase_accumulator >= 1.0 {
+            // Congestion Avoidance using the Alpha-Beta mechanism.
+            let expected_throughput = self.congestion_window as f32 / self.min_rtt.as_secs_f32();
+            let actual_throughput = self.congestion_window as f32 / rtt.as_secs_f32();
+            let diff_packets =
+                (expected_throughput - actual_throughput) * self.min_rtt.as_secs_f32();
+
+            if diff_packets < self.config.vegas_alpha_packets as f32 {
                 self.congestion_window += 1;
-                self.additive_increase_accumulator -= 1.0;
+                trace!(
+                    cwnd = self.congestion_window,
+                    diff = diff_packets,
+                    alpha = self.config.vegas_alpha_packets,
+                    "Congestion Avoidance: increasing cwnd"
+                );
+            } else if diff_packets > self.config.vegas_beta_packets as f32 {
+                self.congestion_window =
+                    (self.congestion_window - 1).max(self.config.min_cwnd_packets);
+                trace!(
+                    cwnd = self.congestion_window,
+                    diff = diff_packets,
+                    beta = self.config.vegas_beta_packets,
+                    "Congestion Avoidance: decreasing cwnd"
+                );
+            } else {
+                // Window is in the optimal range, do nothing.
+                trace!(
+                    cwnd = self.congestion_window,
+                    diff = diff_packets,
+                    "Congestion Avoidance: cwnd stable"
+                );
             }
         }
     }
 
     fn on_packet_loss(&mut self, _now: Instant) {
-        self.slow_start_threshold =
-            (self.congestion_window / 2).max(self.config.min_cwnd_packets);
-        self.congestion_window = self.slow_start_threshold;
-        self.state = State::SlowStart;
-        debug!(
-            "Congestion event! New ssthresh: {}, New cwnd: {}",
-            self.slow_start_threshold, self.congestion_window
-        );
+        // To differentiate between congestive and non-congestive loss, we check
+        // if the last RTT was significantly higher than the minimum RTT.
+        // A simple heuristic: if RTT has increased by more than 20%, it's likely congestion.
+        // If we haven't measured an RTT yet, conservatively assume it's congestive.
+        let is_congestive_loss = self.last_rtt == Duration::from_secs(u64::MAX)
+            || self.last_rtt > self.min_rtt + (self.min_rtt / 5);
+
+        if is_congestive_loss {
+            // Severe congestion event: Halve the window and enter slow start.
+            self.slow_start_threshold =
+                (self.congestion_window / 2).max(self.config.min_cwnd_packets);
+            self.congestion_window = self.slow_start_threshold;
+            self.state = State::SlowStart;
+            debug!(
+                "Congestive loss detected! New ssthresh: {}, New cwnd: {}",
+                self.slow_start_threshold, self.congestion_window
+            );
+        } else {
+            // Non-congestive (random) loss: Gentle decrease, stay in congestion avoidance.
+            self.congestion_window =
+                ((self.congestion_window as f32) * self.config.vegas_gentle_decrease_factor)
+                    as u32;
+            self.congestion_window = self.congestion_window.max(self.config.min_cwnd_packets);
+            debug!(
+                "Non-congestive loss detected. Gently reducing cwnd to: {}",
+                self.congestion_window
+            );
+        }
     }
 
     fn congestion_window(&self) -> u32 {

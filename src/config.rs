@@ -36,14 +36,18 @@ pub struct Config {
     /// The initial slow start threshold in packets.
     /// 初始慢启动阈值（以包为单位）。
     pub initial_ssthresh: u32,
-    /// The ratio of RTT increase over the minimum RTT that triggers latency-based
-    /// congestion control to reduce the window.
-    /// RTT增量与最小RTT的比率，该比率会触发基于延迟的拥塞控制以减小窗口。
-    pub latency_threshold_ratio: f32,
-    /// The factor by which the congestion window is decreased during latency-based
-    /// congestion avoidance.
-    /// 在基于延迟的拥塞避免期间，拥塞窗口减小的因子。
-    pub cwnd_decrease_factor: f32,
+    /// The lower bound of the `diff` value in the Vegas algorithm. If the estimated
+    /// number of queued packets is below this, the window is increased.
+    /// Vegas算法中 `diff` 值的下限。如果估计的排队数据包数量低于此值，则增加窗口。
+    pub vegas_alpha_packets: u32,
+    /// The upper bound of the `diff` value in the Vegas algorithm. If the estimated
+    /// number of queued packets is above this, the window is decreased.
+    /// Vegas算法中 `diff` 值的上限。如果估计的排队数据包数量高于此值，则减小窗口。
+    pub vegas_beta_packets: u32,
+    /// The factor by which the congestion window is decreased during non-congestive
+    /// packet loss events.
+    /// 在非拥塞性丢包事件期间，拥塞窗口减小的因子。
+    pub vegas_gentle_decrease_factor: f32,
     /// The maximum time a connection can be idle before it's considered timed out.
     /// An idle connection is one with no packets being sent or received.
     ///
@@ -72,8 +76,9 @@ impl Default for Config {
             initial_cwnd_packets: 32,
             min_cwnd_packets: 4,
             initial_ssthresh: u32::MAX,
-            latency_threshold_ratio: 0.1, // 10%
-            cwnd_decrease_factor: 0.9,    // 10% decrease
+            vegas_alpha_packets: 2,
+            vegas_beta_packets: 4,
+            vegas_gentle_decrease_factor: 0.8, // 20% decrease
             idle_timeout: Duration::from_secs(5),
             send_buffer_capacity_bytes: 1024 * 1024, // 1 MB
             recv_buffer_capacity_packets: 256,

@@ -120,4 +120,14 @@ impl Frame {
             _ => None,
         }
     }
+
+    /// 获取长头帧的源连接ID（如果存在）。
+    /// Gets the source connection ID of a long-header frame, if it has one.
+    pub fn source_cid(&self) -> Option<u32> {
+        match self {
+            Frame::Syn { header, .. } => Some(header.source_cid),
+            Frame::SynAck { header, .. } => Some(header.source_cid),
+            _ => None,
+        }
+    }
 } 

@@ -7,6 +7,7 @@ use crate::packet::frame::Frame;
 use crate::packet::sack::SackRange;
 use bytes::{Bytes, BytesMut};
 use std::collections::BTreeMap;
+use std::time::Duration;
 use tokio::time::Instant;
 
 /// A packet that has been sent but not yet acknowledged (in-flight).
@@ -101,24 +102,39 @@ impl SendBuffer {
             .any(|p| matches!(p.frame, Frame::Fin { .. }))
     }
 
-    /// Processes SACK information, removing acknowledged packets and identifying
-    /// packets that need to be fast-retransmitted.
+    /// Processes SACK information, removing acknowledged packets, calculating RTT for
+    /// them, and identifying packets that need to be fast-retransmitted.
+    ///
+    /// Returns a tuple of (frames_to_retransmit, rtt_samples).
     pub fn handle_ack(
         &mut self,
         recv_next_seq: u32,
         sack_ranges: &[SackRange],
         fast_retx_threshold: u16,
         now: Instant,
-    ) -> Vec<Frame> {
-        // Remove cumulatively acknowledged packets efficiently.
-        // All sequence numbers less than `recv_next_seq` are acknowledged.
-        self.in_flight = self.in_flight.split_off(&recv_next_seq);
+    ) -> (Vec<Frame>, Vec<Duration>) {
+        let mut rtt_samples = Vec::new();
 
-        // Process SACK ranges to remove selectively acknowledged packets.
+        // Process cumulative ACK.
+        let mut newly_acked_keys = Vec::new();
+        for (&seq, packet) in self.in_flight.iter() {
+            if seq < recv_next_seq {
+                newly_acked_keys.push(seq);
+                rtt_samples.push(now.saturating_duration_since(packet.last_sent_at));
+            } else {
+                break; // BTreeMap is sorted by key.
+            }
+        }
+        for key in newly_acked_keys {
+            self.in_flight.remove(&key);
+        }
+
+        // Process SACK ranges.
         let mut acked_in_sack = Vec::new();
         for range in sack_ranges {
             for seq in range.start..=range.end {
-                if self.in_flight.remove(&seq).is_some() {
+                if let Some(packet) = self.in_flight.remove(&seq) {
+                    rtt_samples.push(now.saturating_duration_since(packet.last_sent_at));
                     acked_in_sack.push(seq);
                 }
             }
@@ -154,7 +170,7 @@ impl SendBuffer {
             }
         }
 
-        frames_to_fast_retx
+        (frames_to_fast_retx, rtt_samples)
     }
 
     /// Checks for packets that have timed out based on the RTO.
@@ -229,18 +245,20 @@ mod tests {
         }
 
         // ACK for 0. This should remove packet 0.
-        buffer.handle_ack(1, &[], threshold, now);
+        let (retx, rtts) = buffer.handle_ack(1, &[], threshold, now);
+        assert!(retx.is_empty());
+        assert_eq!(rtts.len(), 1);
         assert!(!buffer.in_flight.contains_key(&0));
         assert_eq!(buffer.in_flight.first_key_value().unwrap().0, &1);
 
         // Receive ACK for packet 2, implies 1 is lost. fast_retx_count for packet 1 becomes 1.
-        let retx1 = buffer.handle_ack(1, &[SackRange { start: 2, end: 2 }], threshold, now);
+        let (retx1, _) = buffer.handle_ack(1, &[SackRange { start: 2, end: 2 }], threshold, now);
         assert!(retx1.is_empty());
         assert!(!buffer.in_flight.contains_key(&2));
         assert_eq!(buffer.in_flight.get(&1).unwrap().fast_retx_count, 1);
 
         // Receive ACK for packet 3. fast_retx_count for packet 1 becomes 2. Threshold met.
-        let retx2 = buffer.handle_ack(1, &[SackRange { start: 3, end: 3 }], threshold, now);
+        let (retx2, _) = buffer.handle_ack(1, &[SackRange { start: 3, end: 3 }], threshold, now);
         assert_eq!(retx2.len(), 1, "Should retransmit packet 1");
         assert_eq!(retx2[0].sequence_number().unwrap(), 1);
 

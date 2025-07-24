@@ -7,11 +7,12 @@ use tokio::time::Instant;
 
 fn test_config() -> Config {
     Config {
-        initial_cwnd_packets: 2,
+        initial_cwnd_packets: 10,
         min_cwnd_packets: 2,
-        initial_ssthresh: 10,
-        latency_threshold_ratio: 0.1, // 10%
-        cwnd_decrease_factor: 0.9,    // 10% decrease
+        initial_ssthresh: 100,
+        vegas_alpha_packets: 2,
+        vegas_beta_packets: 4,
+        vegas_gentle_decrease_factor: 0.8,
         ..Default::default()
     }
 }
@@ -20,69 +21,82 @@ fn test_config() -> Config {
 fn test_vegas_slow_start() {
     let config = test_config();
     let mut vegas = Vegas::new(config);
+    vegas.slow_start_threshold = 20;
 
-    assert_eq!(vegas.congestion_window(), 2);
+    assert_eq!(vegas.congestion_window(), 10);
     assert_eq!(vegas.state, State::SlowStart);
 
-    // Each ACK in slow start should increase cwnd by 1
     vegas.on_ack(Duration::from_millis(100));
-    assert_eq!(vegas.congestion_window(), 3);
-
-    vegas.on_ack(Duration::from_millis(100));
-    assert_eq!(vegas.congestion_window(), 4);
+    assert_eq!(vegas.congestion_window(), 11);
 }
 
 #[test]
 fn test_vegas_transition_to_congestion_avoidance() {
     let config = test_config();
     let mut vegas = Vegas::new(config);
-    vegas.slow_start_threshold = 5;
+    vegas.congestion_window = 19;
+    vegas.slow_start_threshold = 20;
 
-    // cwnd starts at 2.
-    // After 3 ACKs, cwnd will be 5.
-    for _ in 0..3 {
-        vegas.on_ack(Duration::from_millis(100));
-    }
-    // When cwnd reaches ssthresh, it should transition to CongestionAvoidance.
-    assert_eq!(vegas.congestion_window(), 5);
+    vegas.on_ack(Duration::from_millis(100));
+    assert_eq!(vegas.congestion_window(), 20);
     assert_eq!(vegas.state, State::CongestionAvoidance);
 }
 
 #[test]
-fn test_vegas_congestion_avoidance_linear_increase() {
+fn test_vegas_avoidance_increase_when_below_alpha() {
     let mut vegas = Vegas::new(test_config());
     vegas.state = State::CongestionAvoidance;
     vegas.congestion_window = 10;
     vegas.min_rtt = Duration::from_millis(100);
 
-    // RTT is stable, cwnd should increase by 1/cwnd per RTT.
-    // So, after 10 ACKs, it should increase by approximately 1.
-    for _ in 0..10 {
-        vegas.on_ack(Duration::from_millis(100));
-    }
+    // With a base RTT of 100ms, the expected throughput is 100 packets/sec.
+    // If the actual RTT is also 100ms, the diff is 0, which is less than alpha (2).
+    // So the window should increase.
+    vegas.on_ack(Duration::from_millis(100));
     assert_eq!(vegas.congestion_window(), 11);
 }
 
 #[test]
-fn test_vegas_latency_based_decrease() {
+fn test_vegas_avoidance_decrease_when_above_beta() {
+    let mut vegas = Vegas::new(test_config());
+    vegas.state = State::CongestionAvoidance;
+    vegas.congestion_window = 10;
+    vegas.min_rtt = Duration::from_millis(100);
+
+    // With min_rtt=100ms, cwnd=10 -> expected = 100 pkts/sec
+    // With actual_rtt=200ms -> actual = 50 pkts/sec
+    // Diff = (100 - 50) * 0.1s = 5 packets, which is > beta (4).
+    // So the window should decrease.
+    vegas.on_ack(Duration::from_millis(200));
+    assert_eq!(vegas.congestion_window(), 9);
+}
+
+#[test]
+fn test_vegas_avoidance_stable_between_alpha_beta() {
+    let mut vegas = Vegas::new(test_config());
+    vegas.state = State::CongestionAvoidance;
+    vegas.congestion_window = 10;
+    vegas.min_rtt = Duration::from_millis(100);
+
+    // With min_rtt=100ms, cwnd=10 -> expected = 100 pkts/sec
+    // With actual_rtt=130ms -> actual = ~77 pkts/sec
+    // Diff = (100 - 77) * 0.1s = 2.3 packets. This is between alpha (2) and beta (4).
+    // The window should remain stable.
+    vegas.on_ack(Duration::from_millis(130));
+    assert_eq!(vegas.congestion_window(), 10);
+}
+
+#[test]
+fn test_vegas_congestive_loss_reaction() {
     let mut vegas = Vegas::new(test_config());
     vegas.state = State::CongestionAvoidance;
     vegas.congestion_window = 20;
     vegas.min_rtt = Duration::from_millis(100);
-
-    // RTT increases by 20ms, which is 20% > 10% threshold
-    let high_rtt = Duration::from_millis(120);
-    vegas.on_ack(high_rtt);
-
-    // cwnd should decrease by 10% (0.9 factor)
-    // 20 * 0.9 = 18
-    assert_eq!(vegas.congestion_window(), 18);
-}
-
-#[test]
-fn test_vegas_packet_loss_reaction() {
-    let mut vegas = Vegas::new(test_config());
-    vegas.state = State::CongestionAvoidance;
+    // last_rtt is 150ms, which is > 100ms + (100ms/5) = 120ms. This indicates congestion.
+    vegas.on_ack(Duration::from_millis(150));
+    
+    // on_ack would have already decreased the window. For this test, we want to isolate
+    // the behavior of on_packet_loss, so we reset the window to its pre-ack state.
     vegas.congestion_window = 20;
 
     vegas.on_packet_loss(Instant::now());
@@ -93,4 +107,24 @@ fn test_vegas_packet_loss_reaction() {
     assert_eq!(vegas.congestion_window(), 10);
     // State should revert to SlowStart
     assert_eq!(vegas.state, State::SlowStart);
+}
+
+#[test]
+fn test_vegas_random_loss_reaction() {
+    let mut vegas = Vegas::new(test_config());
+    vegas.state = State::CongestionAvoidance;
+    vegas.congestion_window = 20;
+    vegas.min_rtt = Duration::from_millis(100);
+    // last_rtt is 100ms, indicating no congestion before the loss.
+    vegas.on_ack(Duration::from_millis(100));
+    let original_ssthresh = vegas.slow_start_threshold;
+
+    vegas.on_packet_loss(Instant::now());
+
+    // ssthresh should NOT change.
+    assert_eq!(vegas.slow_start_threshold, original_ssthresh);
+    // cwnd should be gently reduced (20 * 0.8 = 16)
+    assert_eq!(vegas.congestion_window(), 16);
+    // State should remain in CongestionAvoidance
+    assert_eq!(vegas.state, State::CongestionAvoidance);
 } 

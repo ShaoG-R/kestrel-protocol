@@ -22,7 +22,6 @@ use crate::{
     packet::{frame::Frame, header::ShortHeader, sack::SackRange},
 };
 use bytes::Bytes;
-use std::time::Duration;
 use tokio::time::Instant;
 
 /// The reliability layer for a connection.
@@ -60,25 +59,23 @@ impl ReliabilityLayer {
         sack_ranges: Vec<SackRange>,
         now: Instant,
     ) -> Vec<Frame> {
-        // Here we'd ideally get RTT samples from the send_buffer after processing ACKs,
-        // but for simplicity, we assume RTT is measured elsewhere or a fixed value for now.
-        // In a real implementation, `send_buffer.handle_ack` would return acknowledged
-        // packet timestamps to calculate RTT samples.
-        let rtt_sample = Duration::from_millis(100); // Placeholder
-        self.rto_estimator.update(rtt_sample, self.config.min_rto);
-        self.congestion_control.on_ack(rtt_sample);
-
-        let frames_to_retx = self.send_buffer.handle_ack(
+        let (frames_to_retx, rtt_samples) = self.send_buffer.handle_ack(
             recv_next_seq,
             &sack_ranges,
             self.config.fast_retx_threshold,
             now,
         );
 
+        // Update RTT and congestion control with real samples.
+        for rtt_sample in rtt_samples {
+            self.rto_estimator.update(rtt_sample, self.config.min_rto);
+            self.congestion_control.on_ack(rtt_sample);
+        }
+
         if !frames_to_retx.is_empty() {
             self.congestion_control.on_packet_loss(now);
         }
-        
+
         frames_to_retx
     }
 
