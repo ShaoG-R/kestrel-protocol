@@ -40,7 +40,7 @@
 
 4.  **【已完成】实现0-RTT连接 (0-RTT Implemented):** 客户端现在可以通过 `connect()` 方法发起连接，并立即写入数据。这些数据将被打包在第一个`SYN`帧中发送。服务器端也已实现相应的逻辑来处理携带数据的`SYN`帧，实现了0-RTT快速连接。
 
-5.  **【中优先级】包聚合/粘连未充分利用 (Packet Coalescing Underutilized):** 虽然底层的 `sender_task` 支持在单个UDP包中发送多个Frame，但上层 `Connection` 的逻辑（如 `send_ack`）倾向于立即发送单个帧，而不是等待机会将ACK与其他数据（如PUSH）捆绑在一起发送。
+5.  **【已完成】实现包聚合/粘连 (Packet Coalescing Implemented):** 连接现在会延迟发送`ACK`帧，以便有机会将它们与`PUSH`数据帧捆绑在同一个UDP包中发送。同时，快速应答机制也已实现，以确保在接收到多个数据包后能及时发送确认，避免对端不必要的超时重传。
 
 6.  **【低优先级】`FIN` 包头部类型与文档不符 (FIN Header Mismatch):**
     *   **设计文档 (`dev-principal.md`):** 将 `FIN` 归类为**长头部**。

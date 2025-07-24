@@ -167,6 +167,9 @@ struct ConnectionState {
     /// Counts the number of packets received that should trigger an ACK.
     /// 记录收到的、应当触发ACK的包的数量。
     ack_eliciting_packets_since_last_ack: u16,
+    /// A flag indicating that an ACK frame should be generated and sent at the next opportunity.
+    /// 一个标志，表示应在下一次机会时生成并发送ACK帧。
+    ack_pending: bool,
     /// Waker for the writing task.
     /// 写入任务的 Waker。
     write_waker: Option<std::task::Waker>,
@@ -198,6 +201,7 @@ impl ConnectionWorker {
             peer_recv_window: 32,
             congestion_controller: CongestionController::new(),
             ack_eliciting_packets_since_last_ack: 0,
+            ack_pending: false,
             write_waker: None,
         };
 
@@ -269,6 +273,15 @@ impl ConnectionWorker {
                 // Time to send any queued packets.
                 res = async {
                     let mut frames_to_send = Vec::new();
+
+                    // Check if we need to send a piggybacked ACK.
+                    if self.state.ack_pending {
+                        let ack_frame = self.state.create_ack_frame();
+                        frames_to_send.push(ack_frame);
+                        self.state.ack_pending = false;
+                        self.state.ack_eliciting_packets_since_last_ack = 0;
+                    }
+
                     while self.state.can_send_more() {
                         if let Some(frame) = self.state.send_buffer.pop_next_frame() {
                             frames_to_send.push(frame);
@@ -478,22 +491,21 @@ impl ConnectionState {
                     self.recv_buffer.receive(header.sequence_number, payload);
                     // The main run loop will handle reassembly and sending to the handle.
 
-                    // Immediate ACK logic with threshold.
-                    // 带阈值的即时ACK逻辑。
-                    self.ack_eliciting_packets_since_last_ack += 1;
+                    // Mark that we owe an ACK, and check if we should send one immediately.
+                    self.ack_pending = true;
                     if self.ack_eliciting_packets_since_last_ack >= ACK_THRESHOLD
                         && !self.recv_buffer.get_sack_ranges().is_empty()
                     {
-                        self.send_ack().await?;
+                        self.send_ack_if_needed().await?;
                     }
                 }
                 Frame::Ack { header, payload } => {
                     self.handle_ack(header, payload).await?;
                 }
-                Frame::Fin { header } => {
+                Frame::Fin { header: _ } => {
                     println!("Received FIN, entering FIN_WAIT and sending ACK.");
                     // Acknowledge their FIN.
-                    self.send_ack_for_fin(&header).await?;
+                    self.send_ack_for_fin().await?;
                     // Transition to FinWait, waiting for our side to close.
                     self.state = State::FinWait;
                 }
@@ -505,11 +517,10 @@ impl ConnectionState {
             State::Closing => match frame {
                 Frame::Ack { header, payload } => {
                     self.handle_ack(header, payload).await?;
-                    // The peer might also send a FIN in this state.
                 }
-                Frame::Fin { header } => {
+                Frame::Fin { header: _ } => {
                     println!("Received FIN while Closing, sending ACK.");
-                    self.send_ack_for_fin(&header).await?;
+                    self.send_ack_for_fin().await?;
                     // If our FIN is acknowledged and we have received and acknowledged their FIN,
                     // we can move to closed. This check happens implicitly as the ACK processing
                     // will clear the in-flight buffer. We might need a more explicit check.
@@ -677,22 +688,25 @@ impl ConnectionState {
 
     /// Sends an ACK in response to a FIN.
     /// 发送一个ACK来响应FIN。
-    async fn send_ack_for_fin(
-        &mut self,
-        _fin_header: &crate::packet::header::ShortHeader,
-    ) -> Result<()> {
+    async fn send_ack_for_fin(&mut self) -> Result<()> {
         let ack_frame = self.create_ack_frame();
         self.send_frames(vec![ack_frame]).await?;
         self.ack_eliciting_packets_since_last_ack = 0;
+        self.ack_pending = false; // The ACK has been sent.
         Ok(())
     }
 
-    /// Creates and sends an ACK frame.
-    /// 创建并发送一个ACK帧。
-    async fn send_ack(&mut self) -> Result<()> {
-        let ack_frame = self.create_ack_frame();
-        self.send_frames(vec![ack_frame]).await?;
-        self.ack_eliciting_packets_since_last_ack = 0;
+    /// Immediately sends an ACK frame if one is needed.
+    /// 如果需要，立即发送一个ACK帧。
+    async fn send_ack_if_needed(&mut self) -> Result<()> {
+        if self.ack_eliciting_packets_since_last_ack >= ACK_THRESHOLD
+            && !self.recv_buffer.get_sack_ranges().is_empty()
+        {
+            let ack_frame = self.create_ack_frame();
+            self.send_frames(vec![ack_frame]).await?;
+            self.ack_eliciting_packets_since_last_ack = 0;
+            self.ack_pending = false;
+        }
         Ok(())
     }
 
@@ -778,6 +792,7 @@ impl ConnectionState {
 mod tests {
     use super::*;
     use crate::packet::command::Command;
+    use crate::packet::header::ShortHeader;
     use crate::testing::TestHarness;
     use tokio::io::AsyncWriteExt;
     use tokio::time::Duration;
@@ -931,5 +946,59 @@ mod tests {
         );
         // The packet is still in-flight
         assert_eq!(harness.worker.state.send_buffer.in_flight.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_ack_piggybacking() {
+        let (mut harness, mut connection) = TestHarness::new_with_state(State::Established);
+
+        // 1. Peer sends us a packet. We should want to ACK it.
+        let peer_push_frame = Frame::Push {
+            header: ShortHeader {
+                command: Command::Push,
+                connection_id: 1,
+                recv_window_size: 100,
+                timestamp: 0,
+                sequence_number: 0,
+                recv_next_sequence: 0,
+            },
+            payload: Bytes::from_static(b"peer data"),
+        };
+        harness.send_to_connection(peer_push_frame).await;
+        harness.tick().await;
+
+        // We should now have a pending ACK, but no frames sent yet.
+        assert!(harness.worker.state.ack_pending);
+        assert!(harness.try_recv_from_connection().await.is_none());
+
+        // 2. We write our own data.
+        let our_data = b"our data";
+        connection.write_all(our_data).await.unwrap();
+        harness.tick().await;
+
+        // 3. We should now get ONE UDP packet containing both the ACK and the PUSH.
+        let sent_frames = harness.recv_from_connection().await.unwrap();
+        assert_eq!(sent_frames.len(), 2);
+
+        let ack_frame = sent_frames
+            .iter()
+            .find(|f| matches!(f, Frame::Ack { .. }))
+            .expect("Did not find ACK frame");
+        let push_frame = sent_frames
+            .iter()
+            .find(|f| matches!(f, Frame::Push { .. }))
+            .expect("Did not find PUSH frame");
+
+        // Validate the PUSH frame contains our data
+        if let Frame::Push { payload, .. } = push_frame {
+            assert_eq!(payload.as_ref(), our_data);
+        }
+        // Validate the ACK is for the peer's packet
+        if let Frame::Ack { header, .. } = ack_frame {
+            assert_eq!(header.recv_next_sequence, 1);
+        }
+
+        // No more pending ACKs.
+        assert!(!harness.worker.state.ack_pending);
     }
 }

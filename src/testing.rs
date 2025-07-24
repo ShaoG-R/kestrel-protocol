@@ -68,6 +68,11 @@ impl TestHarness {
         self.rx_from_conn.recv().await.map(|cmd| cmd.frames)
     }
 
+    /// Tries to receive the next set of frames without blocking.
+    pub async fn try_recv_from_connection(&mut self) -> Option<Vec<Frame>> {
+        self.rx_from_conn.try_recv().ok().map(|cmd| cmd.frames)
+    }
+
     /// Sends a frame to the connection, as if it came from the peer.
     pub async fn send_to_connection(&mut self, frame: Frame) {
         self.tx_to_conn.send(frame).await.unwrap();
