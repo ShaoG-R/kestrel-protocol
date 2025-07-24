@@ -4,7 +4,59 @@
 use crate::buffer::{ReceiveBuffer, SendBuffer};
 use crate::packet::frame::Frame;
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+const INITIAL_RTO: Duration = Duration::from_millis(1000);
+const MIN_RTO: Duration = Duration::from_millis(500);
+
+/// An estimator for the round-trip time (RTT).
+///
+/// This uses a simple version of the Jacobson/Karels algorithm.
+///
+/// RTT 估算器。
+///
+/// 使用一个简化版的 Jacobson/Karels 算法。
+#[derive(Debug)]
+struct RttEstimator {
+    srtt: Duration,
+    rttvar: Duration,
+    rto: Duration,
+}
+
+impl RttEstimator {
+    fn new() -> Self {
+        Self {
+            srtt: Duration::from_secs(0),
+            rttvar: Duration::from_secs(0),
+            rto: INITIAL_RTO,
+        }
+    }
+
+    fn rto(&self) -> Duration {
+        self.rto
+    }
+
+    /// Updates the RTO based on a new RTT sample.
+    /// 根据一个新的RTT样本更新RTO。
+    fn update(&mut self, rtt: Duration) {
+        if self.srtt == Duration::from_secs(0) {
+            // First sample
+            self.srtt = rtt;
+            self.rttvar = rtt / 2;
+        } else {
+            // Subsequent samples
+            let delta = if self.srtt > rtt {
+                self.srtt - rtt
+            } else {
+                rtt - self.srtt
+            };
+            self.rttvar = (3 * self.rttvar + delta) / 4;
+            self.srtt = (7 * self.srtt + rtt) / 8;
+        }
+        self.rto = (self.srtt + 4 * self.rttvar).max(MIN_RTO);
+    }
+}
 
 /// A command for the central socket sender task.
 /// 用于中央套接字发送任务的命令。
@@ -44,6 +96,8 @@ struct ConnectionState {
     send_buffer: SendBuffer,
     recv_buffer: ReceiveBuffer,
     sender: mpsc::Sender<SendCommand>,
+    sequence_number_counter: u32,
+    rto_estimator: RttEstimator,
 }
 
 /// Represents a single reliable connection.
@@ -85,8 +139,13 @@ impl Connection {
             send_buffer: SendBuffer::new(),
             recv_buffer: ReceiveBuffer::new(),
             sender,
+            sequence_number_counter: 0,
+            rto_estimator: RttEstimator::new(),
         };
-        let connection = Self { state, receiver: in_rx };
+        let connection = Self {
+            state,
+            receiver: in_rx,
+        };
         (connection, in_tx)
     }
 
@@ -111,9 +170,10 @@ impl Connection {
             connection_id: 0, // TODO: Use the actual connection ID
             recv_window_size: 0, // TODO: Update with real value
             timestamp: 0, // TODO: Update with real value
-            sequence_number: 0, // TODO: Get from a sequence number generator
+            sequence_number: self.state.sequence_number_counter,
             recv_next_sequence: 0, // TODO: Update with real value
         };
+        self.state.sequence_number_counter += 1;
 
         let frame = Frame::Push {
             header: push_header,
@@ -132,6 +192,7 @@ impl Connection {
     pub async fn run(&mut self) {
         let state = &mut self.state;
         let receiver = &mut self.receiver;
+        let mut rto_timer = tokio::time::interval(state.rto_estimator.rto());
 
         loop {
             // By splitting the struct, the borrow checker now understands
@@ -143,11 +204,17 @@ impl Connection {
 
                 _ = async {
                     if let Some(frame) = state.send_buffer.pop_next_frame() {
+                        let now = Instant::now();
+                        state.send_buffer.add_in_flight(frame.clone(), now);
                         state.send_frame(frame).await;
                     } else {
                         std::future::pending::<()>().await;
                     }
                 }, if !state.send_buffer.is_empty() => {}
+
+                _ = rto_timer.tick() => {
+                    state.check_for_retransmissions().await;
+                }
 
                 else => {
                     break;
@@ -200,15 +267,39 @@ impl ConnectionState {
                         println!("Received PUSH with {} bytes of payload.", payload.len());
                     }
                     Frame::Ack { header, payload } => {
-                        // TODO: Process the acknowledgment information in the send buffer.
-                        // 在发送缓冲区中处理确认信息。
-                        println!("Received ACK.");
+                        // TODO: Phase 4: Parse SACK ranges from the payload.
+                        // For now, we'll assume it acks the oldest in-flight packet.
+                        let now = Instant::now();
+                        if let Some(acked_packet) = self.send_buffer.in_flight.pop_front() {
+                            let rtt = now.duration_since(acked_packet.last_sent_at);
+                            self.rto_estimator.update(rtt);
+                            println!(
+                                "Received ACK for seq={:?}, RTT updated: {:?}, new RTO: {:?}",
+                                acked_packet.frame.sequence_number(),
+                                rtt,
+                                self.rto_estimator.rto()
+                            );
+                        }
                     }
                     Frame::Fin { header } => {
-                        // TODO: Handle connection termination.
-                        println!("Received FIN, start closing connection.");
+                        println!("Received FIN, closing connection and sending ACK.");
                         self.state = State::Closing;
-                        // We should respond with a FIN-ACK.
+                        // Respond with an ACK to their FIN. This is part of the 4-way handshake.
+                        // We will reuse their header info where appropriate.
+                        let ack_header = crate::packet::header::ShortHeader {
+                            command: crate::packet::command::Command::Ack,
+                            connection_id: header.connection_id,
+                            recv_window_size: 0, // TODO
+                            timestamp: 0,        // TODO
+                            sequence_number: self.sequence_number_counter, // Our own seq number
+                            recv_next_sequence: 0, // TODO
+                        };
+                        self.sequence_number_counter += 1;
+                        let ack_frame = Frame::Ack {
+                            header: ack_header,
+                            payload: bytes::Bytes::new(), // No SACK payload for now
+                        };
+                        self.send_frame(ack_frame).await;
                     }
                     _ => {
                         // Ignore other unexpected packets in this state.
@@ -222,6 +313,31 @@ impl ConnectionState {
             State::Closed => {
                 // Should not receive frames in closed state.
             }
+        }
+    }
+
+    /// Checks for any in-flight packets that have timed out and retransmits them.
+    /// 检查是否有任何在途数据包已超时并进行重传。
+    async fn check_for_retransmissions(&mut self) {
+        let rto = self.rto_estimator.rto();
+        let now = Instant::now();
+        let mut frames_to_resend = Vec::new();
+
+        for packet in self.send_buffer.iter_in_flight_mut() {
+            if now.duration_since(packet.last_sent_at) > rto {
+                println!(
+                    "Retransmitting packet with seq={:?}",
+                    packet.frame.sequence_number()
+                );
+                // Collect the frame to resend it later.
+                frames_to_resend.push(packet.frame.clone());
+                // Update the time it was sent.
+                packet.last_sent_at = now;
+            }
+        }
+
+        for frame in frames_to_resend {
+            self.send_frame(frame).await;
         }
     }
 

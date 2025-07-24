@@ -99,4 +99,15 @@ impl Frame {
             }
         }
     }
+
+    /// 获取帧的序列号（如果存在）。
+    /// Gets the sequence number of the frame, if it has one.
+    pub fn sequence_number(&self) -> Option<u32> {
+        match self {
+            Frame::Push { header, .. } => Some(header.sequence_number),
+            Frame::Ack { header, .. } => Some(header.sequence_number),
+            Frame::Ping { header } => Some(header.sequence_number),
+            _ => None,
+        }
+    }
 } 
