@@ -6,12 +6,13 @@ use crate::congestion_control::CongestionController;
 use crate::error::{Error, Result};
 use crate::packet::frame::Frame;
 use crate::packet::sack::{decode_sack_ranges, encode_sack_ranges};
+use bytes::{Bytes, BytesMut};
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 
 const INITIAL_RTO: Duration = Duration::from_millis(1000);
@@ -19,6 +20,46 @@ const MIN_RTO: Duration = Duration::from_millis(500);
 const FAST_RETX_THRESHOLD: u16 = 3;
 const MAX_PAYLOAD_SIZE: usize = 1200; // A reasonable payload size for UDP
 const ACK_THRESHOLD: u16 = 2; // Send an ACK for every 2 packets received
+
+// --- Public API ---
+
+/// Commands sent from the `Connection` handle to the `ConnectionWorker`.
+#[derive(Debug)]
+enum WorkerCommand {
+    /// User data to be sent reliably.
+    SendData(Bytes),
+    /// Request to gracefully close the connection.
+    Close,
+}
+
+/// The public-facing handle for a reliable connection.
+///
+/// This implements `AsyncRead` and `AsyncWrite` and is the primary way
+/// for users to interact with a connection.
+#[derive(Debug)]
+pub struct Connection {
+    /// Sends commands to the worker task.
+    tx_to_worker: mpsc::Sender<WorkerCommand>,
+    /// Receives ordered, reliable data from the worker task.
+    rx_from_worker: mpsc::Receiver<Bytes>,
+    /// A small buffer to handle cases where the user's read buffer is smaller
+    /// than the received data chunk.
+    read_buffer: Bytes,
+}
+
+// --- Worker Implementation ---
+
+/// The internal worker for a `Connection`. This runs in a separate task
+/// and handles all the protocol logic.
+pub(crate) struct ConnectionWorker {
+    state: ConnectionState,
+    /// Receives frames from the main socket task.
+    receiver: mpsc::Receiver<Frame>,
+    /// Receives commands from the `Connection` handle.
+    rx_from_handle: mpsc::Receiver<WorkerCommand>,
+    /// Sends reassembled, ordered data to the `Connection` handle.
+    tx_to_handle: mpsc::Sender<Bytes>,
+}
 
 /// An estimator for the round-trip time (RTT).
 ///
@@ -126,48 +167,24 @@ struct ConnectionState {
     /// Counts the number of packets received that should trigger an ACK.
     /// 记录收到的、应当触发ACK的包的数量。
     ack_eliciting_packets_since_last_ack: u16,
-    /// Waker for the reading task.
-    /// 读取任务的 Waker。
-    read_waker: Option<std::task::Waker>,
     /// Waker for the writing task.
     /// 写入任务的 Waker。
     write_waker: Option<std::task::Waker>,
 }
 
-/// Represents a single reliable connection.
-///
-/// Each connection is managed by its own asynchronous task.
-///
-/// 代表一个单一的可靠连接。
-///
-/// 每个连接都由其自己的异步任务管理。
-pub struct Connection {
-    /// The actual state of the connection.
-    /// 连接的实际状态。
-    state: ConnectionState,
-
-    /// Receives frames from the main socket task.
-    /// 从主套接字任务接收帧。
-    receiver: mpsc::Receiver<Frame>,
-}
-
-impl Connection {
-    /// Creates a new `Connection`.
-    ///
-    /// This also returns a sender for the main socket task to send frames to this connection.
-    ///
-    /// 创建一个新的 `Connection`。
-    ///
-    /// 这也会返回一个发送端，供主套接字任务向此连接发送帧。
-    pub fn new(
+impl ConnectionWorker {
+    /// Creates a new `ConnectionWorker` and its associated `Connection` handle.
+    pub(crate) fn new(
         remote_addr: SocketAddr,
         connection_id: u32,
         initial_state: State,
         sender: mpsc::Sender<SendCommand>,
-    ) -> (Self, mpsc::Sender<Frame>) {
-        // We can tune the channel size later.
-        // 我们之后可以调整通道的大小。
-        let (in_tx, in_rx) = mpsc::channel(128);
+        // Channel for the main socket task to send frames to this connection's worker.
+        receiver: mpsc::Receiver<Frame>,
+    ) -> (Self, Connection) {
+        let (tx_to_handle, rx_from_worker) = mpsc::channel(128);
+        let (tx_to_worker, rx_from_handle) = mpsc::channel(128);
+
         let state = ConnectionState {
             remote_addr,
             connection_id,
@@ -178,57 +195,82 @@ impl Connection {
             sender,
             sequence_number_counter: 0,
             rto_estimator: RttEstimator::new(),
-            // Initialize with a small default window until we hear from the peer.
             peer_recv_window: 32,
             congestion_controller: CongestionController::new(),
             ack_eliciting_packets_since_last_ack: 0,
-            read_waker: None,
             write_waker: None,
         };
-        let connection = Self {
-            state,
-            receiver: in_rx,
-        };
-        (connection, in_tx)
-    }
 
-    /// Initiates a graceful shutdown of the connection.
-    ///
-    /// This sends a FIN packet and transitions the connection to the `Closing` state.
-    /// The connection will be fully closed once the FIN is acknowledged and the
-    /// peer has also closed its side.
-    ///
-    /// 发起连接的优雅关闭。
-    ///
-    /// 这会发送一个FIN包，并将连接转换到`Closing`状态。
-    /// 一旦FIN被确认并且对端也关闭了它的连接，连接将被完全关闭。
-    pub async fn close(&mut self) -> Result<()> {
-        self.state.shutdown();
-        Ok(())
+        let worker = Self {
+            state,
+            receiver,
+            rx_from_handle,
+            tx_to_handle,
+        };
+
+        let handle = Connection {
+            tx_to_worker,
+            rx_from_worker,
+            read_buffer: Bytes::new(),
+        };
+
+        (worker, handle)
     }
 
     /// Runs the connection's main loop to process incoming frames.
     ///
     /// 运行连接的主循环以处理传入的帧。
     pub async fn run(&mut self) -> Result<()> {
-        let state = &mut self.state;
-        let receiver = &mut self.receiver;
-        let mut rto_timer = tokio::time::interval(state.rto_estimator.rto());
-
         loop {
-            // By splitting the struct, the borrow checker now understands
-            // that we are operating on disjoint parts.
-            state.packetize_stream_data();
+            // Reassemble any ready packets and send them to the handle.
+            if let Some(available_data) = self.state.recv_buffer.reassemble() {
+                if self.tx_to_handle.send(available_data).await.is_err() {
+                    // Handle is dropped, connection is dead.
+                    self.state.state = State::Closed;
+                }
+            }
+
+            self.state.packetize_stream_data();
+
+            let rto_deadline = self
+                .state
+                .send_buffer
+                .in_flight
+                .front()
+                .map(|p| p.last_sent_at + self.state.rto_estimator.rto());
+
+            let sleep_future = async {
+                if let Some(deadline) = rto_deadline {
+                    tokio::time::sleep_until(deadline.into()).await;
+                } else {
+                    // No packets in flight, so sleep indefinitely until another event.
+                    std::future::pending::<()>().await;
+                }
+            };
 
             tokio::select! {
-                Some(frame) = receiver.recv() => {
-                    state.handle_frame(frame).await?;
+                // An incoming frame from the remote peer.
+                Some(frame) = self.receiver.recv() => {
+                    self.state.handle_frame(frame).await?;
                 }
 
+                // A command from the public-facing handle.
+                Some(cmd) = self.rx_from_handle.recv() => {
+                    match cmd {
+                        WorkerCommand::SendData(data) => {
+                            self.state.send_buffer.write_to_stream(&data);
+                        }
+                        WorkerCommand::Close => {
+                            self.state.shutdown();
+                        }
+                    }
+                }
+
+                // Time to send any queued packets.
                 res = async {
                     let mut frames_to_send = Vec::new();
-                    while state.can_send_more() {
-                        if let Some(frame) = state.send_buffer.pop_next_frame() {
+                    while self.state.can_send_more() {
+                        if let Some(frame) = self.state.send_buffer.pop_next_frame() {
                             frames_to_send.push(frame);
                         } else {
                             break; // No more frames to send
@@ -238,18 +280,18 @@ impl Connection {
                     if !frames_to_send.is_empty() {
                         let now = Instant::now();
                         for frame in &frames_to_send {
-                            state.send_buffer.add_in_flight(frame.clone(), now);
+                            self.state.send_buffer.add_in_flight(frame.clone(), now);
                         }
-                        state.send_frames(frames_to_send).await?;
+                        self.state.send_frames(frames_to_send).await?;
                     }
                     let res: Result<()> = Ok(());
                     res
-                }, if state.send_buffer.has_data_to_send() && state.can_send_more() => {
+                }, if self.state.send_buffer.has_data_to_send() && self.state.can_send_more() => {
                     res?;
                 }
 
-                _ = rto_timer.tick() => {
-                    state.check_for_retransmissions().await?;
+                _ = sleep_future => {
+                    self.state.check_for_retransmissions().await?;
                 }
 
                 else => {
@@ -257,94 +299,79 @@ impl Connection {
                 }
             }
 
-            if state.state == State::Closed {
+            if self.state.state == State::Closed {
                 break;
             }
         }
 
-        println!("Connection to {} closed.", state.remote_addr);
-        state.state = State::Closed;
+        println!("Connection to {} closed.", self.state.remote_addr);
+        self.state.state = State::Closed;
         Ok(())
     }
 }
 
 impl AsyncRead for Connection {
     fn poll_read(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
+        buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        let state = &mut self.get_mut().state;
-
-        // Try to read from the reassembled buffer first.
-        let bytes_read = state.recv_buffer.read_from_stream(buf.initialize_unfilled());
-        if bytes_read > 0 {
-            buf.advance(bytes_read);
+        // If we have data in our local buffer, use it first.
+        if !self.read_buffer.is_empty() {
+            let len = std::cmp::min(self.read_buffer.len(), buf.remaining());
+            buf.put_slice(&self.read_buffer.split_to(len));
             return Poll::Ready(Ok(()));
         }
 
-        // If no data is available, check connection state.
-        if state.state == State::Closed || state.state == State::FinWait {
-            // If the connection is closed and the buffer is empty, it's EOF.
-            return Poll::Ready(Ok(()));
+        // Otherwise, try to receive from the worker.
+        match self.rx_from_worker.poll_recv(cx) {
+            Poll::Ready(Some(data)) => {
+                let len = std::cmp::min(data.len(), buf.remaining());
+                buf.put_slice(&data[..len]);
+                // If there's leftover data, buffer it.
+                if data.len() > len {
+                    self.read_buffer = data.slice(len..);
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(None) => {
+                // Channel closed, connection is dead.
+                Poll::Ready(Ok(()))
+            }
+            Poll::Pending => Poll::Pending,
         }
-
-        // If no data is available and the connection is still open,
-        // store the waker and return Pending.
-        state.read_waker = Some(cx.waker().clone());
-        Poll::Pending
     }
 }
 
 impl AsyncWrite for Connection {
     fn poll_write(
         self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        let state = &mut self.get_mut().state;
-
-        if state.state == State::Closed || state.state == State::Closing {
-            return Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionAborted,
-                "Connection is closing or closed",
-            )));
+        // This is a simplified poll_write. A real implementation would need
+        // to handle the case where the channel is full (backpressure).
+        match self
+            .tx_to_worker
+            .try_send(WorkerCommand::SendData(Bytes::copy_from_slice(buf)))
+        {
+            Ok(_) => Poll::Ready(Ok(buf.len())),
+            Err(mpsc::error::TrySendError::Full(_)) => Poll::Pending,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+            }
         }
-
-        let bytes_written = state.send_buffer.write_to_stream(buf);
-
-        if bytes_written == 0 {
-            // Buffer is full, store waker and return pending.
-            state.write_waker = Some(cx.waker().clone());
-            return Poll::Pending;
-        }
-
-        Poll::Ready(Ok(bytes_written))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        // Since packetization and sending happens in the background `run` task,
-        // a flush can be considered successful if the data has been moved to the
-        // internal buffer. For a more "correct" flush, we would need to wait
-        // until the send_buffer is empty, which requires another waker mechanism.
+        // In this model, data is flushed automatically by the worker task.
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let state = &mut self.get_mut().state;
-
-        if state.state == State::Established {
-            state.shutdown();
-        }
-
-        if state.send_buffer.has_data_to_send() {
-            // Still data to send, wait.
-            state.write_waker = Some(cx.waker().clone());
-            Poll::Pending
-        } else {
-            // Buffer is empty, shutdown is complete.
-            Poll::Ready(Ok(()))
-        }
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        // Send the close command. Ignore if the channel is already closed.
+        let _ = self.tx_to_worker.try_send(WorkerCommand::Close);
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -412,11 +439,7 @@ impl ConnectionState {
                         // This is 0-RTT data.
                         println!("Received 0-RTT data ({} bytes).", payload.len());
                         self.recv_buffer.receive(0, payload);
-                        if self.recv_buffer.reassemble() {
-                            if let Some(waker) = self.read_waker.take() {
-                                waker.wake();
-                            }
-                        }
+                        // The `run` loop will call reassemble and send to handle.
                     }
 
                     // Respond with a SYN-ACK
@@ -453,12 +476,7 @@ impl ConnectionState {
                         payload.len()
                     );
                     self.recv_buffer.receive(header.sequence_number, payload);
-                    if self.recv_buffer.reassemble() {
-                        // New data is available for reading, wake up the reader task.
-                        if let Some(waker) = self.read_waker.take() {
-                            waker.wake();
-                        }
-                    }
+                    // The main run loop will handle reassembly and sending to the handle.
 
                     // Immediate ACK logic with threshold.
                     // 带阈值的即时ACK逻辑。
@@ -497,7 +515,7 @@ impl ConnectionState {
                     // will clear the in-flight buffer. We might need a more explicit check.
                     // For now, let's assume if we get a FIN here, we can close.
                     if self.state == State::Closing && self.send_buffer.in_flight.is_empty() {
-                         self.state = State::Closed;
+                        self.state = State::Closed;
                     }
                 }
                 _ => {
@@ -621,9 +639,6 @@ impl ConnectionState {
             if let Some(waker) = self.write_waker.take() {
                 waker.wake();
             }
-            if let Some(waker) = self.read_waker.take() {
-                waker.wake();
-            }
             return;
         }
 
@@ -635,7 +650,6 @@ impl ConnectionState {
             } else {
                 // We were in FinWait, meaning we already received a FIN.
                 // Now that our side is also closing, the connection is fully closed.
-                // This assumes our FIN will be sent and eventually ACKed.
                 // The final transition to Closed happens when our FIN is acknowledged.
                 self.state = State::Closing;
                 should_send_fin = true;
@@ -685,7 +699,7 @@ impl ConnectionState {
     /// Creates an ACK frame with the current SACK ranges.
     /// 使用当前的SACK范围创建一个ACK帧。
     fn create_ack_frame(&mut self) -> Frame {
-        let mut ack_payload = bytes::BytesMut::new();
+        let mut ack_payload = BytesMut::new();
         let sack_ranges = self.recv_buffer.get_sack_ranges();
         encode_sack_ranges(&sack_ranges, &mut ack_payload);
 
@@ -703,7 +717,6 @@ impl ConnectionState {
             payload: ack_payload.freeze(),
         }
     }
-
 
     /// Checks if we are allowed to send more packets based on flow and congestion control.
     /// 根据流量和拥塞控制检查我们是否被允许发送更多的包。
@@ -761,22 +774,21 @@ impl ConnectionState {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::packet::command::Command;
     use crate::testing::TestHarness;
     use tokio::io::AsyncWriteExt;
+    use tokio::time::Duration;
 
     #[tokio::test]
     async fn test_simple_write_and_ack() {
-        let mut harness = TestHarness::new_with_state(State::Established);
+        let (mut harness, mut connection) = TestHarness::new_with_state(State::Established);
         let test_data = b"hello from test";
 
         // Write data to the connection using the AsyncWrite trait
-        harness
-            .connection
+        connection
             .write_all(test_data)
             .await
             .expect("Write failed");
@@ -800,7 +812,7 @@ mod tests {
         };
 
         // The packet should now be in-flight
-        assert_eq!(harness.connection.state.send_buffer.in_flight.len(), 1);
+        assert_eq!(harness.worker.state.send_buffer.in_flight.len(), 1);
 
         // Now, simulate the peer sending an ACK for this packet
         let ack_header = crate::packet::header::ShortHeader {
@@ -815,7 +827,7 @@ mod tests {
             start: seq_num,
             end: seq_num,
         }];
-        let mut ack_payload = bytes::BytesMut::new();
+        let mut ack_payload = BytesMut::new();
         crate::packet::sack::encode_sack_ranges(&sack_ranges, &mut ack_payload);
 
         let ack_frame = Frame::Ack {
@@ -829,17 +841,16 @@ mod tests {
         harness.tick().await;
 
         // The in-flight buffer should now be empty
-        assert!(harness.connection.state.send_buffer.in_flight.is_empty());
+        assert!(harness.worker.state.send_buffer.in_flight.is_empty());
     }
 
     #[tokio::test]
     async fn test_0rtt_write() {
-        let mut harness = TestHarness::new_with_state(State::Connecting);
+        let (mut harness, mut connection) = TestHarness::new_with_state(State::Connecting);
         let test_data = b"0-rtt data";
 
         // Write data before the connection is established
-        harness
-            .connection
+        connection
             .write_all(test_data)
             .await
             .expect("0-RTT write failed");
@@ -877,16 +888,15 @@ mod tests {
         harness.tick().await;
 
         // The connection should now be in the Established state
-        assert_eq!(harness.connection.state.state, State::Established);
+        assert_eq!(harness.worker.state.state, State::Established);
     }
 
     #[tokio::test]
     async fn test_rto_retransmission() {
-        let mut harness = TestHarness::new_with_state(State::Established);
+        let (mut harness, mut connection) = TestHarness::new_with_state(State::Established);
         let test_data = b"rto test data";
 
-        harness
-            .connection
+        connection
             .write_all(test_data)
             .await
             .expect("Write failed");
@@ -899,11 +909,13 @@ mod tests {
             .expect("Did not receive frames from connection");
         assert_eq!(sent_frames.len(), 1);
         let original_seq_num = sent_frames[0].sequence_number().unwrap();
-        assert_eq!(harness.connection.state.send_buffer.in_flight.len(), 1);
+        assert_eq!(harness.worker.state.send_buffer.in_flight.len(), 1);
 
         // Advance time past the initial RTO
-        let initial_rto = harness.connection.state.rto_estimator.rto();
-        harness.advance_time(initial_rto + Duration::from_millis(100)).await;
+        let initial_rto = harness.worker.state.rto_estimator.rto();
+        harness
+            .advance_time(initial_rto + Duration::from_millis(100))
+            .await;
 
         // The connection should have retransmitted the packet.
         let retransmitted_frames = harness
@@ -918,6 +930,6 @@ mod tests {
             "The sequence number of the retransmitted packet should be the same"
         );
         // The packet is still in-flight
-        assert_eq!(harness.connection.state.send_buffer.in_flight.len(), 1);
+        assert_eq!(harness.worker.state.send_buffer.in_flight.len(), 1);
     }
 }

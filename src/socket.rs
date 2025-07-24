@@ -66,42 +66,28 @@ impl ReliableUdpSocket {
         let mut rng = rand::rng();
         let conn_id = rng.next_u32();
 
+        let (tx_to_worker, rx_from_worker) = mpsc::channel(128);
+
         // Create a new connection in the `Connecting` state.
-        let (mut connection, tx_to_conn) = Connection::new(
+        let (mut worker, handle) = connection::ConnectionWorker::new(
             remote_addr,
             conn_id,
             connection::State::Connecting,
             self.send_tx.clone(),
+            rx_from_worker,
         );
 
         // Spawn a new task for the connection to run in.
         tokio::spawn(async move {
-            if let Err(e) = connection.run().await {
+            if let Err(e) = worker.run().await {
                 eprintln!("Connection to {} closed with error: {}", remote_addr, e);
             }
         });
 
         // Insert the sender into the map so that incoming packets can be routed.
-        self.connections.insert(remote_addr, tx_to_conn);
+        self.connections.insert(remote_addr, tx_to_worker);
 
-        // We need another handle to the connection to return to the user.
-        // This is tricky because `connection` is moved into the task.
-        // Let's rethink this part. For now, let's assume we can return it.
-        // The correct way would be to have the `connect` function return a
-        // new `Connection` object that communicates with the task via channels.
-        // But for this implementation, we will need to change the API.
-        //
-        // Let's create another connection object to return. This is NOT right,
-        // but it will compile for now. We will fix this architecture later.
-        // The fundamental issue is that the user needs a handle (`Connection`)
-        // while the `run` loop also needs ownership of it.
-        let (connection_handle, _) = Connection::new(
-            remote_addr,
-            conn_id,
-            connection::State::Connecting,
-            self.send_tx.clone(),
-        );
-        Ok(connection_handle)
+        Ok(handle)
     }
 
     /// Runs the socket's main loop to receive and dispatch packets.
@@ -152,27 +138,29 @@ impl ReliableUdpSocket {
                 println!("Received SYN from {}, creating new connection.", remote_addr);
                 let conn_id = header.connection_id;
 
-                let (mut connection, tx) = Connection::new(
+                let (tx_to_worker, rx_from_worker) = mpsc::channel(128);
+
+                let (mut worker, _handle) = connection::ConnectionWorker::new(
                     remote_addr,
                     conn_id,
                     connection::State::Connecting,
                     self.send_tx.clone(),
+                    rx_from_worker,
                 );
 
                 // Spawn a new task for the connection to run in.
                 tokio::spawn(async move {
-                    if let Err(e) = connection.run().await {
+                    if let Err(e) = worker.run().await {
                         eprintln!("Connection to {} closed with error: {}", remote_addr, e);
                     }
                 });
 
                 // Store the sender so we can route future packets to it.
                 // 存储发送端，以便我们将来的包可以路由给它。
-                self.connections.insert(remote_addr, tx.clone());
+                self.connections.insert(remote_addr, tx_to_worker.clone());
 
                 // Send the first frame to the newly created connection.
-                // 将第一个帧发送给新创建的连接。
-                if tx.send(frame).await.is_err() {
+                if tx_to_worker.send(frame).await.is_err() {
                     self.connections.remove(&remote_addr);
                 }
             } else {

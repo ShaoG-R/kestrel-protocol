@@ -3,7 +3,7 @@
 
 use crate::packet::frame::Frame;
 use crate::packet::sack::SackRange;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
@@ -137,9 +137,6 @@ pub struct ReceiveBuffer {
     /// The total capacity of the buffer in packets.
     /// 缓冲区的总容量（以包为单位）。
     capacity: usize,
-    /// A buffer for reassembled data, ready to be read by the application.
-    /// 重组后的数据缓冲区，准备好被应用程序读取。
-    stream_buffer: VecDeque<u8>,
 }
 
 impl Default for ReceiveBuffer {
@@ -148,7 +145,6 @@ impl Default for ReceiveBuffer {
             next_sequence: 0,
             received: BTreeMap::new(),
             capacity: DEFAULT_RECV_BUFFER_CAPACITY,
-            stream_buffer: VecDeque::new(),
         }
     }
 }
@@ -182,28 +178,21 @@ impl ReceiveBuffer {
         }
     }
 
-    /// Reads a contiguous block of data from the internal stream buffer.
-    /// 从内部流缓冲区中读取一个连续的数据块。
-    pub fn read_from_stream(&mut self, buf: &mut [u8]) -> usize {
-        let bytes_to_copy = std::cmp::min(buf.len(), self.stream_buffer.len());
-        for (i, byte) in self.stream_buffer.drain(..bytes_to_copy).enumerate() {
-            buf[i] = byte;
-        }
-        bytes_to_copy
-    }
-
-    /// Tries to reassemble contiguous packets into the stream buffer.
-    /// Returns true if any new data was added to the stream.
+    /// Tries to reassemble contiguous packets into a single `Bytes` object.
+    /// Returns `Some(Bytes)` if any new data was reassembled.
     ///
-    /// 尝试将连续的数据包重组到流缓冲区中。
-    /// 如果有任何新数据被添加到流中，则返回true。
-    pub fn reassemble(&mut self) -> bool {
-        let mut made_progress = false;
+    /// 尝试将连续的数据包重组成一个单独的 `Bytes` 对象。
+    /// 如果有任何新数据被重组，则返回 `Some(Bytes)`。
+    pub fn reassemble(&mut self) -> Option<Bytes> {
+        let mut reassembled_data = BytesMut::new();
         while let Some(payload) = self.try_pop_next_contiguous() {
-            self.stream_buffer.extend(payload.iter());
-            made_progress = true;
+            reassembled_data.extend_from_slice(&payload);
         }
-        made_progress
+        if reassembled_data.is_empty() {
+            None
+        } else {
+            Some(reassembled_data.freeze())
+        }
     }
 
     /// Checks for the next contiguous packet, removes it from the buffer,
@@ -358,18 +347,13 @@ mod tests {
         let payload2 = Bytes::from_static(b" world");
 
         recv_buffer.receive(0, payload1.clone());
-        assert!(recv_buffer.reassemble());
-
-        let mut read_buf = [0u8; 20];
-        assert_eq!(recv_buffer.read_from_stream(&mut read_buf), payload1.len());
-        assert_eq!(&read_buf[..payload1.len()], payload1.as_ref());
+        let reassembled1 = recv_buffer.reassemble().unwrap();
+        assert_eq!(reassembled1, payload1);
         assert_eq!(recv_buffer.next_sequence(), 1);
 
         recv_buffer.receive(1, payload2.clone());
-        assert!(recv_buffer.reassemble());
-
-        assert_eq!(recv_buffer.read_from_stream(&mut read_buf), payload2.len());
-        assert_eq!(&read_buf[..payload2.len()], payload2.as_ref());
+        let reassembled2 = recv_buffer.reassemble().unwrap();
+        assert_eq!(reassembled2, payload2);
         assert_eq!(recv_buffer.next_sequence(), 2);
     }
 
@@ -382,36 +366,23 @@ mod tests {
 
         // Receive 2, then 0, then 1
         recv_buffer.receive(2, payload3.clone());
-        assert!(!recv_buffer.reassemble()); // Nothing to reassemble yet
+        assert!(recv_buffer.reassemble().is_none()); // Nothing to reassemble yet
 
         recv_buffer.receive(0, payload1.clone());
-        assert!(recv_buffer.reassemble()); // Reassembles packet 0
-
-        let mut read_buf = [0u8; 5];
-        assert_eq!(recv_buffer.read_from_stream(&mut read_buf), payload1.len());
-        assert_eq!(&read_buf, payload1.as_ref());
+        let reassembled1 = recv_buffer.reassemble().unwrap(); // Reassembles packet 0
+        assert_eq!(reassembled1, payload1);
         assert_eq!(recv_buffer.next_sequence(), 1);
 
         // stream buffer is empty now, but packet 2 is still held
-        assert_eq!(recv_buffer.read_from_stream(&mut read_buf), 0);
+        assert!(recv_buffer.reassemble().is_none());
 
         recv_buffer.receive(1, payload2.clone());
-        assert!(recv_buffer.reassemble()); // Reassembles 1 and 2
+        let reassembled2 = recv_buffer.reassemble().unwrap(); // Reassembles 1 and 2
 
-        let mut read_buf_full = [0u8; 20];
-        let expected_len = payload2.len() + payload3.len();
-        assert_eq!(
-            recv_buffer.read_from_stream(&mut read_buf_full),
-            expected_len
-        );
-
-        let mut expected_data = Vec::new();
+        let mut expected_data = BytesMut::new();
         expected_data.extend_from_slice(&payload2);
         expected_data.extend_from_slice(&payload3);
-        assert_eq!(
-            &read_buf_full[..expected_len],
-            expected_data.as_slice()
-        );
+        assert_eq!(reassembled2, expected_data.freeze());
         assert_eq!(recv_buffer.next_sequence(), 3);
     }
 
