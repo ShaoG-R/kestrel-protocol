@@ -8,6 +8,8 @@
 
 项目已经提供了面向用户的 `AsyncRead`/`AsyncWrite` 流式API，并引入了 `thiserror` 进行标准化错误处理。同时，核心的0-RTT连接、包聚合等优化也已实现。
 
+近期，项目进一步完成了重要的架构重构，引入了结构化日志、统一的`Config`配置系统、服务器端`accept()` API、更安全的双向连接ID握手以及协议版本协商机制，极大地增强了代码库的健壮性、灵活性与专业性。
+
 目前的主要短板在于自动化测试覆盖尚不完整，虽然已经搭建了测试框架，但需要为更多场景补充用例。
 
 ## 2. 当前阶段评估 (Current Phase Assessment)
@@ -19,6 +21,8 @@
 *   **完成度高的部分**:
     *   包的序列化/反序列化 (Phase 1)
     *   基于MPSC的无锁并发模型 (Phase 1, 3.2)
+    *   更安全的双向连接ID握手协议 (Security)
+    *   协议版本协商机制 (Versioning)
     *   0-RTT连接建立与四次挥手关闭 (Phase 2)
     *   动态RTO、超时重传、快速重传 (Phase 3)
     *   基于SACK的高效确认机制 (Phase 4)
@@ -26,44 +30,32 @@
     *   基于延迟的拥塞控制 (Phase 5)
     *   包聚合/粘连与快速应答 (Phase 5)
     *   面向用户的流式API (`AsyncRead`/`AsyncWrite`) (Phase 6)
-    *   基于 `thiserror` 的标准化错误处理 (Phase 5, `Other Requirements`)
+    *   类似`TcpListener`的服务器端`accept()` API (API)
+    *   基于 `tracing` 的结构化日志记录 (Logging)
+    *   统一的可配置化 (`Config`结构体) (Configuration)
+    *   基于 `thiserror` 的标准化错误处理 (Error Handling)
+    *   核心连接逻辑的模块化重构 (Code Quality)
 
 *   **未完成或不完整的部分**:
     *   单元测试和集成测试覆盖不完整 (Phase 6)
 
-## 3. 未来改进方向与架构演进 (Future Improvements & Architectural Evolution)
+## 3. 下一步架构思考：协议分层 (Next Architectural Step: Protocol Layering)
 
-在完成核心功能后，我们识别出以下几个潜在的改进方向，旨在增强代码库的灵活性、健壮性和长期可维护性。这些建议将指导我们下一阶段的开发工作。
+为了进一步提升代码库的模块化程度和灵活性，下一步的核心架构目标是**将协议实现解耦为独立的、可组合的层次**。
 
-### 3.1. 提升灵活性与可配置性 (Enhanced Flexibility & Configurability)
+*   **目标 (Goal):** 将当前紧密耦合的协议实现拆分为独立的层，特别是将`可靠性`（ARQ, SACK）与`拥塞控制`的逻辑分离。
 
-*   **引入统一的`Config`结构体 (Introduce a Unified `Config` Struct):**
-    *   **现状**: 协议参数（如`INITIAL_RTO`, `MAX_PAYLOAD_SIZE`等）以`const`形式硬编码在各个模块中。
-    *   **改进**: 创建一个`connection::Config`结构体，将所有可调参数作为其字段。这允许库的使用者在运行时动态配置协议行为，而无需重新编译代码，极大地提升了库的适用性。
+*   **现状 (Current State):** `Connection`模块目前同时处理了数据包的序列化、可靠性（重传、确认）和拥塞控制，耦合度较高。
 
-*   **设计服务器端`accept()` API (Design a Server-side `accept()` API):**
-    *   **现状**: 服务器端在新`SYN`包到达时会自动创建并运行连接，应用层无法介入。
-    *   **改进**: 模仿`tokio::net::TcpListener`，为`ReliableUdpSocket`提供一个异步的`accept()`方法。这使得服务器应用可以在接受连接前执行自定义逻辑（如IP过滤、连接数限制），从而给予应用层更大的控制权。
+*   **改进方向 (Improvement Direction):**
+    1.  **可靠性层 (Reliability Layer):** 一个核心层，只负责处理序列号、超时重传（RTO）、SACK确认和乱序重组。它向上层提供“发送可靠数据块”和“接收可靠数据块”的接口，自身不关心拥塞控制。
+    2.  **拥塞控制层 (Congestion Control Layer):** 作为可靠性层的一个插件或包装器（wrapper）。它观察可靠性层的事件（如ACK接收、丢包），并根据其算法动态调整发送速率，最终告诉可靠性层“当前可以发送多少数据”。
+    3.  **流式接口层 (Stream API Layer):** 最高层，负责将可靠性层的数据块接口适配为`AsyncRead`/`AsyncWrite`的连续字节流接口。
 
-### 3.2. 增强代码结构与可维护性 (Improved Code Structure & Maintainability)
-
-*   **引入结构化日志 (Adopt Structured Logging):**
-    *   **现状**: 使用`println!`进行调试输出。
-    *   **改进**: 全面采用`tracing`或`log` crate进行结构化日志记录。这使得日志级别可控、输出可重定向，是让代码库达到“生产环境就绪”水平的关键一步。
-
-*   **拆分`ConnectionWorker`的核心逻辑 (Refactor `ConnectionWorker` Logic):**
-    *   **现状**: `ConnectionWorker::handle_frame`方法是一个庞大的`match`语句，处理所有状态下的所有事件。
-    *   **改进**: 将其按连接状态拆分为更小的独立函数（如`handle_frame_connecting`, `handle_frame_established`），每个函数只负责一个特定状态的逻辑，从而降低复杂度，提升代码的可读性和可测试性。
-
-### 3.3. 协议健壮性与未来演进 (Protocol Robustness & Future Evolution)
-
-*   **明确协议版本协商 (Implement Protocol Version Negotiation):**
-    *   **现状**: 长头中的`protocol_version`字段未被有效利用。
-    *   **改进**: 在接收`SYN`包时，实现对协议版本的检查与协商逻辑。这为未来协议的平滑升级和版本兼容性奠定了基础。
-
-*   **强化连接ID的安全性 (Harden Connection ID Security):**
-    *   **现状**: `connection_id`由客户端随机生成，可能存在被猜测的风险。
-    *   **改进**: 探讨借鉴QUIC等协议的思路，引入更安全的连接ID机制（如引入服务端生成的元素），以抵御IP欺骗、连接注入等潜在攻击。
+*   **优势 (Benefits):**
+    *   **可替换性 (Pluggability):** 可以轻松地替换或禁用拥塞控制算法，甚至实现多种算法供用户在`Config`中选择。
+    *   **可测试性 (Testability):** 每个层次都可以被独立、精确地测试，例如可以只测试可靠性逻辑而无需关心拥塞控制。
+    *   **清晰度 (Clarity):** 代码职责更加单一，逻辑更清晰，便于理解和维护。
 
 ---
 <br/>
