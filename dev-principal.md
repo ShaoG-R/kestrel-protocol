@@ -67,6 +67,15 @@
         *   **核心指标导出:** 暴露关键性能指标（如：`srtt`, `rttvar`, `cwnd`, in-flight 包数量等），以便集成到监控系统（如 Prometheus）。
     4.  **拥塞控制算法扩展 (Congestion Control Algorithm Expansion):**
         *   实现并集成一个备选的拥塞控制算法（例如简化的 BBR），并允许用户通过 `Config` 进行选择。
+    5.  **连接迁移与NAT穿透增强 (Connection Migration & Enhanced NAT Traversal):**
+        *   **问题 (Problem):** 当前协议使用 `SocketAddr` (IP:Port) 作为连接的主要标识。当客户端因为NAT重新绑定（NAT Rebinding）而改变源端口时，连接会中断。
+        *   **解决方案 (Solution):** 引入连接迁移 (Connection Migration) 机制，以 `connection_id` 作为连接的稳定标识符。
+            *   **主分发器重构 (Demultiplexer Rework):** `ReliableUdpSocket` 的主任务需要维护一个 `ConnectionId -> Connection` 的映射表，取代现有的 `SocketAddr -> Connection` 映射。
+            *   **路径验证 (Path Validation):** 为防止IP欺骗攻击，当从一个新的 `SocketAddr` 收到一个现有连接的包时，必须进行路径验证。
+                1.  服务器向新地址发送一个包含随机质询数据的 `PATH_CHALLENGE` 包。
+                2.  客户端必须用一个包含该质询数据的 `PATH_RESPONSE` 包来回应。
+                3.  验证成功后，服务端才将对端的地址更新为新地址。
+            *   **新增协议指令 (New Protocol Commands):** 需要在协议中增加 `PATH_CHALLENGE` (e.g., `0x13`) 和 `PATH_RESPONSE` (e.g., `0x14`) 两个新指令。
 
 ---
 <br/>
@@ -114,13 +123,15 @@
 *   `0x10`: `PUSH` (短头) - 数据包。
 *   `0x11`: `ACK` (短头) - 确认包，其载荷为SACK信息。
 *   `0x12`: `PING` (短头) - 心跳包，用于保活和网络探测。
+*   `0x13`: `PATH_CHALLENGE` (短头) - 路径验证请求，用于连接迁移。
+*   `0x14`: `PATH_RESPONSE` (短头) - 路径验证响应，用于连接迁移。
 
 **短头部 (Short Header) - 19字节 (参考 AP-KCP)**
 *用于 `PUSH`, `ACK`, `PING` 包。这是最常见的包类型，头部必须极致精简。*
 
 | 字段 (Field)              | 字节 (Bytes) | 描述 (Description)                                                               |
 | ------------------------- | ------------ | -------------------------------------------------------------------------------- |
-| `command`                 | 1            | 指令, `0x10`, `0x11`, or `0x12`                                                    |
+| `command`                 | 1            | 指令, `0x10`, `0x11`, `0x12`, `0x13`, `0x14` etc.                                  |
 | `connection_id`           | 4            | 连接ID。AP-KCP使用2字节，我们暂定4字节以备将来扩展，但可作为优化点。     |
 | `recv_window_size`        | 2            | 接收方当前可用的接收窗口大小（以包为单位）。                                     |
 | `timestamp`               | 4            | 发送时的时间戳 (ms)，用于计算RTT。                                                |
