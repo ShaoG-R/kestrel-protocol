@@ -1,6 +1,7 @@
 //! 定义了单个可靠连接。
 //! Defines a single reliable connection.
 
+use crate::buffer::{ReceiveBuffer, SendBuffer};
 use crate::packet::frame::Frame;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
@@ -35,6 +36,16 @@ pub enum State {
     Closed,
 }
 
+/// The internal state of a connection, separated to satisfy the borrow checker.
+/// 连接的内含状态，分离出来是为了满足借用检查器。
+struct ConnectionState {
+    remote_addr: SocketAddr,
+    state: State,
+    send_buffer: SendBuffer,
+    recv_buffer: ReceiveBuffer,
+    sender: mpsc::Sender<SendCommand>,
+}
+
 /// Represents a single reliable connection.
 ///
 /// Each connection is managed by its own asynchronous task.
@@ -43,21 +54,13 @@ pub enum State {
 ///
 /// 每个连接都由其自己的异步任务管理。
 pub struct Connection {
-    /// The remote address of the connection.
-    /// 连接的远程地址。
-    remote_addr: SocketAddr,
-
-    /// The current state of the connection.
-    /// 连接的当前状态。
-    state: State,
+    /// The actual state of the connection.
+    /// 连接的实际状态。
+    state: ConnectionState,
 
     /// Receives frames from the main socket task.
     /// 从主套接字任务接收帧。
     receiver: mpsc::Receiver<Frame>,
-
-    /// Sends frames to the central socket sender task.
-    /// 向中央套接字发送任务发送帧。
-    sender: mpsc::Sender<SendCommand>,
 }
 
 impl Connection {
@@ -76,29 +79,88 @@ impl Connection {
         // We can tune the channel size later.
         // 我们之后可以调整通道的大小。
         let (in_tx, in_rx) = mpsc::channel(128);
-        let connection = Self {
+        let state = ConnectionState {
             remote_addr,
             state: initial_state,
-            receiver: in_rx,
+            send_buffer: SendBuffer::new(),
+            recv_buffer: ReceiveBuffer::new(),
             sender,
         };
+        let connection = Self { state, receiver: in_rx };
         (connection, in_tx)
+    }
+
+    /// Writes a slice of bytes to the connection.
+    ///
+    /// This will segment the data into one or more PUSH frames and queue them for sending.
+    ///
+    /// 向连接写入一个字节切片。
+    ///
+    /// 这会将数据分段成一个或多个PUSH帧，并将它们排队等待发送。
+    pub async fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // TODO: This is a simplification. We should handle:
+        // 1. A buf that is larger than a single packet's payload capacity.
+        // 2. Generating correct sequence numbers.
+        // 3. Locking and synchronization if `write` can be called concurrently.
+
+        let payload = bytes::Bytes::copy_from_slice(buf);
+
+        // Create a PUSH frame (with a dummy header for now)
+        let push_header = crate::packet::header::ShortHeader {
+            command: crate::packet::command::Command::Push,
+            connection_id: 0, // TODO: Use the actual connection ID
+            recv_window_size: 0, // TODO: Update with real value
+            timestamp: 0, // TODO: Update with real value
+            sequence_number: 0, // TODO: Get from a sequence number generator
+            recv_next_sequence: 0, // TODO: Update with real value
+        };
+
+        let frame = Frame::Push {
+            header: push_header,
+            payload,
+        };
+
+        self.state.send_buffer.queue_frame(frame);
+
+        // For now, we just pretend we wrote everything.
+        Ok(buf.len())
     }
 
     /// Runs the connection's main loop to process incoming frames.
     ///
     /// 运行连接的主循环以处理传入的帧。
     pub async fn run(&mut self) {
-        while let Some(frame) = self.receiver.recv().await {
-            self.handle_frame(frame).await;
+        let state = &mut self.state;
+        let receiver = &mut self.receiver;
+
+        loop {
+            // By splitting the struct, the borrow checker now understands
+            // that we are operating on disjoint parts.
+            tokio::select! {
+                Some(frame) = receiver.recv() => {
+                    state.handle_frame(frame).await;
+                }
+
+                _ = async {
+                    if let Some(frame) = state.send_buffer.pop_next_frame() {
+                        state.send_frame(frame).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }, if !state.send_buffer.is_empty() => {}
+
+                else => {
+                    break;
+                }
+            }
         }
 
-        // When the channel is closed, the loop exits and the connection task ends.
-        // 当通道关闭时，循环退出，连接任务结束。
-        println!("Connection to {} closed.", self.remote_addr);
-        self.state = State::Closed;
+        println!("Connection to {} closed.", state.remote_addr);
+        state.state = State::Closed;
     }
+}
 
+impl ConnectionState {
     /// Handles a single incoming frame based on the current state.
     /// 根据当前状态处理单个传入的帧。
     async fn handle_frame(&mut self, frame: Frame) {
@@ -131,10 +193,31 @@ impl Connection {
                 }
             }
             State::Established => {
-                // TODO: Handle data, acks, etc.
+                match frame {
+                    Frame::Push { header, payload } => {
+                        // TODO: Pass the data to the receive buffer for reordering and delivery.
+                        // 将数据传递给接收缓冲区进行重排和交付。
+                        println!("Received PUSH with {} bytes of payload.", payload.len());
+                    }
+                    Frame::Ack { header, payload } => {
+                        // TODO: Process the acknowledgment information in the send buffer.
+                        // 在发送缓冲区中处理确认信息。
+                        println!("Received ACK.");
+                    }
+                    Frame::Fin { header } => {
+                        // TODO: Handle connection termination.
+                        println!("Received FIN, start closing connection.");
+                        self.state = State::Closing;
+                        // We should respond with a FIN-ACK.
+                    }
+                    _ => {
+                        // Ignore other unexpected packets in this state.
+                        println!("Ignoring unexpected frame in Established state: {:?}", frame);
+                    }
+                }
             }
             State::Closing => {
-                // TODO: Handle FINs, etc.
+                // TODO: Handle FINs, ACKs during closing phase.
             }
             State::Closed => {
                 // Should not receive frames in closed state.
