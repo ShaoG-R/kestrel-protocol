@@ -449,111 +449,136 @@ impl ConnectionState {
         );
 
         match self.state {
-            State::Connecting => match frame {
-                Frame::Syn { header: _, payload } => {
-                    // This is the server-side logic for an incoming connection.
-                    // 这是服务器端处理新连接的逻辑。
-                    info!(addr = %self.remote_addr, "Transitioning to Established state.");
-                    self.state = State::Established;
-
-                    if !payload.is_empty() {
-                        // This is 0-RTT data.
-                        debug!(addr = %self.remote_addr, bytes = payload.len(), "Received 0-RTT data.");
-                        self.recv_buffer.receive(0, payload);
-                        // The `run` loop will call reassemble and send to handle.
-                    }
-
-                    // Respond with a SYN-ACK
-                    let syn_ack_header = crate::packet::header::LongHeader {
-                        command: crate::packet::command::Command::SynAck,
-                        protocol_version: 0,
-                        connection_id: self.connection_id,
-                    };
-                    let syn_ack_frame = Frame::SynAck {
-                        header: syn_ack_header,
-                    };
-                    self.send_frames(vec![syn_ack_frame]).await?;
-                }
-                Frame::SynAck { header: _ } => {
-                    // This is the client-side logic when receiving the server's ack.
-                    // 这是客户端收到服务器ack时的逻辑。
-                    info!(addr = %self.remote_addr, "Received SYN-ACK, connection established.");
-                    self.state = State::Established;
-                    // Our SYN is implicitly acknowledged. The data sent in it can be
-                    // considered "in-flight" but since there's no sequence number,
-                    // we don't track it for retransmission. We assume it arrived.
-                }
-                _ => {
-                    // Ignore other packets while connecting
-                }
-            },
-            State::Established => match frame {
-                Frame::Push { header, payload } => {
-                    // Pass the data to the receive buffer for reordering and delivery.
-                    // 将数据传递给接收缓冲区进行重排和交付。
-                    debug!(
-                        addr = %self.remote_addr,
-                        seq = header.sequence_number,
-                        bytes = payload.len(),
-                        "Received PUSH frame."
-                    );
-                    self.recv_buffer.receive(header.sequence_number, payload);
-                    // The main run loop will handle reassembly and sending to the handle.
-
-                    // Mark that we owe an ACK, and check if we should send one immediately.
-                    self.ack_pending = true;
-                    if self.ack_eliciting_packets_since_last_ack >= self.config.ack_threshold
-                        && !self.recv_buffer.get_sack_ranges().is_empty()
-                    {
-                        self.send_ack_if_needed().await?;
-                    }
-                }
-                Frame::Ack { header, payload } => {
-                    self.handle_ack(header, payload).await?;
-                }
-                Frame::Fin { header: _ } => {
-                    info!(addr = %self.remote_addr, "Received FIN, entering FIN_WAIT and sending ACK.");
-                    // Acknowledge their FIN.
-                    self.send_ack_for_fin().await?;
-                    // Transition to FinWait, waiting for our side to close.
-                    self.state = State::FinWait;
-                }
-                _ => {
-                    // Ignore other unexpected packets in this state.
-                    warn!(addr = %self.remote_addr, ?frame, "Ignoring unexpected frame in Established state");
-                }
-            },
-            State::Closing => match frame {
-                Frame::Ack { header, payload } => {
-                    self.handle_ack(header, payload).await?;
-                }
-                Frame::Fin { header: _ } => {
-                    info!(addr = %self.remote_addr, "Received FIN while Closing, sending ACK.");
-                    self.send_ack_for_fin().await?;
-                    // If our FIN is acknowledged and we have received and acknowledged their FIN,
-                    // we can move to closed. This check happens implicitly as the ACK processing
-                    // will clear the in-flight buffer. We might need a more explicit check.
-                    // For now, let's assume if we get a FIN here, we can close.
-                    if self.state == State::Closing && self.send_buffer.in_flight.is_empty() {
-                        self.state = State::Closed;
-                    }
-                }
-                _ => {
-                    warn!(addr = %self.remote_addr, ?frame, "Ignoring unexpected frame in Closing state");
-                }
-            },
-            State::FinWait => match frame {
-                // Application has called close(), now we send our FIN.
-                // We shouldn't be receiving data frames here, but handle ACKs.
-                Frame::Ack { header, payload } => {
-                    self.handle_ack(header, payload).await?;
-                }
-                _ => {
-                    warn!(addr = %self.remote_addr, ?frame, "Ignoring unexpected frame in FinWait state");
-                }
-            },
+            State::Connecting => self.handle_frame_connecting(frame).await,
+            State::Established => self.handle_frame_established(frame).await,
+            State::Closing => self.handle_frame_closing(frame).await,
+            State::FinWait => self.handle_frame_fin_wait(frame).await,
             State::Closed => {
-                // Should not receive frames in closed state.
+                warn!(addr = %self.remote_addr, ?frame, "Ignoring frame in Closed state");
+                Ok(())
+            }
+        }
+    }
+
+    /// Handles a single incoming frame when the connection is `Connecting`.
+    async fn handle_frame_connecting(&mut self, frame: Frame) -> Result<()> {
+        match frame {
+            Frame::Syn { header: _, payload } => {
+                // This is the server-side logic for an incoming connection.
+                // 这是服务器端处理新连接的逻辑。
+                info!(addr = %self.remote_addr, "Transitioning to Established state.");
+                self.state = State::Established;
+
+                if !payload.is_empty() {
+                    // This is 0-RTT data.
+                    debug!(addr = %self.remote_addr, bytes = payload.len(), "Received 0-RTT data.");
+                    self.recv_buffer.receive(0, payload);
+                    // The `run` loop will call reassemble and send to handle.
+                }
+
+                // Respond with a SYN-ACK
+                let syn_ack_header = crate::packet::header::LongHeader {
+                    command: crate::packet::command::Command::SynAck,
+                    protocol_version: 0,
+                    connection_id: self.connection_id,
+                };
+                let syn_ack_frame = Frame::SynAck {
+                    header: syn_ack_header,
+                };
+                self.send_frames(vec![syn_ack_frame]).await?;
+            }
+            Frame::SynAck { header: _ } => {
+                // This is the client-side logic when receiving the server's ack.
+                // 这是客户端收到服务器ack时的逻辑。
+                info!(addr = %self.remote_addr, "Received SYN-ACK, connection established.");
+                self.state = State::Established;
+                // Our SYN is implicitly acknowledged. The data sent in it can be
+                // considered "in-flight" but since there's no sequence number,
+                // we don't track it for retransmission. We assume it arrived.
+            }
+            _ => {
+                // Ignore other packets while connecting
+                warn!(addr = %self.remote_addr, ?frame, "Ignoring unexpected frame in Connecting state");
+            }
+        }
+        Ok(())
+    }
+
+    /// Handles a single incoming frame when the connection is `Established`.
+    async fn handle_frame_established(&mut self, frame: Frame) -> Result<()> {
+        match frame {
+            Frame::Push { header, payload } => {
+                // Pass the data to the receive buffer for reordering and delivery.
+                // 将数据传递给接收缓冲区进行重排和交付。
+                debug!(
+                    addr = %self.remote_addr,
+                    seq = header.sequence_number,
+                    bytes = payload.len(),
+                    "Received PUSH frame."
+                );
+                self.recv_buffer.receive(header.sequence_number, payload);
+                // The main run loop will handle reassembly and sending to the handle.
+
+                // Mark that we owe an ACK, and check if we should send one immediately.
+                self.ack_pending = true;
+                if self.ack_eliciting_packets_since_last_ack >= self.config.ack_threshold
+                    && !self.recv_buffer.get_sack_ranges().is_empty()
+                {
+                    self.send_ack_if_needed().await?;
+                }
+            }
+            Frame::Ack { header, payload } => {
+                self.handle_ack(header, payload).await?;
+            }
+            Frame::Fin { header: _ } => {
+                info!(addr = %self.remote_addr, "Received FIN, entering FIN_WAIT and sending ACK.");
+                // Acknowledge their FIN.
+                self.send_ack_for_fin().await?;
+                // Transition to FinWait, waiting for our side to close.
+                self.state = State::FinWait;
+            }
+            _ => {
+                // Ignore other unexpected packets in this state.
+                warn!(addr = %self.remote_addr, ?frame, "Ignoring unexpected frame in Established state");
+            }
+        }
+        Ok(())
+    }
+
+    /// Handles a single incoming frame when the connection is `Closing`.
+    async fn handle_frame_closing(&mut self, frame: Frame) -> Result<()> {
+        match frame {
+            Frame::Ack { header, payload } => {
+                self.handle_ack(header, payload).await?;
+            }
+            Frame::Fin { header: _ } => {
+                info!(addr = %self.remote_addr, "Received FIN while Closing, sending ACK.");
+                self.send_ack_for_fin().await?;
+                // If our FIN is acknowledged and we have received and acknowledged their FIN,
+                // we can move to closed. This check happens implicitly as the ACK processing
+                // will clear the in-flight buffer. We might need a more explicit check.
+                // For now, let's assume if we get a FIN here, we can close.
+                if self.state == State::Closing && self.send_buffer.in_flight.is_empty() {
+                    self.state = State::Closed;
+                }
+            }
+            _ => {
+                warn!(addr = %self.remote_addr, ?frame, "Ignoring unexpected frame in Closing state");
+            }
+        }
+        Ok(())
+    }
+
+    /// Handles a single incoming frame when the connection is in `FinWait`.
+    async fn handle_frame_fin_wait(&mut self, frame: Frame) -> Result<()> {
+        match frame {
+            // Application has called close(), now we send our FIN.
+            // We shouldn't be receiving data frames here, but handle ACKs.
+            Frame::Ack { header, payload } => {
+                self.handle_ack(header, payload).await?;
+            }
+            _ => {
+                warn!(addr = %self.remote_addr, ?frame, "Ignoring unexpected frame in FinWait state");
             }
         }
         Ok(())
