@@ -6,29 +6,30 @@
 
 当前项目已经实现了一个功能相当完备的可靠UDP协议核心。协议栈的底层设计，包括包结构、无锁并发模型、连接生命周期管理、基于SACK的可靠传输以及基于延迟的拥塞控制，都已基本完成。
 
-然而，项目在高层API抽象、错误处理和自动化测试方面存在明显缺失。因此，项目目前的核心协议功能已接近完成，但距离一个健壮、可用的库还有差距。
+项目已经提供了面向用户的 `AsyncRead`/`AsyncWrite` 流式API，并引入了 `thiserror` 进行标准化错误处理。同时，核心的0-RTT连接、包聚合等优化也已实现。
+
+目前的主要短板在于自动化测试覆盖尚不完整，虽然已经搭建了测试框架，但需要为更多场景补充用例。
 
 ## 2. 当前阶段评估 (Current Phase Assessment)
 
 根据 `dev-principal.md` 的阶段划分，项目当前的状态是：
 
-**已完成 Phase 1-5 的核心功能，即将进入 Phase 6。**
+**已完成 Phase 1-5 的核心功能，并已进入 Phase 6 的API实现与测试阶段。**
 
 *   **完成度高的部分**:
     *   包的序列化/反序列化 (Phase 1)
     *   基于MPSC的无锁并发模型 (Phase 1, 3.2)
-    *   连接建立与四次挥手关闭 (Phase 2)
+    *   0-RTT连接建立与四次挥手关闭 (Phase 2)
     *   动态RTO、超时重传、快速重传 (Phase 3)
     *   基于SACK的高效确认机制 (Phase 4)
     *   滑动窗口流量控制 (Phase 4)
     *   基于延迟的拥塞控制 (Phase 5)
+    *   包聚合/粘连与快速应答 (Phase 5)
+    *   面向用户的流式API (`AsyncRead`/`AsyncWrite`) (Phase 6)
+    *   基于 `thiserror` 的标准化错误处理 (Phase 5, `Other Requirements`)
 
 *   **未完成或不完整的部分**:
-    *   面向用户的流式API (`AsyncRead`/`AsyncWrite`) (Phase 6)
-    *   单元测试和集成测试 (Phase 6)
-    *   基于 `thiserror` 的标准化错误处理 (Phase 5, `Other Requirements`)
-    *   0-RTT 连接 (Phase 2)
-    *   包聚合/粘连未被充分利用 (Phase 5)
+    *   单元测试和集成测试覆盖不完整 (Phase 6)
 
 ## 3. 存在的问题与和设计文档的偏差 (Identified Issues & Deviations)
 
@@ -44,7 +45,7 @@
 
 6.  **【低优先级】`FIN` 包头部类型与文档不符 (FIN Header Mismatch):**
     *   **设计文档 (`dev-principal.md`):** 将 `FIN` 归类为**长头部**。
-    *   **当前实现 (`packet/command.rs`, `packet/frame.rs`):** 将 `FIN` 实现为**短头部**。
+    *   **当前实现 (`packet/command.rs`):** 将 `FIN` 实现为**短头部**。
     *   这是一个明显的实现与文档的矛盾，需要统一。
 
 7.  **【信息】分发键不同 (Different Demultiplexing Key):**
