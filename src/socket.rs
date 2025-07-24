@@ -7,7 +7,6 @@ use crate::core::stream::Stream;
 use crate::error::Result;
 use crate::packet::frame::Frame;
 use dashmap::DashMap;
-use rand::RngCore;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -104,19 +103,15 @@ impl ReliableUdpSocket {
         remote_addr: SocketAddr,
         config: Config,
     ) -> Result<Stream> {
-        let local_cid = rand::rng().next_u32();
-        // For the client, the peer's CID is initially unknown, so we use 0.
-        // The server will tell us its CID in the SYN-ACK.
-        let peer_cid = 0;
+        let local_cid = rand::random();
 
         let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
         // Create a new Endpoint and get the stream handles
-        let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) = Endpoint::new(
+        let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) = Endpoint::new_client(
             config,
             remote_addr,
             local_cid,
-            peer_cid,
             rx_from_socket,
             self.send_tx.clone(),
         );
@@ -212,11 +207,11 @@ impl ReliableUdpSocket {
                 info!(addr = %remote_addr, "Accepting new connection attempt.");
                 // The client's CID is in the source_cid field. The destination is our future CID.
                 let peer_cid = header.source_cid;
-                let local_cid = rand::rng().next_u32();
+                let local_cid = rand::random();
                 let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
                 let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
-                    Endpoint::new(
+                    Endpoint::new_server(
                         config,
                         remote_addr,
                         local_cid,

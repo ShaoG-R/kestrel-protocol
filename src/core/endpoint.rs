@@ -66,8 +66,41 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// Creates a new `Endpoint` and the channel handles for its `Stream`.
-    pub fn new(
+    /// Creates a new `Endpoint` for the client-side.
+    pub fn new_client(
+        config: Config,
+        remote_addr: SocketAddr,
+        local_cid: u32,
+        receiver: mpsc::Receiver<Frame>,
+        sender: mpsc::Sender<SendCommand>,
+    ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Bytes>) {
+        let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
+        let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
+
+        let reliability = ReliabilityLayer::new(config.clone());
+        let congestion_control = Box::new(Vegas::new(config.clone()));
+
+        let endpoint = Self {
+            remote_addr,
+            local_cid,
+            peer_cid: 0, // Client doesn't know peer's CID initially
+            state: State::Connecting,
+            start_time: Instant::now(),
+            reliability,
+            congestion_control,
+            peer_recv_window: 32, // Default initial value
+            config,
+            receiver,
+            sender,
+            rx_from_stream,
+            tx_to_stream,
+        };
+
+        (endpoint, tx_to_endpoint, rx_from_endpoint)
+    }
+
+    /// Creates a new `Endpoint` for the server-side.
+    pub fn new_server(
         config: Config,
         remote_addr: SocketAddr,
         local_cid: u32,
@@ -85,7 +118,7 @@ impl Endpoint {
             remote_addr,
             local_cid,
             peer_cid,
-            state: State::Connecting,
+            state: State::Established, // Server starts as established after receiving SYN
             start_time: Instant::now(),
             reliability,
             congestion_control,

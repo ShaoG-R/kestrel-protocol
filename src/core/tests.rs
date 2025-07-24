@@ -26,16 +26,14 @@ struct TestHarness {
 fn setup_endpoint_with_config(config: Config) -> TestHarness {
     let remote_addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
     let local_cid = 1;
-    let peer_cid = 0;
 
     let (tx_to_endpoint_network, rx_from_socket) = mpsc::channel(128);
     let (tx_from_endpoint_network, rx_from_endpoint_network) = mpsc::channel(128);
 
-    let (mut endpoint, tx_to_endpoint_user, rx_from_endpoint_user) = Endpoint::new(
+    let (mut endpoint, tx_to_endpoint_user, rx_from_endpoint_user) = Endpoint::new_client(
         config,
         remote_addr,
         local_cid,
-        peer_cid,
         rx_from_socket,
         tx_from_endpoint_network,
     );
