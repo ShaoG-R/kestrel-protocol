@@ -31,17 +31,39 @@
 *   **未完成或不完整的部分**:
     *   单元测试和集成测试覆盖不完整 (Phase 6)
 
-## 3. 存在的问题与和设计文档的偏差 (Identified Issues & Deviations)
+## 3. 未来改进方向与架构演进 (Future Improvements & Architectural Evolution)
 
-1.  **【已完成】流式API已实现 (Stream API Implemented):** `Connection` 结构体现在已经完整实现了 `tokio::io::AsyncRead` 和 `tokio::io::AsyncWrite` trait。我们重构了 `poll_write` 和 `poll_read`，使其完全无阻塞，并通过Waker机制实现了真正的异步I/O。
+在完成核心功能后，我们识别出以下几个潜在的改进方向，旨在增强代码库的灵活性、健壮性和长期可维护性。这些建议将指导我们下一阶段的开发工作。
 
-2.  **【进行中】测试覆盖不完整 (Testing Coverage Incomplete):** 项目的测试已经启动。我们为核心的 `src/buffer.rs` 模块编写了全面的单元测试。同时，我们搭建了一个集成测试框架 `TestHarness` 并为 `src/connection.rs` 编写了首个端到端测试，但还需要为超时、重传等更复杂的场景补充测试用例。
+### 3.1. 提升灵活性与可配置性 (Enhanced Flexibility & Configurability)
 
-3.  **【已完成】错误处理已重构 (Error Handling Refactored):** 项目已经引入了 `thiserror`，并在 `src/error.rs` 中定义了统一的 `Error` 和 `Result` 类型。整个代码库的错误处理流程已经重构，以使用新的错误类型进行传递，取代了原有的 `std::io::Error` 和 `eprintln!`。
+*   **引入统一的`Config`结构体 (Introduce a Unified `Config` Struct):**
+    *   **现状**: 协议参数（如`INITIAL_RTO`, `MAX_PAYLOAD_SIZE`等）以`const`形式硬编码在各个模块中。
+    *   **改进**: 创建一个`connection::Config`结构体，将所有可调参数作为其字段。这允许库的使用者在运行时动态配置协议行为，而无需重新编译代码，极大地提升了库的适用性。
 
-4.  **【已完成】实现0-RTT连接 (0-RTT Implemented):** 客户端现在可以通过 `connect()` 方法发起连接，并立即写入数据。这些数据将被打包在第一个`SYN`帧中发送。服务器端也已实现相应的逻辑来处理携带数据的`SYN`帧，实现了0-RTT快速连接。
+*   **设计服务器端`accept()` API (Design a Server-side `accept()` API):**
+    *   **现状**: 服务器端在新`SYN`包到达时会自动创建并运行连接，应用层无法介入。
+    *   **改进**: 模仿`tokio::net::TcpListener`，为`ReliableUdpSocket`提供一个异步的`accept()`方法。这使得服务器应用可以在接受连接前执行自定义逻辑（如IP过滤、连接数限制），从而给予应用层更大的控制权。
 
-5.  **【已完成】实现包聚合/粘连 (Packet Coalescing Implemented):** 连接现在会延迟发送`ACK`帧，以便有机会将它们与`PUSH`数据帧捆绑在同一个UDP包中发送。同时，快速应答机制也已实现，以确保在接收到多个数据包后能及时发送确认，避免对端不必要的超时重传。
+### 3.2. 增强代码结构与可维护性 (Improved Code Structure & Maintainability)
+
+*   **引入结构化日志 (Adopt Structured Logging):**
+    *   **现状**: 使用`println!`进行调试输出。
+    *   **改进**: 全面采用`tracing`或`log` crate进行结构化日志记录。这使得日志级别可控、输出可重定向，是让代码库达到“生产环境就绪”水平的关键一步。
+
+*   **拆分`ConnectionWorker`的核心逻辑 (Refactor `ConnectionWorker` Logic):**
+    *   **现状**: `ConnectionWorker::handle_frame`方法是一个庞大的`match`语句，处理所有状态下的所有事件。
+    *   **改进**: 将其按连接状态拆分为更小的独立函数（如`handle_frame_connecting`, `handle_frame_established`），每个函数只负责一个特定状态的逻辑，从而降低复杂度，提升代码的可读性和可测试性。
+
+### 3.3. 协议健壮性与未来演进 (Protocol Robustness & Future Evolution)
+
+*   **明确协议版本协商 (Implement Protocol Version Negotiation):**
+    *   **现状**: 长头中的`protocol_version`字段未被有效利用。
+    *   **改进**: 在接收`SYN`包时，实现对协议版本的检查与协商逻辑。这为未来协议的平滑升级和版本兼容性奠定了基础。
+
+*   **强化连接ID的安全性 (Harden Connection ID Security):**
+    *   **现状**: `connection_id`由客户端随机生成，可能存在被猜测的风险。
+    *   **改进**: 探讨借鉴QUIC等协议的思路，引入更安全的连接ID机制（如引入服务端生成的元素），以抵御IP欺骗、连接注入等潜在攻击。
 
 ---
 <br/>
