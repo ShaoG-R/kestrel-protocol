@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 const INITIAL_RTO: Duration = Duration::from_millis(1000);
 const MIN_RTO: Duration = Duration::from_millis(500);
 const FAST_RETX_THRESHOLD: u16 = 3;
+const MAX_PAYLOAD_SIZE: usize = 1200; // A reasonable payload size for UDP
 
 /// An estimator for the round-trip time (RTT).
 ///
@@ -103,6 +104,8 @@ pub enum State {
 /// 连接的内含状态，分离出来是为了满足借用检查器。
 struct ConnectionState {
     remote_addr: SocketAddr,
+    connection_id: u32,
+    start_time: Instant,
     state: State,
     send_buffer: SendBuffer,
     recv_buffer: ReceiveBuffer,
@@ -144,6 +147,7 @@ impl Connection {
     /// 这也会返回一个发送端，供主套接字任务向此连接发送帧。
     pub fn new(
         remote_addr: SocketAddr,
+        connection_id: u32,
         initial_state: State,
         sender: mpsc::Sender<SendCommand>,
     ) -> (Self, mpsc::Sender<Frame>) {
@@ -152,6 +156,8 @@ impl Connection {
         let (in_tx, in_rx) = mpsc::channel(128);
         let state = ConnectionState {
             remote_addr,
+            connection_id,
+            start_time: Instant::now(),
             state: initial_state,
             send_buffer: SendBuffer::new(),
             recv_buffer: ReceiveBuffer::new(),
@@ -192,32 +198,33 @@ impl Connection {
     ///
     /// 这会将数据分段成一个或多个PUSH帧，并将它们排队等待发送。
     pub async fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // TODO: This is a simplification. We should handle:
-        // 1. A buf that is larger than a single packet's payload capacity.
-        // 2. Generating correct sequence numbers.
-        // 3. Locking and synchronization if `write` can be called concurrently.
+        if self.state.state == State::Closed || self.state.state == State::Closing {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "Connection is closing or closed",
+            ));
+        }
 
-        let payload = bytes::Bytes::copy_from_slice(buf);
+        for chunk in buf.chunks(MAX_PAYLOAD_SIZE) {
+            let payload = bytes::Bytes::copy_from_slice(chunk);
+            let push_header = crate::packet::header::ShortHeader {
+                command: crate::packet::command::Command::Push,
+                connection_id: self.state.connection_id,
+                recv_window_size: self.state.recv_buffer.window_size(),
+                timestamp: self.state.start_time.elapsed().as_millis() as u32,
+                sequence_number: self.state.sequence_number_counter,
+                recv_next_sequence: self.state.recv_buffer.next_sequence(),
+            };
+            self.state.sequence_number_counter += 1;
 
-        // Create a PUSH frame (with a dummy header for now)
-        let push_header = crate::packet::header::ShortHeader {
-            command: crate::packet::command::Command::Push,
-            connection_id: 0, // TODO: Use the actual connection ID
-            recv_window_size: self.state.recv_buffer.window_size(),
-            timestamp: 0, // TODO: Update with real value
-            sequence_number: self.state.sequence_number_counter,
-            recv_next_sequence: self.state.recv_buffer.next_sequence(),
-        };
-        self.state.sequence_number_counter += 1;
+            let frame = Frame::Push {
+                header: push_header,
+                payload,
+            };
 
-        let frame = Frame::Push {
-            header: push_header,
-            payload,
-        };
+            self.state.send_buffer.queue_frame(frame);
+        }
 
-        self.state.send_buffer.queue_frame(frame);
-
-        // For now, we just pretend we wrote everything.
         Ok(buf.len())
     }
 
@@ -297,7 +304,7 @@ impl ConnectionState {
                     let syn_ack_header = crate::packet::header::LongHeader {
                         command: crate::packet::command::Command::SynAck,
                         protocol_version: 0, // Or some constant
-                        connection_id: header.connection_id,
+                        connection_id: self.connection_id,
                     };
 
                     let syn_ack_frame = Frame::SynAck {
@@ -351,8 +358,9 @@ impl ConnectionState {
                     // we can move to closed. This check happens implicitly as the ACK processing
                     // will clear the in-flight buffer. We might need a more explicit check.
                     // For now, let's assume if we get a FIN here, we can close.
-                    // TODO: A more robust check is needed. We should only close if our FIN is acked.
-                    self.state = State::Closed;
+                    if self.state == State::Closing && self.send_buffer.in_flight.is_empty() {
+                         self.state = State::Closed;
+                    }
                 }
                 _ => {
                     println!("Ignoring unexpected frame in Closing state: {:?}", frame);
@@ -452,58 +460,65 @@ impl ConnectionState {
     /// 发送一个FIN包来发起连接关闭。
     async fn shutdown(&mut self) {
         if self.state == State::Established || self.state == State::FinWait {
+            let mut should_send_fin = false;
             if self.state == State::Established {
                 self.state = State::Closing;
+                should_send_fin = true;
             } else {
-                // We were in FinWait, now both sides have sent FINs.
-                self.state = State::Closed;
+                // We were in FinWait, meaning we already received a FIN.
+                // Now that our side is also closing, the connection is fully closed.
+                // This assumes our FIN will be sent and eventually ACKed.
+                // The final transition to Closed happens when our FIN is acknowledged.
+                self.state = State::Closing;
+                should_send_fin = true;
             }
 
-            let fin_header = crate::packet::header::ShortHeader {
-                command: crate::packet::command::Command::Fin,
-                connection_id: 0, // TODO: This should be the real connection ID
-                recv_window_size: self.recv_buffer.window_size(),
-                timestamp: 0, // TODO
-                sequence_number: self.sequence_number_counter,
-                recv_next_sequence: self.recv_buffer.next_sequence(),
-            };
-            self.sequence_number_counter += 1;
+            if should_send_fin {
+                let fin_header = crate::packet::header::ShortHeader {
+                    command: crate::packet::command::Command::Fin,
+                    connection_id: self.connection_id,
+                    recv_window_size: self.recv_buffer.window_size(),
+                    timestamp: self.start_time.elapsed().as_millis() as u32,
+                    sequence_number: self.sequence_number_counter,
+                    recv_next_sequence: self.recv_buffer.next_sequence(),
+                };
+                self.sequence_number_counter += 1;
 
-            println!("Sending FIN with seq={}", fin_header.sequence_number);
-            let fin_frame = Frame::Fin { header: fin_header };
+                println!("Sending FIN with seq={}", fin_header.sequence_number);
+                let fin_frame = Frame::Fin { header: fin_header };
 
-            self.send_buffer.queue_frame(fin_frame);
-            // The main loop will pick it up and send it.
+                self.send_buffer.queue_frame(fin_frame);
+                // The main loop will pick it up and send it.
+            }
         }
     }
 
     /// Sends an ACK in response to a FIN.
     /// 发送一个ACK来响应FIN。
     async fn send_ack_for_fin(&mut self, fin_header: &crate::packet::header::ShortHeader) {
-        let ack_frame = self.create_ack_frame(fin_header.connection_id);
+        let ack_frame = self.create_ack_frame();
         self.send_frames(vec![ack_frame]).await;
     }
 
     /// Creates and sends an ACK frame.
     /// 创建并发送一个ACK帧。
     async fn send_ack(&mut self) {
-        // TODO: This needs a connection ID.
-        let ack_frame = self.create_ack_frame(0);
+        let ack_frame = self.create_ack_frame();
         self.send_frames(vec![ack_frame]).await;
     }
 
     /// Creates an ACK frame with the current SACK ranges.
     /// 使用当前的SACK范围创建一个ACK帧。
-    fn create_ack_frame(&mut self, conn_id: u32) -> Frame {
+    fn create_ack_frame(&mut self) -> Frame {
         let mut ack_payload = bytes::BytesMut::new();
         let sack_ranges = self.recv_buffer.get_sack_ranges();
         encode_sack_ranges(&sack_ranges, &mut ack_payload);
 
         let ack_header = crate::packet::header::ShortHeader {
             command: crate::packet::command::Command::Ack,
-            connection_id: conn_id,
+            connection_id: self.connection_id,
             recv_window_size: self.recv_buffer.window_size(),
-            timestamp: 0, // TODO
+            timestamp: self.start_time.elapsed().as_millis() as u32,
             sequence_number: self.sequence_number_counter,
             recv_next_sequence: self.recv_buffer.next_sequence(),
         };

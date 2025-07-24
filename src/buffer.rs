@@ -150,7 +150,7 @@ impl ReceiveBuffer {
         let mut contiguous_payloads = Vec::new();
         let mut last_seq = self.next_sequence;
 
-        while let Some((seq, payload)) = self.received.first_key_value() {
+        while let Some((seq, _payload)) = self.received.first_key_value() {
             if *seq == last_seq {
                 contiguous_payloads.push(self.received.pop_first().unwrap().1);
                 last_seq += 1;

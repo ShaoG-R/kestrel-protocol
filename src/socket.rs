@@ -89,11 +89,13 @@ impl ReliableUdpSocket {
 
             // A new connection can only be initiated with a SYN packet.
             // 只有SYN包才能发起新连接。
-            if let Frame::Syn { .. } = &frame {
+            if let Frame::Syn { header } = &frame {
                 println!("Received SYN from {}, creating new connection.", remote_addr);
+                let conn_id = header.connection_id;
 
                 let (mut connection, tx) = Connection::new(
                     remote_addr,
+                    conn_id,
                     connection::State::Connecting,
                     self.send_tx.clone(),
                 );

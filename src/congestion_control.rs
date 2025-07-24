@@ -115,9 +115,6 @@ impl CongestionController {
             // (Note: integer division will make this increase very slow for large cwnd)
             self.congestion_window += (1.0 / self.congestion_window as f32).max(1.0) as u32;
         }
-
-        // TODO: Implement latency-based congestion control here.
-        // If RTT is significantly higher than min_rtt, we should reduce cwnd.
     }
 
     /// Called when a packet loss is detected (e.g., via RTO or fast retransmit).
