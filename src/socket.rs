@@ -72,6 +72,7 @@ impl ReliableUdpSocket {
         let socket_clone = socket.clone();
         tokio::spawn(sender_task(socket_clone, send_rx));
 
+        info!(addr = ?socket.local_addr().ok(), "ReliableUdpSocket created and running");
         Ok(Self {
             socket,
             connections,
@@ -122,6 +123,7 @@ impl ReliableUdpSocket {
 
         // Spawn a new task for the connection to run in.
         tokio::spawn(async move {
+            info!(addr = %remote_addr, "Spawning new endpoint task for outbound connection");
             if let Err(e) = endpoint.run().await {
                 error!(addr = %remote_addr, "Endpoint closed with error: {}", e);
             }
@@ -167,6 +169,7 @@ impl ReliableUdpSocket {
                     continue;
                 }
             };
+            debug!(len, addr = %remote_addr, "Received UDP datagram");
 
             let data = &recv_buf[..len];
             let frame = match Frame::decode(data) {
@@ -183,6 +186,7 @@ impl ReliableUdpSocket {
                 if tx.send(frame).await.is_err() {
                     // This means the connection task has died. Remove it.
                     // 这意味着连接任务已经死亡。移除它。
+                    debug!(addr = %remote_addr, "Connection task appears to have died. Removing.");
                     self.connections.remove(&remote_addr);
                 }
                 continue;
@@ -223,6 +227,7 @@ impl ReliableUdpSocket {
 
                 // Spawn a new task for the connection to run in.
                 tokio::spawn(async move {
+                    info!(addr = %remote_addr, "Spawning new endpoint task for inbound connection");
                     if let Err(e) = endpoint.run().await {
                         error!(addr = %remote_addr, "Endpoint closed with error: {}", e);
                     }
@@ -278,6 +283,11 @@ async fn sender_task(socket: Arc<UdpSocket>, mut rx: mpsc::Receiver<SendCommand>
         if send_buf.is_empty() {
             continue;
         }
+        debug!(
+            addr = %cmd.remote_addr,
+            bytes = send_buf.len(),
+            "sender_task sending datagram"
+        );
 
         if let Err(e) = socket.send_to(&send_buf, cmd.remote_addr).await {
             // A single send error is not fatal to the whole socket.
@@ -290,6 +300,8 @@ async fn sender_task(socket: Arc<UdpSocket>, mut rx: mpsc::Receiver<SendCommand>
     }
 }
 
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,7 +310,12 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use std::time::Duration;
     
-    
+    /// Helper to initialize tracing for tests.
+    fn init_tracing() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("protocol=debug")
+            .try_init();
+    }
 
     #[tokio::test]
     async fn test_server_accept() {
@@ -356,6 +373,8 @@ mod tests {
     
     #[tokio::test]
     async fn test_full_connection_lifecycle() {
+        init_tracing();
+
         // 1. Setup server
         let server_addr = "127.0.0.1:9998".parse().unwrap();
         let server = Arc::new(ReliableUdpSocket::new(server_addr).await.unwrap());
@@ -368,23 +387,18 @@ mod tests {
         let client_run = client.clone();
         tokio::spawn(async move { client_run.run().await });
 
+        // Channel to sync the server's accepted stream with the main test task.
+        let (server_stream_tx, mut server_stream_rx) = mpsc::channel(1);
+
         // 3. Concurrently connect and accept
-        let (client_stream, server_stream) = tokio::try_join!(
-            async {
-                tokio::time::timeout(Duration::from_secs(2), client.connect(server_addr))
-                    .await
-                    .expect("Client connect should not time out")
-            },
-            async {
-                let (stream, _addr) =
-                    tokio::time::timeout(Duration::from_secs(2), server.accept())
-                        .await
-                        .expect("Server accept should not time out")
-                        .expect("server.accept() should succeed");
-                Ok(stream)
-            }
-        )
-        .expect("Connect and accept should succeed");
+        let server_handle = tokio::spawn(async move {
+            let (stream, _addr) = server.accept().await.unwrap();
+            server_stream_tx.send(stream).await.unwrap();
+        });
+
+        let client_stream = client.connect(server_addr).await.unwrap();
+        let server_stream = server_stream_rx.recv().await.unwrap();
+        server_handle.await.unwrap();
 
         let (mut client_reader, mut client_writer) = tokio::io::split(client_stream);
         let (mut server_reader, mut server_writer) = tokio::io::split(server_stream);

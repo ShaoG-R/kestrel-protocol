@@ -19,6 +19,7 @@ use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
+use tracing::{debug, info, warn};
 
 /// Commands sent from the `Stream` handle to the `Endpoint` worker.
 #[derive(Debug)]
@@ -101,12 +102,18 @@ impl Endpoint {
 
     /// Helper function to process a single incoming frame.
     async fn handle_frame(&mut self, frame: Frame) -> Result<()> {
+        debug!(cid = self.local_cid, ?frame, "Handling frame");
         match frame {
             Frame::Syn { header, payload } => {
                 // This is the server-side logic for an incoming connection.
                 if self.state == State::Connecting {
                     self.state = State::Established;
                     self.peer_cid = header.source_cid;
+                    info!(
+                        cid = self.local_cid,
+                        peer_cid = self.peer_cid,
+                        "Connection established (server-side)"
+                    );
 
                     if !payload.is_empty() {
                         self.reliability.receive_push(0, payload);
@@ -129,6 +136,11 @@ impl Endpoint {
                 if self.state == State::Connecting {
                     self.state = State::Established;
                     self.peer_cid = header.source_cid;
+                    info!(
+                        cid = self.local_cid,
+                        peer_cid = self.peer_cid,
+                        "Connection established (client-side)"
+                    );
                 }
             }
             Frame::Push { header, payload } => {
@@ -167,12 +179,18 @@ impl Endpoint {
     /// Runs the endpoint's main event loop.
     pub async fn run(&mut self) -> Result<()> {
         if self.state == State::Connecting {
+            debug!(cid = self.local_cid, "Sending initial SYN");
             self.send_initial_syn().await?;
         }
 
         loop {
             // Reassemble any ready packets and send them to the handle.
             if let Some(available_data) = self.reliability.reassemble() {
+                debug!(
+                    cid = self.local_cid,
+                    bytes = available_data.len(),
+                    "Sending reassembled data to user stream"
+                );
                 if self.tx_to_stream.send(available_data).await.is_err() {
                     // Stream handle is dropped, connection is dead.
                     self.state = State::Closed;
@@ -191,9 +209,11 @@ impl Endpoint {
                     std::future::pending::<()>().await;
                 }
             };
+            debug!(cid = self.local_cid, ?rto_deadline, "Waiting for event...");
 
             tokio::select! {
                 Some(mut frame) = self.receiver.recv() => {
+                    debug!(cid = self.local_cid, "Received event: Network Frame");
                     loop {
                         self.handle_frame(frame).await?;
                         // Try to drain any other frames that are immediately available
@@ -204,13 +224,16 @@ impl Endpoint {
                     }
 
                     // Now that we've processed a batch of frames, check if we need to ACK.
+                    debug!(cid = self.local_cid, "Finished processing batch of network frames");
                     if self.reliability.should_send_standalone_ack() {
+                        debug!(cid = self.local_cid, "Sending standalone ACK");
                         self.send_standalone_ack().await?;
                     }
                 }
 
                 // A command from the public-facing `Stream` handle.
                 Some(cmd) = self.rx_from_stream.recv() => {
+                    debug!(cid = self.local_cid, "Received event: User Command {:?}", cmd);
                     match cmd {
                         StreamCommand::SendData(data) => {
                             self.reliability.write_to_stream(&data);
@@ -222,6 +245,7 @@ impl Endpoint {
                 }
 
                 _ = sleep_future => {
+                    debug!(cid = self.local_cid, "Received event: RTO Timer Expired");
                     let (rto_occured, frames_to_resend) = self.reliability.check_for_retransmissions();
                     if rto_occured {
                         self.congestion_control.on_packet_loss(Instant::now());
@@ -236,6 +260,7 @@ impl Endpoint {
                 }
             }
             if self.state == State::Closing && self.reliability.is_in_flight_empty() {
+                info!(cid = self.local_cid, "All in-flight packets ACKed. Closing.");
                 self.state = State::Closed;
             }
 
@@ -253,6 +278,7 @@ impl Endpoint {
         }
 
         if self.state == State::Established || self.state == State::FinWait {
+            info!(cid = self.local_cid, "Shutdown initiated. Changing state to Closing.");
             self.state = State::Closing;
         }
     }
@@ -288,6 +314,7 @@ impl Endpoint {
 
         // If we are closing and there isn't a FIN already in flight, send one.
         if self.state == State::Closing && !self.reliability.has_fin_in_flight() {
+            debug!(cid = self.local_cid, "Packetizing FIN frame");
             let fin_header = ShortHeader {
                 command: crate::packet::command::Command::Fin,
                 connection_id: self.peer_cid,
@@ -302,6 +329,11 @@ impl Endpoint {
         }
 
         if !frames_to_send.is_empty() {
+            debug!(
+                cid = self.local_cid,
+                num_frames = frames_to_send.len(),
+                "Sending packetized frames"
+            );
             self.send_frames(frames_to_send).await?;
         }
         Ok(())
@@ -374,6 +406,7 @@ impl Endpoint {
         if self.sender.send(cmd).await.is_err() {
             // This indicates the socket's sender task has shut down,
             // which is a fatal error for this connection.
+            warn!(cid = self.local_cid, "Failed to send command to socket sender task");
             return Err(Error::ChannelClosed);
         }
         Ok(())
