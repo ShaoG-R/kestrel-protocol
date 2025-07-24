@@ -2,6 +2,7 @@
 //!
 //! 连接的端点，是新分层协议的“大脑”。
 
+pub mod frame_factory;
 pub mod state;
 
 // For now, keep the main logic here. We will move it to a sub-module later.
@@ -14,12 +15,11 @@ use crate::{
     error::{Error, Result},
     packet::{
         frame::Frame,
-        header::{LongHeader, ShortHeader},
-        sack::{decode_sack_ranges, encode_sack_ranges},
+        sack::decode_sack_ranges,
     },
     socket::SendCommand,
 };
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::{
     sync::mpsc,
@@ -27,6 +27,7 @@ use tokio::{
 };
 use tracing::info;
 use self::state::ConnectionState;
+use frame_factory::*;
 
 /// Commands sent from the `Stream` handle to the `Endpoint` worker.
 #[derive(Debug)]
@@ -318,8 +319,13 @@ impl Endpoint {
             .packetize_stream_data(self.peer_cid, Instant::now(), self.start_time);
 
         if self.state == ConnectionState::Closing && !self.reliability.has_fin_in_flight() {
-            let fin_frame = self.create_fin_frame();
-            self.reliability.add_fin_to_in_flight(fin_frame.clone(), Instant::now());
+            let fin_frame = create_fin_frame(
+                self.peer_cid,
+                self.reliability.next_sequence_number(),
+                self.start_time,
+            );
+            self.reliability
+                .add_fin_to_in_flight(fin_frame.clone(), Instant::now());
             frames_to_send.push(fin_frame);
         }
 
@@ -331,74 +337,28 @@ impl Endpoint {
 
     async fn send_initial_syn(&mut self) -> Result<()> {
         let initial_payload = self.reliability.take_stream_buffer();
-
-        // The SYN packet itself will be retransmitted on timeout if not acknowledged.
-        // The reliability of the payload is tied to the SYN packet.
-        // We don't need to add it to the in-flight queue separately, as that's for
-        // sequence-numbered PUSH frames.
-
-        let syn_header = LongHeader {
-            command: crate::packet::command::Command::Syn,
-            protocol_version: self.config.protocol_version,
-            destination_cid: 0, // Server's CID is unknown
-            source_cid: self.local_cid,
-        };
-        let frame = Frame::Syn {
-            header: syn_header,
-            payload: initial_payload,
-        };
+        let frame = create_syn_frame(&self.config, self.local_cid, initial_payload);
         self.send_frames(vec![frame]).await
     }
 
     async fn send_syn_ack(&mut self) -> Result<()> {
         let payload = self.reliability.take_stream_buffer();
-        let syn_ack_header = LongHeader {
-            command: crate::packet::command::Command::SynAck,
-            protocol_version: self.config.protocol_version,
-            destination_cid: self.peer_cid,
-            source_cid: self.local_cid,
-        };
-        let frame = Frame::SynAck {
-            header: syn_ack_header,
-            payload,
-        };
+        let frame = create_syn_ack_frame(&self.config, self.peer_cid, self.local_cid, payload);
         self.send_frames(vec![frame]).await
     }
 
     async fn send_standalone_ack(&mut self) -> Result<()> {
-        let (sack_ranges, recv_next, window_size) = self.reliability.get_ack_info();
         if !self.reliability.is_ack_pending() {
             return Ok(());
         }
-
-        let mut ack_payload = BytesMut::with_capacity(sack_ranges.len() * 8);
-        encode_sack_ranges(&sack_ranges, &mut ack_payload);
-
-        let ack_header = ShortHeader {
-            command: crate::packet::command::Command::Ack,
-            connection_id: self.peer_cid,
-            recv_window_size: window_size,
-            timestamp: Instant::now().duration_since(self.start_time).as_millis() as u32,
-            sequence_number: 0, // ACK frames do not have a sequence number
-            recv_next_sequence: recv_next,
-        };
-
-        let frame = Frame::Ack { header: ack_header, payload: ack_payload.freeze() };
+        let frame = create_ack_frame(
+            self.peer_cid,
+            &mut self.reliability,
+            self.start_time,
+        );
         self.send_frames(vec![frame]).await?;
         self.reliability.on_ack_sent();
         Ok(())
-    }
-
-    fn create_fin_frame(&mut self) -> Frame {
-        let fin_header = ShortHeader {
-            command: crate::packet::command::Command::Fin,
-            connection_id: self.peer_cid,
-            recv_window_size: 0,
-            timestamp: Instant::now().duration_since(self.start_time).as_millis() as u32,
-            sequence_number: self.reliability.next_sequence_number(),
-            recv_next_sequence: 0,
-        };
-        Frame::Fin { header: fin_header }
     }
 
     async fn send_frames(&self, frames: Vec<Frame>) -> Result<()> {
