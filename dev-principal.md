@@ -43,16 +43,6 @@
 
 5.  **【已完成】实现包聚合/粘连 (Packet Coalescing Implemented):** 连接现在会延迟发送`ACK`帧，以便有机会将它们与`PUSH`数据帧捆绑在同一个UDP包中发送。同时，快速应答机制也已实现，以确保在接收到多个数据包后能及时发送确认，避免对端不必要的超时重传。
 
-6.  **【低优先级】`FIN` 包头部类型与文档不符 (FIN Header Mismatch):**
-    *   **设计文档 (`dev-principal.md`):** 将 `FIN` 归类为**长头部**。
-    *   **当前实现 (`packet/command.rs`):** 将 `FIN` 实现为**短头部**。
-    *   这是一个明显的实现与文档的矛盾，需要统一。
-
-7.  **【信息】分发键不同 (Different Demultiplexing Key):**
-    *   **设计文档 (3.2节):** 描述使用 `HashMap<u32, mpsc::Sender<Packet>>`，意味着使用 `connection_id` 作为分发键。
-    *   **当前实现 (`socket.rs`):** 使用 `DashMap<SocketAddr, mpsc::Sender<Frame>>`，意味着使用远端网络地址 `SocketAddr` 作为分发键。
-    *   这个改动是合理的，尤其对于服务器端来说，在连接建立之前必须依赖`SocketAddr`。但这是一个值得记录的架构决策差异。
-
 ---
 <br/>
 
@@ -92,7 +82,7 @@
 所有包的第一个字节为指令字节。我们将AP-KCP的指令集与我们的状态管理需求结合：
 *   `0x01`: `SYN` (长头) - 连接请求，可携带0-RTT数据。
 *   `0x02`: `SYN-ACK` (长头) - 连接确认。
-*   `0x03`: `FIN` (长头) - 单向关闭连接。
+*   `0x03`: `FIN` (短头) - 单向关闭连接。
 *   `0x10`: `PUSH` (短头) - 数据包。
 *   `0x11`: `ACK` (短头) - 确认包，其载荷为SACK信息。
 *   `0x12`: `PING` (短头) - 心跳包，用于保活和网络探测。
@@ -110,7 +100,7 @@
 | `recv_next_sequence`      | 4            | 期望接收的下一个包序号 (用于累积确认)。                                          |
 
 **长头部 (Long Header)**
-*用于 `SYN`, `SYN-ACK`, `FIN`。包含版本信息和完整的连接ID。*
+*用于 `SYN`, `SYN-ACK`。包含版本信息和完整的连接ID。*
 格式待定，但至少应包含 `command`, `protocol_version`, `connection_id`。
 
 ### 2.2. 连接生命周期 (Connection Lifecycle)
@@ -148,14 +138,14 @@
 
 ### 3.1. 核心组件 (Core Components)
 
-*   `ReliableUdpSocket`: 对外的主要接口。它内部持有一个UDP套接字，并负责接收所有传入的数据包。它像一个路由器，根据 `connection_id` 将包分发给对应的 `Connection` 实例。
+*   `ReliableUdpSocket`: 对外的主要接口。它内部持有一个UDP套接字，并负责接收所有传入的数据包。它像一个路由器，根据远端 `SocketAddr` 将包分发给对应的 `Connection` 实例。
 *   `Connection`: 代表一个独立的、可靠的连接。这是实现协议核心逻辑的地方。**每个 `Connection` 实例及其所有状态都应由一个独立的Tokio任务 (`tokio::task`)拥有和管理。** `Connection` 内部需要实现完整的协议状态机、可靠性机制和拥塞控制算法。
 *   `SendBuffer` / `ReceiveBuffer`: `Connection` 内部用于管理待发送、待确认、乱序到达等数据包的缓冲区。
 
 ### 3.2. 无锁并发模型 (Lock-free Concurrency Model)
 
 1.  **主接收循环 (Main Receive Loop):** `ReliableUdpSocket` 在一个专用任务中循环调用 `socket.recv_from()`。
-2.  **包分发 (Packet Demultiplexing):** 收到包后，根据 `connection_id` 从一个 `HashMap<u32, mpsc::Sender<Packet>>` 中找到对应 `Connection` 的发送端。
+2.  **包分发 (Packet Demultiplexing):** 收到包后，根据远端 `SocketAddr` 从一个 `DashMap<SocketAddr, mpsc::Sender<Frame>>` 中找到对应 `Connection` 的发送端。
 3.  **消息传递 (Message Passing):** 将数据包通过 `mpsc` channel 发送给对应的 `Connection` 任务。
 4.  **连接隔离 (Connection Isolation):** 每个 `Connection` 任务在一个循环中处理来自 `ReliableUdpSocket` 的入站包和来自用户API的出站数据。由于所有状态（如发送/接收缓冲区、RTO计时器、拥塞窗口等）都归此任务私有，因此完全不需要任何锁。
 5.  **用户API (`read`/`write`):** 用户调用 `connection.write(data)` 时，数据也是通过一个 `mpsc` channel 发送给 `Connection` 任务进行处理。`read` 则从一个出站 `mpsc` channel 中接收已排序好的数据。
