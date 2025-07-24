@@ -138,9 +138,10 @@ impl Endpoint {
     }
 
     /// Helper function to process a single incoming frame.
-    async fn handle_frame(&mut self, frame: Frame) -> Result<()> {
+    async fn handle_frame(&mut self, frame: Frame) -> Result<bool> {
         debug!(cid = self.local_cid, ?frame, "Handling frame");
         self.last_recv_time = Instant::now();
+        let mut ack_was_sent = false;
         match frame {
             Frame::Syn { header, payload } => {
                 // This is the server-side logic for an incoming connection.
@@ -179,10 +180,19 @@ impl Endpoint {
                         peer_cid = self.peer_cid,
                         "Connection established (client-side)"
                     );
+                    // Acknowledge the SYN-ACK to let the server know we are ready.
+                    // This also serves as a keep-alive.
+                    self.send_standalone_ack().await?;
+                    ack_was_sent = true;
                 }
             }
             Frame::Push { header, payload } => {
-                self.reliability.receive_push(header.sequence_number, payload);
+                self.reliability
+                    .receive_push(header.sequence_number, payload);
+                // Immediately acknowledge the push to prevent sender from timing out.
+                // This follows the "Immediate ACK" principle.
+                self.send_standalone_ack().await?;
+                ack_was_sent = true;
             }
             Frame::Ack { header, payload } => {
                 self.peer_recv_window = header.recv_window_size as u32;
@@ -211,7 +221,7 @@ impl Endpoint {
                 // TODO: Handle other frame types
             }
         }
-        Ok(())
+        Ok(ack_was_sent)
     }
 
     /// Runs the endpoint's main event loop.
@@ -254,8 +264,11 @@ impl Endpoint {
             tokio::select! {
                 Some(mut frame) = self.receiver.recv() => {
                     debug!(cid = self.local_cid, "Received event: Network Frame");
+                    let mut ack_was_sent_in_batch = false;
                     loop {
-                        self.handle_frame(frame).await?;
+                        let ack_sent_this_frame = self.handle_frame(frame).await?;
+                        ack_was_sent_in_batch |= ack_sent_this_frame;
+
                         // Try to drain any other frames that are immediately available
                         match self.receiver.try_recv() {
                             Ok(next_frame) => frame = next_frame,
@@ -263,10 +276,11 @@ impl Endpoint {
                         }
                     }
 
-                    // Now that we've processed a batch of frames, check if we need to ACK.
+                    // Now that we've processed a batch of frames, check if we need to ACK,
+                    // but only if we haven't already sent one for a PUSH in this batch.
                     debug!(cid = self.local_cid, "Finished processing batch of network frames");
-                    if self.reliability.should_send_standalone_ack() {
-                        debug!(cid = self.local_cid, "Sending standalone ACK");
+                    if !ack_was_sent_in_batch && self.reliability.should_send_standalone_ack() {
+                        debug!(cid = self.local_cid, "Sending standalone ACK after batch");
                         self.send_standalone_ack().await?;
                     }
                 }
