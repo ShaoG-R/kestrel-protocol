@@ -244,14 +244,21 @@ impl Endpoint {
             Frame::Ack { header, payload } => {
                 self.peer_recv_window = header.recv_window_size as u32;
                 let sack_ranges = decode_sack_ranges(payload);
-                let frames_to_retx = self.reliability.handle_ack(sack_ranges, Instant::now());
+                let frames_to_retx = self
+                    .reliability
+                    .handle_ack(header.recv_next_sequence, sack_ranges, Instant::now());
                 if !frames_to_retx.is_empty() {
                     self.send_frames(frames_to_retx).await?;
                 }
             }
-            Frame::Fin { .. } => {
-                self.state = State::FinWait;
+            Frame::Fin { header, .. } => {
+                self.reliability.receive_fin(header.sequence_number);
                 self.send_standalone_ack().await?;
+                // The other side has closed their writing end. We can no longer receive
+                // any more data. We signal this to the user stream by closing the channel.
+                // The Endpoint will shut down shortly after.
+                self.tx_to_stream.closed().await;
+                self.state = State::Closed;
             }
             _ => {}
         }
@@ -272,6 +279,8 @@ impl Endpoint {
             }
             StreamCommand::Close => {
                 self.shutdown();
+                // Immediately attempt to send a FIN packet.
+                self.packetize_and_send().await?;
             }
         }
         Ok(())
@@ -359,7 +368,7 @@ impl Endpoint {
 
     async fn send_standalone_ack(&mut self) -> Result<()> {
         let (sack_ranges, recv_next, window_size) = self.reliability.get_ack_info();
-        if sack_ranges.is_empty() {
+        if !self.reliability.is_ack_pending() {
             return Ok(());
         }
 
@@ -371,7 +380,7 @@ impl Endpoint {
             connection_id: self.peer_cid,
             recv_window_size: window_size,
             timestamp: Instant::now().duration_since(self.start_time).as_millis() as u32,
-            sequence_number: 0,
+            sequence_number: 0, // ACK frames do not have a sequence number
             recv_next_sequence: recv_next,
         };
 

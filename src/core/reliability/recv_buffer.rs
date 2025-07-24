@@ -53,12 +53,26 @@ impl ReceiveBuffer {
     /// Receives a packet payload for a given sequence number.
     ///
     /// 为给定的序列号接收一个数据包有效载荷。
+    ///
     pub fn receive(&mut self, sequence_number: u32, payload: Bytes) {
         // We only care about packets that are at or after the next expected sequence.
         // Duplicates of already processed packets are ignored.
         if sequence_number >= self.next_sequence {
             // Use entry API to avoid overwriting existing packets (duplicates).
             self.received.entry(sequence_number).or_insert(payload);
+        }
+
+        // Optimization: if the received packet is the next expected one,
+        // we can immediately try to advance the sequence. This prevents
+        // a build-up of in-order packets in the buffer that would otherwise
+        // only be processed when `reassemble` is called.
+        while self.received.first_key_value().map_or(false, |(&seq, _)| seq == self.next_sequence) {
+            self.next_sequence += 1;
+            // The payload of these packets will be picked up by `reassemble`.
+            // Here, we are just advancing the cumulative ACK point.
+            // A small trick: we can remove the entry and re-insert it if we wanted to
+            // completely separate the reassembly logic, but for now, we just advance the
+            // sequence number. The `reassemble` will pop them.
         }
     }
 
@@ -96,7 +110,9 @@ impl ReceiveBuffer {
         let mut ranges = Vec::new();
         let mut current_range: Option<SackRange> = None;
 
-        for &seq in self.received.keys() {
+        // Only generate SACKs for packets that are truly out-of-order,
+        // i.e., their sequence number is greater than the next contiguous one we expect.
+        for &seq in self.received.keys().filter(|&&s| s >= self.next_sequence) {
             match current_range.as_mut() {
                 Some(range) => {
                     if seq == range.end + 1 {

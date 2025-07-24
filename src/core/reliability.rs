@@ -54,7 +54,12 @@ impl ReliabilityLayer {
     }
 
     /// Handles an incoming ACK, processing SACK ranges and updating RTT.
-    pub fn handle_ack(&mut self, sack_ranges: Vec<SackRange>, now: Instant) -> Vec<Frame> {
+    pub fn handle_ack(
+        &mut self,
+        recv_next_seq: u32,
+        sack_ranges: Vec<SackRange>,
+        now: Instant,
+    ) -> Vec<Frame> {
         // Here we'd ideally get RTT samples from the send_buffer after processing ACKs,
         // but for simplicity, we assume RTT is measured elsewhere or a fixed value for now.
         // In a real implementation, `send_buffer.handle_ack` would return acknowledged
@@ -64,6 +69,7 @@ impl ReliabilityLayer {
         self.congestion_control.on_ack(rtt_sample);
 
         let frames_to_retx = self.send_buffer.handle_ack(
+            recv_next_seq,
             &sack_ranges,
             self.config.fast_retx_threshold,
             now,
@@ -141,6 +147,14 @@ impl ReliabilityLayer {
         self.ack_eliciting_packets_since_last_ack += 1;
     }
 
+    pub fn receive_fin(&mut self, sequence_number: u32) {
+        // A FIN packet is like a PUSH with no data. It still occupies a sequence number
+        // and must be acknowledged.
+        self.recv_buffer.receive(sequence_number, Bytes::new());
+        self.ack_pending = true;
+        self.ack_eliciting_packets_since_last_ack += 1;
+    }
+
     pub fn reassemble(&mut self) -> Option<Bytes> {
         self.recv_buffer.reassemble()
     }
@@ -156,6 +170,10 @@ impl ReliabilityLayer {
     pub fn should_send_standalone_ack(&self) -> bool {
         self.ack_eliciting_packets_since_last_ack >= self.config.ack_threshold
             && !self.recv_buffer.get_sack_ranges().is_empty()
+    }
+
+    pub fn is_ack_pending(&self) -> bool {
+        self.ack_pending
     }
 
     pub fn on_ack_sent(&mut self) {
