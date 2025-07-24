@@ -99,6 +99,71 @@ impl Endpoint {
         (endpoint, tx_to_endpoint, rx_from_endpoint)
     }
 
+    /// Helper function to process a single incoming frame.
+    async fn handle_frame(&mut self, frame: Frame) -> Result<()> {
+        match frame {
+            Frame::Syn { header, payload } => {
+                // This is the server-side logic for an incoming connection.
+                if self.state == State::Connecting {
+                    self.state = State::Established;
+                    self.peer_cid = header.source_cid;
+
+                    if !payload.is_empty() {
+                        self.reliability.receive_push(0, payload);
+                    }
+
+                    // Respond with a SYN-ACK
+                    let syn_ack_header = LongHeader {
+                        command: crate::packet::command::Command::SynAck,
+                        protocol_version: self.config.protocol_version,
+                        destination_cid: self.peer_cid,
+                        source_cid: self.local_cid,
+                    };
+                    let syn_ack_frame = Frame::SynAck {
+                        header: syn_ack_header,
+                    };
+                    self.send_frames(vec![syn_ack_frame]).await?;
+                }
+            }
+            Frame::SynAck { header } => {
+                if self.state == State::Connecting {
+                    self.state = State::Established;
+                    self.peer_cid = header.source_cid;
+                }
+            }
+            Frame::Push { header, payload } => {
+                self.reliability.receive_push(header.sequence_number, payload);
+            }
+            Frame::Ack { header, payload } => {
+                self.peer_recv_window = header.recv_window_size as u32;
+
+                let sack_ranges = decode_sack_ranges(payload);
+                let (loss_detected, rtt_sample, frames_to_fast_retx) =
+                    self.reliability.handle_ack(sack_ranges);
+
+                if let Some(rtt) = rtt_sample {
+                    self.congestion_control.on_ack(rtt);
+                }
+
+                if loss_detected {
+                    self.congestion_control.on_packet_loss(Instant::now());
+                }
+
+                if !frames_to_fast_retx.is_empty() {
+                    self.send_frames(frames_to_fast_retx).await?;
+                }
+            }
+            Frame::Fin { header: _ } => {
+                self.state = State::FinWait;
+                self.send_standalone_ack().await?;
+            }
+            _ => {
+                // TODO: Handle other frame types
+            }
+        }
+        Ok(())
+    }
+
     /// Runs the endpoint's main event loop.
     pub async fn run(&mut self) -> Result<()> {
         if self.state == State::Connecting {
@@ -128,67 +193,19 @@ impl Endpoint {
             };
 
             tokio::select! {
-                Some(frame) = self.receiver.recv() => {
-                    match frame {
-                        Frame::Syn { header, payload } => {
-                            // This is the server-side logic for an incoming connection.
-                            if self.state == State::Connecting {
-                                self.state = State::Established;
-                                self.peer_cid = header.source_cid;
-
-                                if !payload.is_empty() {
-                                    self.reliability.receive_push(0, payload);
-                                }
-
-                                // Respond with a SYN-ACK
-                                let syn_ack_header = LongHeader {
-                                    command: crate::packet::command::Command::SynAck,
-                                    protocol_version: self.config.protocol_version,
-                                    destination_cid: self.peer_cid,
-                                    source_cid: self.local_cid,
-                                };
-                                let syn_ack_frame = Frame::SynAck { header: syn_ack_header };
-                                self.send_frames(vec![syn_ack_frame]).await?;
-                            }
+                Some(mut frame) = self.receiver.recv() => {
+                    loop {
+                        self.handle_frame(frame).await?;
+                        // Try to drain any other frames that are immediately available
+                        match self.receiver.try_recv() {
+                            Ok(next_frame) => frame = next_frame,
+                            Err(_) => break, // Channel is empty or closed
                         }
-                        Frame::SynAck { header } => {
-                            if self.state == State::Connecting {
-                                self.state = State::Established;
-                                self.peer_cid = header.source_cid;
-                            }
-                        }
-                        Frame::Push { header, payload } => {
-                            self.reliability.receive_push(header.sequence_number, payload);
-                            if self.reliability.should_send_standalone_ack() {
-                                self.send_standalone_ack().await?;
-                            }
-                        }
-                        Frame::Ack { header, payload } => {
-                            self.peer_recv_window = header.recv_window_size as u32;
+                    }
 
-                            let sack_ranges = decode_sack_ranges(payload);
-                            let (loss_detected, rtt_sample, frames_to_fast_retx) =
-                                self.reliability.handle_ack(sack_ranges);
-
-                            if let Some(rtt) = rtt_sample {
-                                self.congestion_control.on_ack(rtt);
-                            }
-
-                            if loss_detected {
-                                self.congestion_control.on_packet_loss(Instant::now());
-                            }
-
-                            if !frames_to_fast_retx.is_empty() {
-                                self.send_frames(frames_to_fast_retx).await?;
-                            }
-                        }
-                        Frame::Fin { header: _ } => {
-                            self.state = State::FinWait;
-                            self.send_standalone_ack().await?;
-                        }
-                        _ => {
-                            // TODO: Handle other frame types
-                        }
+                    // Now that we've processed a batch of frames, check if we need to ACK.
+                    if self.reliability.should_send_standalone_ack() {
+                        self.send_standalone_ack().await?;
                     }
                 }
 

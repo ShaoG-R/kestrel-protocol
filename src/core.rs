@@ -3,4 +3,7 @@
 
 pub mod endpoint;
 pub mod reliability;
-pub mod stream; 
+pub mod stream;
+
+#[cfg(test)]
+mod tests; 
