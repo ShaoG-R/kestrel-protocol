@@ -4,7 +4,8 @@
 
 use crate::config::Config;
 use crate::congestion::CongestionControl;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 use tracing::debug;
 
 /// The state of the congestion controller.

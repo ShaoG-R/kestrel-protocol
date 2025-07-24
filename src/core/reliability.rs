@@ -14,7 +14,8 @@ use crate::packet::frame::Frame;
 use crate::packet::sack::SackRange;
 use bytes::{Bytes, BytesMut};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 const DEFAULT_RECV_BUFFER_CAPACITY: usize = 256; // In packets
 const DEFAULT_SEND_BUFFER_CAPACITY_BYTES: usize = 1024 * 1024; // 1 MB
@@ -480,5 +481,223 @@ impl ReceiveBuffer {
         }
 
         ranges
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::packet::header::ShortHeader;
+    use bytes::Bytes;
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    fn test_config() -> Config {
+        Config {
+            fast_retx_threshold: 2,
+            initial_rto: Duration::from_millis(50),
+            ..Default::default()
+        }
+    }
+
+    fn create_push_frame(seq: u32) -> Frame {
+        Frame::Push {
+            header: ShortHeader {
+                command: crate::packet::command::Command::Push,
+                connection_id: 1,
+                recv_window_size: 10,
+                timestamp: 0,
+                sequence_number: seq,
+                recv_next_sequence: 0,
+            },
+            payload: Bytes::from(format!("packet-{}", seq)),
+        }
+    }
+
+    #[test]
+    fn test_receive_in_order_and_reassemble() {
+        let mut reliability = ReliabilityLayer::new(test_config());
+
+        // Receive two packets in order
+        reliability.receive_push(0, Bytes::from("hello"));
+        reliability.receive_push(1, Bytes::from(" world"));
+
+        // Reassemble them
+        let data = reliability.reassemble().unwrap();
+        assert_eq!(data, "hello world");
+
+        // Should be nothing left to reassemble
+        assert!(reliability.reassemble().is_none());
+
+        // next_sequence should be updated
+        assert_eq!(reliability.recv_buffer.next_sequence(), 2);
+    }
+
+    #[test]
+    fn test_receive_out_of_order_and_reassemble() {
+        let mut reliability = ReliabilityLayer::new(test_config());
+
+        // Receive packet 1, then packet 0
+        reliability.receive_push(1, Bytes::from("world"));
+
+        // Nothing should be reassembled yet, because 0 is missing
+        assert!(reliability.reassemble().is_none());
+        assert_eq!(reliability.recv_buffer.next_sequence(), 0);
+
+        reliability.receive_push(0, Bytes::from("hello "));
+
+        // Now reassemble
+        let data = reliability.reassemble().unwrap();
+        assert_eq!(data, "hello world");
+        assert_eq!(reliability.recv_buffer.next_sequence(), 2);
+    }
+
+    #[test]
+    fn test_sack_range_generation() {
+        let mut reliability = ReliabilityLayer::new(test_config());
+
+        // No packets received yet
+        assert!(reliability.get_ack_info().0.is_empty());
+
+        // Receive discontinuous packets
+        reliability.receive_push(0, Bytes::new());
+        reliability.receive_push(1, Bytes::new());
+        reliability.receive_push(3, Bytes::new());
+        reliability.receive_push(4, Bytes::new());
+        reliability.receive_push(6, Bytes::new());
+
+        // Reassemble will pull out 0 and 1
+        let _ = reliability.reassemble();
+        assert_eq!(reliability.recv_buffer.next_sequence(), 2);
+
+        // Check SACK ranges for what's left (3-4, 6)
+        let (sack_ranges, next_ack, _) = reliability.get_ack_info();
+        assert_eq!(next_ack, 2);
+        assert_eq!(
+            sack_ranges,
+            vec![
+                SackRange { start: 3, end: 4 },
+                SackRange { start: 6, end: 6 }
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_ack_and_rtt_update() {
+        let mut reliability = ReliabilityLayer::new(test_config());
+
+        // Simulate sending two packets
+        let now = Instant::now();
+        reliability
+            .send_buffer
+            .add_in_flight(create_push_frame(0), now);
+        reliability
+            .send_buffer
+            .add_in_flight(create_push_frame(1), now);
+
+        assert_eq!(reliability.in_flight_count(), 2);
+
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(100)).await;
+
+        // Receive an ACK for packet 0
+        let sack_ranges = vec![SackRange { start: 0, end: 0 }];
+        let (loss, rtt, fast_retx) = reliability.handle_ack(sack_ranges);
+
+        assert!(!loss);
+        assert!(rtt.is_some());
+        assert!(rtt.unwrap() >= Duration::from_millis(100));
+        assert!(fast_retx.is_empty());
+
+        // Only packet 1 should be in flight
+        assert_eq!(reliability.in_flight_count(), 1);
+        let in_flight_seq = reliability
+            .send_buffer
+            .in_flight
+            .front()
+            .unwrap()
+            .frame
+            .sequence_number()
+            .unwrap();
+        assert_eq!(in_flight_seq, 1);
+    }
+
+    #[test]
+    fn test_fast_retransmission() {
+        let mut reliability = ReliabilityLayer::new(test_config());
+        let now = Instant::now();
+
+        // Send packets 0, 1, 2, 3
+        for i in 0..=3 {
+            reliability
+                .send_buffer
+                .add_in_flight(create_push_frame(i), now);
+        }
+
+        // ACK for 0 removes it.
+        reliability.handle_ack(vec![SackRange { start: 0, end: 0 }]);
+        assert_eq!(reliability.in_flight_count(), 3); // 1, 2, 3 left
+
+        // 1. Receive ACK for packet 2. This implies packet 1 was lost.
+        // `in_flight` contains [1, 2, 3]. Highest acked is 2. Packet 1 is before it.
+        // fast_retx_count for packet 1 becomes 1.
+        let (loss, _, retx) = reliability.handle_ack(vec![SackRange { start: 2, end: 2 }]);
+        assert!(!loss);
+        assert!(retx.is_empty());
+        assert_eq!(
+            reliability
+                .send_buffer
+                .in_flight
+                .front()
+                .unwrap()
+                .fast_retx_count,
+            1
+        );
+
+        // 2. Receive ACK for packet 3.
+        // `in_flight` contains [1, 3]. Highest acked is 3. Packet 1 is before it.
+        // fast_retx_count for packet 1 becomes 2. Threshold is met.
+        let (loss, _, retx) = reliability.handle_ack(vec![SackRange { start: 3, end: 3 }]);
+        assert!(loss);
+        assert_eq!(retx.len(), 1);
+        assert_eq!(retx[0].sequence_number().unwrap(), 1);
+
+        // fast_retx_count for packet 1 should be reset
+        assert_eq!(
+            reliability
+                .send_buffer
+                .in_flight
+                .front()
+                .unwrap()
+                .fast_retx_count,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rto_retransmission() {
+        let mut reliability = ReliabilityLayer::new(test_config());
+
+        // Send a packet
+        let frame0 = create_push_frame(0);
+        reliability
+            .send_buffer
+            .add_in_flight(frame0.clone(), Instant::now());
+
+        tokio::time::pause();
+
+        // Advance time just before RTO
+        tokio::time::advance(Duration::from_millis(49)).await;
+        let (rto_occured, retx) = reliability.check_for_retransmissions();
+        assert!(!rto_occured);
+        assert!(retx.is_empty());
+
+        // Advance time past RTO
+        tokio::time::advance(Duration::from_millis(2)).await; // Total 51ms
+        let (rto_occured, retx) = reliability.check_for_retransmissions();
+        assert!(rto_occured);
+        assert_eq!(retx.len(), 1);
+        assert_eq!(retx[0].sequence_number().unwrap(), 0);
     }
 } 

@@ -17,8 +17,8 @@ use crate::packet::sack::{decode_sack_ranges, encode_sack_ranges};
 use crate::socket::SendCommand;
 use bytes::Bytes;
 use std::net::SocketAddr;
-use std::time::Instant;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 /// Commands sent from the `Stream` handle to the `Endpoint` worker.
 #[derive(Debug)]

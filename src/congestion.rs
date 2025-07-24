@@ -1,7 +1,8 @@
 //! Defines the pluggable congestion control interface.
 //! 定义了可插拔的拥塞控制接口。
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 pub mod vegas;
 
