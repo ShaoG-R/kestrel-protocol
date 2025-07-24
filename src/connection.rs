@@ -2,6 +2,7 @@
 //! Defines a single reliable connection.
 
 use crate::buffer::{ReceiveBuffer, SendBuffer};
+use crate::congestion_control::CongestionController;
 use crate::packet::frame::Frame;
 use crate::packet::sack::{decode_sack_ranges, encode_sack_ranges};
 use std::collections::BTreeSet;
@@ -68,9 +69,9 @@ pub struct SendCommand {
     /// The destination address.
     /// 目标地址。
     pub remote_addr: SocketAddr,
-    /// The frame to send.
+    /// The frames to send.
     /// 要发送的帧。
-    pub frame: Frame,
+    pub frames: Vec<Frame>,
 }
 
 /// The state of a connection.
@@ -111,9 +112,9 @@ struct ConnectionState {
     /// The receive window of the peer, in packets.
     /// 对端的接收窗口（以包为单位）。
     peer_recv_window: u16,
-    /// The congestion window, in packets.
-    /// 拥塞窗口（以包为单位）。
-    congestion_window: u32,
+    /// The congestion controller.
+    /// 拥塞控制器。
+    congestion_controller: CongestionController,
 }
 
 /// Represents a single reliable connection.
@@ -159,8 +160,7 @@ impl Connection {
             rto_estimator: RttEstimator::new(),
             // Initialize with a small default window until we hear from the peer.
             peer_recv_window: 32,
-            // TODO: This will be managed by the congestion control algorithm.
-            congestion_window: 32,
+            congestion_controller: CongestionController::new(),
         };
         let connection = Self {
             state,
@@ -238,12 +238,21 @@ impl Connection {
                 }
 
                 _ = async {
-                    if let Some(frame) = state.send_buffer.pop_next_frame() {
+                    let mut frames_to_send = Vec::new();
+                    while state.can_send_more() {
+                        if let Some(frame) = state.send_buffer.pop_next_frame() {
+                            frames_to_send.push(frame);
+                        } else {
+                            break; // No more frames to send
+                        }
+                    }
+
+                    if !frames_to_send.is_empty() {
                         let now = Instant::now();
-                        state.send_buffer.add_in_flight(frame.clone(), now);
-                        state.send_frame(frame).await;
-                    } else {
-                        std::future::pending::<()>().await;
+                        for frame in &frames_to_send {
+                            state.send_buffer.add_in_flight(frame.clone(), now);
+                        }
+                        state.send_frames(frames_to_send).await;
                     }
                 }, if !state.send_buffer.is_empty() && state.can_send_more() => {}
 
@@ -295,7 +304,7 @@ impl ConnectionState {
                         header: syn_ack_header,
                     };
 
-                    self.send_frame(syn_ack_frame).await;
+                    self.send_frames(vec![syn_ack_frame]).await;
                 }
             }
             State::Established => match frame {
@@ -308,6 +317,12 @@ impl ConnectionState {
                         payload.len()
                     );
                     self.recv_buffer.receive(header.sequence_number, payload);
+
+                    // Immediate ACK logic
+                    // 如果我们有需要确认的范围，就立即发送ACK
+                    if !self.recv_buffer.get_sack_ranges().is_empty() {
+                         self.send_ack().await;
+                    }
                 }
                 Frame::Ack { header, payload } => {
                     self.handle_ack(header, payload).await;
@@ -393,6 +408,7 @@ impl ConnectionState {
                     // This packet is acknowledged. Update RTO and remove it.
                     let rtt = now.duration_since(packet.last_sent_at);
                     self.rto_estimator.update(rtt);
+                    self.congestion_controller.on_ack(rtt);
                     println!(
                         "Packet with seq={} acked. RTT: {:?}, New RTO: {:?}",
                         seq,
@@ -415,13 +431,14 @@ impl ConnectionState {
                         frames_to_fast_retx.push(packet.frame.clone());
                         packet.last_sent_at = now;
                         packet.fast_retx_count = 0; // Reset count
+                        self.congestion_controller.on_packet_loss();
                     }
                 }
             }
         }
 
         for frame in frames_to_fast_retx {
-            self.send_frame(frame).await;
+            self.send_frames(vec![frame]).await;
         }
 
         // If we are in Closing state and the FIN has been acknowledged, we can close.
@@ -463,35 +480,51 @@ impl ConnectionState {
     /// Sends an ACK in response to a FIN.
     /// 发送一个ACK来响应FIN。
     async fn send_ack_for_fin(&mut self, fin_header: &crate::packet::header::ShortHeader) {
+        let ack_frame = self.create_ack_frame(fin_header.connection_id);
+        self.send_frames(vec![ack_frame]).await;
+    }
+
+    /// Creates and sends an ACK frame.
+    /// 创建并发送一个ACK帧。
+    async fn send_ack(&mut self) {
+        // TODO: This needs a connection ID.
+        let ack_frame = self.create_ack_frame(0);
+        self.send_frames(vec![ack_frame]).await;
+    }
+
+    /// Creates an ACK frame with the current SACK ranges.
+    /// 使用当前的SACK范围创建一个ACK帧。
+    fn create_ack_frame(&mut self, conn_id: u32) -> Frame {
         let mut ack_payload = bytes::BytesMut::new();
         let sack_ranges = self.recv_buffer.get_sack_ranges();
         encode_sack_ranges(&sack_ranges, &mut ack_payload);
 
         let ack_header = crate::packet::header::ShortHeader {
             command: crate::packet::command::Command::Ack,
-            connection_id: fin_header.connection_id,
+            connection_id: conn_id,
             recv_window_size: self.recv_buffer.window_size(),
             timestamp: 0, // TODO
             sequence_number: self.sequence_number_counter,
             recv_next_sequence: self.recv_buffer.next_sequence(),
         };
         self.sequence_number_counter += 1;
-        let ack_frame = Frame::Ack {
+        Frame::Ack {
             header: ack_header,
             payload: ack_payload.freeze(),
-        };
-        self.send_frame(ack_frame).await;
+        }
     }
+
 
     /// Checks if we are allowed to send more packets based on flow and congestion control.
     /// 根据流量和拥塞控制检查我们是否被允许发送更多的包。
     fn can_send_more(&self) -> bool {
         let in_flight_count = self.send_buffer.in_flight.len() as u32;
         let peer_recv_window = self.peer_recv_window as u32;
+        let congestion_window = self.congestion_controller.congestion_window();
 
         // The number of packets in flight must be less than both the peer's receive
         // window and our own congestion window.
-        in_flight_count < peer_recv_window && in_flight_count < self.congestion_window
+        in_flight_count < peer_recv_window && in_flight_count < congestion_window
     }
 
     /// Checks for any in-flight packets that have timed out and retransmits them.
@@ -511,20 +544,24 @@ impl ConnectionState {
                 frames_to_resend.push(packet.frame.clone());
                 // Update the time it was sent.
                 packet.last_sent_at = now;
+                self.congestion_controller.on_packet_loss();
             }
         }
 
         for frame in frames_to_resend {
-            self.send_frame(frame).await;
+            self.send_frames(vec![frame]).await;
         }
     }
 
     /// Sends a frame to the central sender task.
     /// 发送一个帧到中央发送任务。
-    async fn send_frame(&self, frame: Frame) {
+    async fn send_frames(&self, frames: Vec<Frame>) {
+        if frames.is_empty() {
+            return;
+        }
         let cmd = SendCommand {
             remote_addr: self.remote_addr,
-            frame,
+            frames,
         };
         if self.sender.send(cmd).await.is_err() {
             eprintln!(

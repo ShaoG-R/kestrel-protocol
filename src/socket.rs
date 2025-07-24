@@ -135,7 +135,13 @@ async fn sender_task(socket: Arc<UdpSocket>, mut rx: mpsc::Receiver<SendCommand>
 
     while let Some(cmd) = rx.recv().await {
         send_buf.clear();
-        cmd.frame.encode(&mut send_buf);
+        for frame in cmd.frames {
+            frame.encode(&mut send_buf);
+        }
+
+        if send_buf.is_empty() {
+            continue;
+        }
 
         if let Err(e) = socket.send_to(&send_buf, cmd.remote_addr).await {
             eprintln!(
