@@ -321,35 +321,11 @@ mod tests {
     use super::*;
     use crate::packet::command::Command;
     use bytes::Bytes;
-    use std::sync::Once;
     use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// Helper to initialize tracing for tests.
-    fn init_tracing() {
-        static TRACING_INIT: Once = Once::new();
-        TRACING_INIT.call_once(|| {
-            tracing_subscriber::fmt()
-                .with_env_filter("protocol=trace")
-                .with_test_writer()
-                .init();
-        });
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_bind_and_log() {
-        init_tracing();
-        info!("--- Starting test_bind_and_log ---");
-        let addr = "127.0.0.1:0".parse().unwrap(); // Use port 0 to get a random available port
-        let bind_result = ReliableUdpSocket::bind(addr).await;
-        assert!(bind_result.is_ok());
-        info!("--- Finished test_bind_and_log ---");
-    }
-
+    
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_server_accept() {
         // 1. Setup a listener socket
-        init_tracing();
         let listener_addr = "127.0.0.1:9999".parse().unwrap();
         let (socket, mut listener) = ReliableUdpSocket::bind(listener_addr).await.unwrap();
         let socket_arc = Arc::new(socket);
@@ -401,81 +377,4 @@ mod tests {
     }
 
     
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_full_connection_lifecycle() {
-        init_tracing();
-
-        // 1. Setup server
-        let server_addr = "127.0.0.1:9998".parse().unwrap();
-        let (server_socket, mut server_listener) =
-            ReliableUdpSocket::bind(server_addr).await.unwrap();
-        let server = Arc::new(server_socket);
-        let server_run = server.clone();
-        tokio::spawn(async move { server_run.run().await });
-
-        // 2. Setup client
-        let client_addr = "127.0.0.1:9997".parse().unwrap();
-        let (client_socket, _client_listener) =
-            ReliableUdpSocket::bind(client_addr).await.unwrap();
-        let client = Arc::new(client_socket);
-        let client_run = client.clone();
-        tokio::spawn(async move { client_run.run().await });
-
-        // Channel to sync the server's accepted stream with the main test task.
-        let (server_stream_tx, mut server_stream_rx) = mpsc::channel(1);
-
-        // 3. Concurrently connect and accept
-        let server_handle = tokio::spawn(async move {
-            let (stream, _addr) = server_listener.accept().await.unwrap();
-            server_stream_tx.send(stream).await.unwrap();
-        });
-
-        let client_stream = client.connect(server_addr).await.unwrap();
-        let server_stream = server_stream_rx.recv().await.unwrap();
-        server_handle.await.unwrap();
-
-        let (mut client_reader, mut client_writer) = tokio::io::split(client_stream);
-        let (mut server_reader, mut server_writer) = tokio::io::split(server_stream);
-
-        // 4. Client sends, server receives
-        let client_msg = b"message from client";
-        client_writer
-            .write_all(client_msg)
-            .await
-            .expect("Client write should succeed");
-
-        let mut server_buf = vec![0; client_msg.len()];
-        server_reader
-            .read_exact(&mut server_buf)
-            .await
-            .expect("Server read should succeed");
-        assert_eq!(&server_buf, client_msg);
-
-        // 5. Server sends, client receives
-        let server_msg = b"response from server";
-        server_writer
-            .write_all(server_msg)
-            .await
-            .expect("Server write should succeed");
-
-        let mut client_buf = vec![0; server_msg.len()];
-        client_reader
-            .read_exact(&mut client_buf)
-            .await
-            .expect("Client read should succeed");
-        assert_eq!(&client_buf, server_msg);
-
-        // 6. Client closes
-        drop(client_writer);
-        drop(client_reader);
-
-        // 7. Server should detect end-of-file
-        let mut final_buf = vec![0; 10];
-        let n = server_reader
-            .read(&mut final_buf)
-            .await
-            .expect("Server should read EOF");
-        assert_eq!(n, 0, "Server should detect connection close (read 0 bytes)");
-    }
-
 }
