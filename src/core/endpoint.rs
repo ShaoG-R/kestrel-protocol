@@ -50,7 +50,7 @@ pub struct Endpoint {
     receiver: mpsc::Receiver<Frame>,
     sender: mpsc::Sender<SendCommand>,
     rx_from_stream: mpsc::Receiver<StreamCommand>,
-    tx_to_stream: Option<mpsc::Sender<Bytes>>,
+    tx_to_stream: Option<mpsc::Sender<Vec<Bytes>>>,
 }
 
 impl Endpoint {
@@ -62,7 +62,7 @@ impl Endpoint {
         receiver: mpsc::Receiver<Frame>,
         sender: mpsc::Sender<SendCommand>,
         initial_data: Option<Bytes>,
-    ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Bytes>) {
+    ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>) {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
 
@@ -101,7 +101,7 @@ impl Endpoint {
         peer_cid: u32,
         receiver: mpsc::Receiver<Frame>,
         sender: mpsc::Sender<SendCommand>,
-    ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Bytes>) {
+    ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>) {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
 
@@ -180,12 +180,14 @@ impl Endpoint {
             // After handling all immediate events, perform follow-up actions.
 
             // 5. Reassemble data and send to the user stream
-            if let Some(data) = self.reliability.reassemble() {
-                if let Some(tx) = self.tx_to_stream.as_ref() {
-                    if tx.send(data).await.is_err() {
-                        // User's stream handle has been dropped. We can no longer send.
-                        self.tx_to_stream = None;
-                        self.state = ConnectionState::Closing;
+            if let Some(data_vec) = self.reliability.reassemble() {
+                if !data_vec.is_empty() {
+                    if let Some(tx) = self.tx_to_stream.as_ref() {
+                        if tx.send(data_vec).await.is_err() {
+                            // User's stream handle has been dropped. We can no longer send.
+                            self.tx_to_stream = None;
+                            self.state = ConnectionState::Closing;
+                        }
                     }
                 }
             }
@@ -225,7 +227,16 @@ impl Endpoint {
                     self.peer_cid = header.source_cid;
                     info!(cid = self.local_cid, "Connection established (client-side)");
                     if !payload.is_empty() {
+                        // On SYN-ACK, we receive a single payload, but the reassembly
+                        // and stream channel expect a Vec. Wrap it.
                         self.reliability.receive_push(0, payload);
+                        if let Some(data_vec) = self.reliability.reassemble() {
+                            if let Some(tx) = self.tx_to_stream.as_ref() {
+                                if tx.send(data_vec).await.is_err() {
+                                    self.tx_to_stream = None;
+                                }
+                            }
+                        }
                     }
 
                     // Acknowledge the SYN-ACK, potentially with piggybacked data.

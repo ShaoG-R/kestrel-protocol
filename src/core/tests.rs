@@ -19,7 +19,7 @@ struct TestHarness {
     /// To simulate the user application sending commands (e.g., data) to the Endpoint.
     tx_to_endpoint_user: mpsc::Sender<StreamCommand>,
     /// To capture reassembled data that the Endpoint makes available to the user application.
-    rx_from_endpoint_user: mpsc::Receiver<Bytes>,
+    rx_from_endpoint_user: mpsc::Receiver<Vec<Bytes>>,
 }
 
 /// Sets up an `Endpoint` with a given config and returns a harness to interact with it.
@@ -181,12 +181,20 @@ async fn test_endpoint_receive_data_and_send_ack() {
 
     let mut received_data = Vec::new();
     let expected_data = b"part1part2";
+
+    // Since reassemble now returns Vec<Bytes>, we need to handle receiving chunks.
     while received_data.len() < expected_data.len() {
-        let chunk = tokio::time::timeout(
+        let chunks = tokio::time::timeout(
             Duration::from_millis(100),
-            harness.rx_from_endpoint_user.recv()
-        ).await.expect("should receive data").unwrap();
-        received_data.extend_from_slice(&chunk);
+            harness.rx_from_endpoint_user.recv(),
+        )
+        .await
+        .expect("should receive data")
+        .unwrap();
+
+        for chunk in chunks {
+            received_data.extend_from_slice(&chunk);
+        }
     }
     assert_eq!(received_data, expected_data);
 

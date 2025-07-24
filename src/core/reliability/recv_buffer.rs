@@ -4,7 +4,7 @@
 //! 管理数据的接收，包括处理乱序数据包、重组和生成SACK范围。
 
 use crate::packet::sack::SackRange;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use std::collections::BTreeMap;
 
 const DEFAULT_RECV_BUFFER_CAPACITY: usize = 256; // In packets
@@ -63,18 +63,23 @@ impl ReceiveBuffer {
         }
     }
 
-    /// Tries to reassemble contiguous packets into a single `Bytes` object.
+    /// Tries to reassemble contiguous packets into a `Vec` of `Bytes` objects.
     ///
-    /// 尝试将连续的数据包重组成一个单独的 `Bytes` 对象。
-    pub fn reassemble(&mut self) -> Option<Bytes> {
-        let mut reassembled_data = BytesMut::new();
+    /// This avoids an extra copy by returning the original `Bytes` payloads directly.
+    ///
+    /// 尝试将连续的数据包重组成一个 `Bytes` 对象的向量。
+    ///
+    /// 通过直接返回原始的 `Bytes` 有效载荷来避免额外的拷贝。
+    pub fn reassemble(&mut self) -> Option<Vec<Bytes>> {
+        let mut reassembled_data = Vec::new();
         while let Some(payload) = self.try_pop_next_contiguous() {
-            reassembled_data.extend_from_slice(&payload);
+            reassembled_data.push(payload);
         }
+
         if reassembled_data.is_empty() {
             None
         } else {
-            Some(reassembled_data.freeze())
+            Some(reassembled_data)
         }
     }
 
@@ -143,7 +148,8 @@ mod tests {
         buffer.receive(0, Bytes::from("hello"));
         buffer.receive(1, Bytes::from(" world"));
 
-        let data = buffer.reassemble().unwrap();
+        let data_vec = buffer.reassemble().unwrap();
+        let data: Bytes = data_vec.into_iter().flat_map(|b| b).collect();
         assert_eq!(data, "hello world");
         assert!(buffer.reassemble().is_none());
         assert_eq!(buffer.next_sequence(), 2);
@@ -158,7 +164,8 @@ mod tests {
         assert_eq!(buffer.next_sequence(), 0);
 
         buffer.receive(0, Bytes::from("hello "));
-        let data = buffer.reassemble().unwrap();
+        let data_vec = buffer.reassemble().unwrap();
+        let data: Bytes = data_vec.into_iter().flat_map(|b| b).collect();
         assert_eq!(data, "hello world");
         assert_eq!(buffer.next_sequence(), 2);
     }
@@ -169,7 +176,9 @@ mod tests {
 
         buffer.receive(0, Bytes::from("one"));
         buffer.receive(1, Bytes::from("two"));
-        assert_eq!(buffer.reassemble().unwrap(), "onetwo");
+        let data_vec = buffer.reassemble().unwrap();
+        let data: Bytes = data_vec.into_iter().flat_map(|b| b).collect();
+        assert_eq!(data, "onetwo");
         assert_eq!(buffer.next_sequence(), 2);
 
         // Receive an old packet (already processed)

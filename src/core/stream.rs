@@ -11,6 +11,7 @@
 
 use crate::core::endpoint::StreamCommand;
 use bytes::{Buf, Bytes};
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -24,22 +25,21 @@ pub struct Stream {
     /// Sends commands to the `Endpoint` worker task.
     pub(crate) tx_to_endpoint: mpsc::Sender<StreamCommand>,
     /// Receives ordered, reliable data from the `Endpoint` worker task.
-    pub(crate) rx_from_endpoint: mpsc::Receiver<Bytes>,
-    /// A small buffer to handle cases where the user's read buffer is smaller
-    /// than the received data chunk.
-    read_buffer: Bytes,
+    pub(crate) rx_from_endpoint: mpsc::Receiver<Vec<Bytes>>,
+    /// A buffer of received data chunks, waiting to be read by the user.
+    read_buffer: VecDeque<Bytes>,
 }
 
 impl Stream {
     /// Creates a new `Stream`.
     pub(crate) fn new(
         tx_to_endpoint: mpsc::Sender<StreamCommand>,
-        rx_from_endpoint: mpsc::Receiver<Bytes>,
+        rx_from_endpoint: mpsc::Receiver<Vec<Bytes>>,
     ) -> Self {
         Self {
             tx_to_endpoint,
             rx_from_endpoint,
-            read_buffer: Bytes::new(),
+            read_buffer: VecDeque::new(),
         }
     }
 
@@ -85,24 +85,37 @@ impl AsyncRead for Stream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         // If we have leftover data from a previous read, use it first.
-        if !self.read_buffer.is_empty() {
-            let len = std::cmp::min(self.read_buffer.len(), buf.remaining());
-            buf.put_slice(&self.read_buffer[..len]);
-            // `advance` is a method on `impl Buf`, which `Bytes` implements.
-            self.read_buffer.advance(len);
-            return Poll::Ready(Ok(()));
+        while !self.read_buffer.is_empty() {
+            let current_chunk = &mut self.read_buffer[0];
+            let len = std::cmp::min(current_chunk.len(), buf.remaining());
+
+            if len > 0 {
+                buf.put_slice(&current_chunk[..len]);
+                current_chunk.advance(len);
+            }
+
+            // If we've finished with the current chunk, drop it.
+            if current_chunk.is_empty() {
+                self.read_buffer.pop_front();
+            }
+
+            // If the user's buffer is full, we're done for now.
+            if buf.remaining() == 0 {
+                return Poll::Ready(Ok(()));
+            }
         }
 
-        // Otherwise, try to receive new data from the worker.
+        // Buffer is empty, try to receive new data from the worker.
         match self.rx_from_endpoint.poll_recv(cx) {
-            Poll::Ready(Some(mut data)) => {
-                let len = std::cmp::min(data.len(), buf.remaining());
-                buf.put_slice(&data[..len]);
-                // If the received data is larger than the buffer, store the remainder.
-                if data.len() > len {
-                    self.read_buffer = data.split_off(len);
-                }
-                Poll::Ready(Ok(()))
+            Poll::Ready(Some(data_vec)) => {
+                // Extend the buffer with the new chunks.
+                self.read_buffer.extend(data_vec);
+
+                // Now that we have new data, try to fulfill the read request again
+                // by calling poll_read recursively. The `while` loop at the start
+                // will handle the actual copying.
+                // It's safe to call poll_read again because we're in a Poll::Ready state.
+                self.poll_read(cx, buf)
             }
             Poll::Ready(None) => {
                 // Channel closed, indicating the end of the stream.

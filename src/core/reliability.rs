@@ -155,7 +155,7 @@ impl ReliabilityLayer {
         self.ack_eliciting_packets_since_last_ack += 1;
     }
 
-    pub fn reassemble(&mut self) -> Option<Bytes> {
+    pub fn reassemble(&mut self) -> Option<Vec<Bytes>> {
         self.recv_buffer.reassemble()
     }
     
