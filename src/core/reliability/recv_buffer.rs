@@ -61,19 +61,6 @@ impl ReceiveBuffer {
             // Use entry API to avoid overwriting existing packets (duplicates).
             self.received.entry(sequence_number).or_insert(payload);
         }
-
-        // Optimization: if the received packet is the next expected one,
-        // we can immediately try to advance the sequence. This prevents
-        // a build-up of in-order packets in the buffer that would otherwise
-        // only be processed when `reassemble` is called.
-        while self.received.first_key_value().map_or(false, |(&seq, _)| seq == self.next_sequence) {
-            self.next_sequence += 1;
-            // The payload of these packets will be picked up by `reassemble`.
-            // Here, we are just advancing the cumulative ACK point.
-            // A small trick: we can remove the entry and re-insert it if we wanted to
-            // completely separate the reassembly logic, but for now, we just advance the
-            // sequence number. The `reassemble` will pop them.
-        }
     }
 
     /// Tries to reassemble contiguous packets into a single `Bytes` object.
@@ -103,6 +90,16 @@ impl ReceiveBuffer {
         None
     }
 
+    /// Processes all contiguous packets at the start of the buffer, advancing
+    /// `next_sequence`. This is critical for acknowledging packets like FIN
+    /// that don't carry data and thus might not trigger a `reassemble` call.
+    pub fn process_next_contiguous(&mut self) {
+        while self.received.first_key_value().map_or(false, |(&s, _)| s == self.next_sequence) {
+            self.received.pop_first();
+            self.next_sequence += 1;
+        }
+    }
+
     /// Generates a vector of SACK ranges based on the currently buffered packets.
     ///
     /// 根据当前缓冲的数据包生成一个 SACK 范围的向量。
@@ -110,9 +107,7 @@ impl ReceiveBuffer {
         let mut ranges = Vec::new();
         let mut current_range: Option<SackRange> = None;
 
-        // Only generate SACKs for packets that are truly out-of-order,
-        // i.e., their sequence number is greater than the next contiguous one we expect.
-        for &seq in self.received.keys().filter(|&&s| s >= self.next_sequence) {
+        for &seq in self.received.keys() {
             match current_range.as_mut() {
                 Some(range) => {
                     if seq == range.end + 1 {
