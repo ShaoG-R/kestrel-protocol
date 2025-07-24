@@ -2,7 +2,9 @@
 //! Defines the send and receive buffers for reliable transmission.
 
 use crate::packet::frame::Frame;
-use std::collections::VecDeque;
+use crate::packet::sack::SackRange;
+use bytes::Bytes;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 /// A packet that has been sent but not yet acknowledged (in-flight).
@@ -78,12 +80,105 @@ impl SendBuffer {
 /// 管理传入的数据，重排乱序的包并管理确认。
 #[derive(Debug, Default)]
 pub struct ReceiveBuffer {
-    // TODO: We will store out-of-order packets here until they can be delivered to the application.
-    // 我们将在这里存储乱序的包，直到它们可以被交付给应用程序。
+    /// The next sequence number we are expecting to deliver to the application.
+    /// 我们期望交付给应用程序的下一个序列号。
+    next_sequence: u32,
+    /// A map of received packets that are waiting to be reordered and delivered.
+    /// The key is the sequence number.
+    /// 已接收但等待重排和交付的包的映射。
+    /// 键是序列号。
+    received: BTreeMap<u32, Bytes>,
 }
 
 impl ReceiveBuffer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Gets the next sequence number that the buffer is expecting.
+    /// This is used for the `recv_next_sequence` field in outgoing headers.
+    ///
+    /// 获取缓冲区期望的下一个序列号。
+    /// 这用于出站头中的 `recv_next_sequence` 字段。
+    pub fn next_sequence(&self) -> u32 {
+        self.next_sequence
+    }
+
+    /// Receives a data payload for a given sequence number.
+    /// 为给定的序列号接收一个数据载荷。
+    pub fn receive(&mut self, sequence_number: u32, payload: Bytes) {
+        // Don't insert if it's already been delivered.
+        if sequence_number >= self.next_sequence {
+            self.received.insert(sequence_number, payload);
+        }
+    }
+
+    /// Reads a contiguous block of data starting from the `next_sequence`.
+    /// Returns the combined payload and advances the `next_sequence`.
+    ///
+    /// 读取从 `next_sequence` 开始的连续数据块。
+    /// 返回组合的载荷并推进 `next_sequence`。
+    pub fn read(&mut self) -> Option<Bytes> {
+        // This is not yet a complete implementation for a stream-like API,
+        // but it correctly assembles contiguous packets.
+        let mut contiguous_payloads = Vec::new();
+        let mut last_seq = self.next_sequence;
+
+        while let Some((seq, payload)) = self.received.first_key_value() {
+            if *seq == last_seq {
+                contiguous_payloads.push(self.received.pop_first().unwrap().1);
+                last_seq += 1;
+            } else {
+                break;
+            }
+        }
+
+        self.next_sequence = last_seq;
+
+        if contiguous_payloads.is_empty() {
+            None
+        } else {
+            // This is a simplification. For a real stream, we'd handle
+            // partial reads and buffer concatenation more carefully.
+            Some(Bytes::from(contiguous_payloads.concat()))
+        }
+    }
+
+    /// Generates a list of SACK ranges based on the currently received packets.
+    /// 根据当前接收到的包生成一个SACK范围列表。
+    pub fn get_sack_ranges(&self) -> Vec<SackRange> {
+        let mut ranges = Vec::new();
+        let mut current_range: Option<SackRange> = None;
+
+        for &seq in self.received.keys() {
+            match current_range.as_mut() {
+                Some(range) => {
+                    if seq == range.end + 1 {
+                        // Extend the current range
+                        range.end = seq;
+                    } else {
+                        // End the current range and start a new one
+                        ranges.push(range.clone());
+                        current_range = Some(SackRange {
+                            start: seq,
+                            end: seq,
+                        });
+                    }
+                }
+                None => {
+                    // Start a new range
+                    current_range = Some(SackRange {
+                        start: seq,
+                        end: seq,
+                    });
+                }
+            }
+        }
+
+        if let Some(range) = current_range {
+            ranges.push(range);
+        }
+
+        ranges
     }
 }

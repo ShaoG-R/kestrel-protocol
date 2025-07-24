@@ -3,6 +3,8 @@
 
 use crate::buffer::{ReceiveBuffer, SendBuffer};
 use crate::packet::frame::Frame;
+use crate::packet::sack::{decode_sack_ranges, encode_sack_ranges};
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -262,42 +264,65 @@ impl ConnectionState {
             State::Established => {
                 match frame {
                     Frame::Push { header, payload } => {
-                        // TODO: Pass the data to the receive buffer for reordering and delivery.
+                        // Pass the data to the receive buffer for reordering and delivery.
                         // 将数据传递给接收缓冲区进行重排和交付。
-                        println!("Received PUSH with {} bytes of payload.", payload.len());
+                        println!(
+                            "Received PUSH with seq={} and {} bytes of payload.",
+                            header.sequence_number,
+                            payload.len()
+                        );
+                        self.recv_buffer.receive(header.sequence_number, payload);
                     }
                     Frame::Ack { header, payload } => {
-                        // TODO: Phase 4: Parse SACK ranges from the payload.
-                        // For now, we'll assume it acks the oldest in-flight packet.
-                        let now = Instant::now();
-                        if let Some(acked_packet) = self.send_buffer.in_flight.pop_front() {
-                            let rtt = now.duration_since(acked_packet.last_sent_at);
-                            self.rto_estimator.update(rtt);
-                            println!(
-                                "Received ACK for seq={:?}, RTT updated: {:?}, new RTO: {:?}",
-                                acked_packet.frame.sequence_number(),
-                                rtt,
-                                self.rto_estimator.rto()
-                            );
+                        let sack_ranges = decode_sack_ranges(payload);
+                        println!("Received ACK with SACK ranges: {:?}", sack_ranges);
+
+                        let mut acked_seq_numbers = BTreeSet::new();
+                        for range in sack_ranges {
+                            for seq in range.start..=range.end {
+                                acked_seq_numbers.insert(seq);
+                            }
                         }
+
+                        let now = Instant::now();
+                        self.send_buffer.in_flight.retain(|packet| {
+                            if let Some(seq) = packet.frame.sequence_number() {
+                                if acked_seq_numbers.contains(&seq) {
+                                    // This packet is acknowledged. Update RTO and remove it.
+                                    let rtt = now.duration_since(packet.last_sent_at);
+                                    self.rto_estimator.update(rtt);
+                                    println!(
+                                        "Packet with seq={} acked. RTT: {:?}, New RTO: {:?}",
+                                        seq,
+                                        rtt,
+                                        self.rto_estimator.rto()
+                                    );
+                                    return false; // Remove from in_flight
+                                }
+                            }
+                            true // Keep in in_flight
+                        });
                     }
                     Frame::Fin { header } => {
                         println!("Received FIN, closing connection and sending ACK.");
                         self.state = State::Closing;
                         // Respond with an ACK to their FIN. This is part of the 4-way handshake.
-                        // We will reuse their header info where appropriate.
+                        let mut ack_payload = bytes::BytesMut::new();
+                        let sack_ranges = self.recv_buffer.get_sack_ranges();
+                        encode_sack_ranges(&sack_ranges, &mut ack_payload);
+
                         let ack_header = crate::packet::header::ShortHeader {
                             command: crate::packet::command::Command::Ack,
                             connection_id: header.connection_id,
                             recv_window_size: 0, // TODO
                             timestamp: 0,        // TODO
-                            sequence_number: self.sequence_number_counter, // Our own seq number
-                            recv_next_sequence: 0, // TODO
+                            sequence_number: self.sequence_number_counter,
+                            recv_next_sequence: self.recv_buffer.next_sequence(),
                         };
                         self.sequence_number_counter += 1;
                         let ack_frame = Frame::Ack {
                             header: ack_header,
-                            payload: bytes::Bytes::new(), // No SACK payload for now
+                            payload: ack_payload.freeze(),
                         };
                         self.send_frame(ack_frame).await;
                     }
