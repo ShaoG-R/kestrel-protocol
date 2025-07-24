@@ -1,4 +1,4 @@
-# 项目现状分析报告 (Project Status Report) - 2024-08-01
+# 项目现状分析报告 (Project Status Report) - 2024-08-02
 
 **注意: 本报告是基于对 `src` 目录代码的自动分析生成，旨在同步当前实现状态与设计文档，并指导后续开发。**
 
@@ -37,6 +37,9 @@
     *   统一的可配置化 (`Config`结构体) (Configuration)
     *   基于 `thiserror` 的标准化错误处理 (Error Handling)
     *   **清晰的协议分层 (Code Quality):** 成功将协议栈解耦为 `Endpoint`, `ReliabilityLayer`, 和 `CongestionControl` Trait。
+    *   **关键性能优化 (Performance):**
+        *   **批处理优化:** 在 `Socket` 发送任务和 `Endpoint` 事件循环中实现了I/O批处理，显著减少了高吞吐量下的 `await` 次数和系统调用开销。
+        *   **减少内存拷贝:** 通过重构 `ReceiveBuffer` 和 `Stream` 的数据路径，消除了数据重组过程中的一次主要内存拷贝，向零拷贝目标迈进。
 
 *   **未完成或不完整的部分**:
     *   **测试覆盖不完整 (Testing):** 现有的单元和集成测试需要大幅扩展，特别是针对各种网络异常情况的模拟测试。
@@ -54,8 +57,11 @@
         *   **集成测试:** 编写更多集成测试用例，使用 `tokio-test` 和网络模拟工具，系统性地测试高丢包、高延迟、乱序、带宽限制等场景。
         *   **压力测试:** 验证高并发连接下的性能和资源使用情况。
     2.  **性能优化 (Performance Optimization):**
-        *   **零拷贝 (Zero-copy):** 审查从 `UdpSocket` 接收到 `Stream` 读取的整个数据路径，最大限度地减少内存拷贝。
-        *   **批处理优化 (Batching Optimization):** 在 `Endpoint` 的事件循环和 `Socket` 的 I/O 中，优化包的批处理逻辑（Coalescing），减少系统调用频率。
+        *   **零拷贝 (Zero-copy):**
+            *   **进展:** 已通过返回 `Vec<Bytes>` 的方式消除了接收路径上的主要内存拷贝。
+            *   **未来:** 探索 `UdpSocket` 更底层的 `recvmmsg` 等接口，以消除从内核到用户空间的初始拷贝。
+        *   **批处理优化 (Batching Optimization):**
+            *   **完成:** 已在 `Endpoint` 的事件循环和 `Socket` 的 I/O 中优化了包的批处理逻辑。
     3.  **可观测性 (Observability):**
         *   **精细化日志:** 在关键路径（如：拥塞窗口变化、RTO发生、快速重传触发）上增加更详细的 `tracing` 日志。
         *   **核心指标导出:** 暴露关键性能指标（如：`srtt`, `rttvar`, `cwnd`, in-flight 包数量等），以便集成到监控系统（如 Prometheus）。
@@ -86,6 +92,9 @@
     *   所有公开的 API (函数、结构体、枚举等) 必须提供中英双语的文档注释 (`doc comments`)。
     *   协议实现中的关键逻辑、状态转换、复杂算法等部分，必须添加清晰的实现注释。
     *   代码风格遵循官方的 `rustfmt` 标准。
+
+4.  **AI 协作语言 (AI Collaboration Language):**
+    *   为确保沟通的清晰和统一，所有与本项目相关的AI助手回复都必须使用 **中文**。
 
 ## 2. 协议设计 (Protocol Design)
 
