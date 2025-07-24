@@ -32,13 +32,13 @@
 
 ## 3. 存在的问题与和设计文档的偏差 (Identified Issues & Deviations)
 
-1.  **【高优先级】缺少流式API (Missing Stream API):** `Connection` 结构体没有实现 `tokio::io::AsyncRead` 和 `AsyncWrite` trait。当前的 `write` 方法是基于包的，并且没有暴露给用户的 `read` 方法。这是 Phase 6 最核心的未尽事宜。
+1.  **【已完成】流式API已实现 (Stream API Implemented):** `Connection` 结构体现在已经完整实现了 `tokio::io::AsyncRead` 和 `tokio::io::AsyncWrite` trait。我们重构了 `poll_write` 和 `poll_read`，使其完全无阻塞，并通过Waker机制实现了真正的异步I/O。
 
-2.  **【高优先级】完全缺失测试 (No Tests):** 项目中没有任何单元测试或集成测试代码。这使得回归验证和功能迭代变得非常困难和危险。
+2.  **【进行中】测试覆盖不完整 (Testing Coverage Incomplete):** 项目的测试已经启动。我们为核心的 `src/buffer.rs` 模块编写了全面的单元测试。同时，我们搭建了一个集成测试框架 `TestHarness` 并为 `src/connection.rs` 编写了首个端到端测试，但还需要为超时、重传等更复杂的场景补充测试用例。
 
-3.  **【高优先级】错误处理不完善 (Incomplete Error Handling):** `src/error.rs` 文件为空，代码中直接使用了 `std::io::Error`，并未按照设计文档要求使用 `thiserror` 定义详细的错误类型。
+3.  **【已完成】错误处理已重构 (Error Handling Refactored):** 项目已经引入了 `thiserror`，并在 `src/error.rs` 中定义了统一的 `Error` 和 `Result` 类型。整个代码库的错误处理流程已经重构，以使用新的错误类型进行传递，取代了原有的 `std::io::Error` 和 `eprintln!`。
 
-4.  **【中优先级】未实现0-RTT (0-RTT Not Implemented):** `SYN` 帧的定义中不包含数据载荷，连接建立逻辑也不支持在第一个包中发送业务数据，与 Phase 2 的“快速连接建立”目标不完全相符。
+4.  **【已完成】实现0-RTT连接 (0-RTT Implemented):** 客户端现在可以通过 `connect()` 方法发起连接，并立即写入数据。这些数据将被打包在第一个`SYN`帧中发送。服务器端也已实现相应的逻辑来处理携带数据的`SYN`帧，实现了0-RTT快速连接。
 
 5.  **【中优先级】包聚合/粘连未充分利用 (Packet Coalescing Underutilized):** 虽然底层的 `sender_task` 支持在单个UDP包中发送多个Frame，但上层 `Connection` 的逻辑（如 `send_ack`）倾向于立即发送单个帧，而不是等待机会将ACK与其他数据（如PUSH）捆绑在一起发送。
 

@@ -7,3 +7,6 @@ pub mod error;
 pub mod packet;
 pub mod socket;
 pub mod congestion_control;
+
+#[cfg(test)]
+pub mod testing;

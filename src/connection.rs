@@ -270,7 +270,7 @@ impl Connection {
 
 impl AsyncRead for Connection {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
@@ -298,7 +298,7 @@ impl AsyncRead for Connection {
 
 impl AsyncWrite for Connection {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
@@ -330,7 +330,7 @@ impl AsyncWrite for Connection {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let state = &mut self.get_mut().state;
 
         if state.state == State::Established {
@@ -352,6 +352,26 @@ impl ConnectionState {
     /// Turns data from the stream buffer into PUSH packets.
     /// 将流缓冲区的数据打包成PUSH包。
     fn packetize_stream_data(&mut self) {
+        // In connecting state, the first data packet becomes a SYN with payload.
+        if self.state == State::Connecting && self.sequence_number_counter == 0 {
+            if let Some(chunk) = self.send_buffer.create_chunk(MAX_PAYLOAD_SIZE) {
+                println!("Sending 0-RTT data in SYN packet.");
+                let syn_header = crate::packet::header::LongHeader {
+                    command: crate::packet::command::Command::Syn,
+                    protocol_version: 0,
+                    connection_id: self.connection_id,
+                };
+                let frame = Frame::Syn {
+                    header: syn_header,
+                    payload: chunk,
+                };
+                self.send_buffer.queue_frame(frame);
+                // We don't increment sequence_number_counter for SYN with data yet,
+                // as it's implicitly sequence 0. The next PUSH will be 1.
+            }
+            return; // Only send one SYN
+        }
+
         while let Some(chunk) = self.send_buffer.create_chunk(MAX_PAYLOAD_SIZE) {
             let push_header = crate::packet::header::ShortHeader {
                 command: crate::packet::command::Command::Push,
@@ -381,28 +401,48 @@ impl ConnectionState {
         );
 
         match self.state {
-            State::Connecting => {
-                if let Frame::Syn { header } = frame {
-                    // Received a SYN, move to established and send SYN-ACK
-                    // 收到SYN，转换到Established状态并发送SYN-ACK
+            State::Connecting => match frame {
+                Frame::Syn { header: _, payload } => {
+                    // This is the server-side logic for an incoming connection.
+                    // 这是服务器端处理新连接的逻辑。
                     println!("Transitioning to Established state.");
                     self.state = State::Established;
 
+                    if !payload.is_empty() {
+                        // This is 0-RTT data.
+                        println!("Received 0-RTT data ({} bytes).", payload.len());
+                        self.recv_buffer.receive(0, payload);
+                        if self.recv_buffer.reassemble() {
+                            if let Some(waker) = self.read_waker.take() {
+                                waker.wake();
+                            }
+                        }
+                    }
+
                     // Respond with a SYN-ACK
-                    // 用SYN-ACK回应
                     let syn_ack_header = crate::packet::header::LongHeader {
                         command: crate::packet::command::Command::SynAck,
-                        protocol_version: 0, // Or some constant
+                        protocol_version: 0,
                         connection_id: self.connection_id,
                     };
-
                     let syn_ack_frame = Frame::SynAck {
                         header: syn_ack_header,
                     };
-
                     self.send_frames(vec![syn_ack_frame]).await?;
                 }
-            }
+                Frame::SynAck { header: _ } => {
+                    // This is the client-side logic when receiving the server's ack.
+                    // 这是客户端收到服务器ack时的逻辑。
+                    println!("Received SYN-ACK, connection established.");
+                    self.state = State::Established;
+                    // Our SYN is implicitly acknowledged. The data sent in it can be
+                    // considered "in-flight" but since there's no sequence number,
+                    // we don't track it for retransmission. We assume it arrived.
+                }
+                _ => {
+                    // Ignore other packets while connecting
+                }
+            },
             State::Established => match frame {
                 Frame::Push { header, payload } => {
                     // Pass the data to the receive buffer for reordering and delivery.
@@ -576,8 +616,19 @@ impl ConnectionState {
     /// Initiates connection shutdown.
     /// 发起连接关闭。
     fn shutdown(&mut self) {
+        if self.state == State::Connecting {
+            self.state = State::Closed;
+            if let Some(waker) = self.write_waker.take() {
+                waker.wake();
+            }
+            if let Some(waker) = self.read_waker.take() {
+                waker.wake();
+            }
+            return;
+        }
+
         if self.state == State::Established || self.state == State::FinWait {
-            let mut should_send_fin = false;
+            let should_send_fin;
             if self.state == State::Established {
                 self.state = State::Closing;
                 should_send_fin = true;
@@ -707,5 +758,166 @@ impl ConnectionState {
             return Err(Error::ChannelClosed);
         }
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::packet::command::Command;
+    use crate::testing::TestHarness;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn test_simple_write_and_ack() {
+        let mut harness = TestHarness::new_with_state(State::Established);
+        let test_data = b"hello from test";
+
+        // Write data to the connection using the AsyncWrite trait
+        harness
+            .connection
+            .write_all(test_data)
+            .await
+            .expect("Write failed");
+
+        // Tick the connection to packetize and send the data
+        harness.tick().await;
+
+        // The connection should have sent a PUSH frame
+        let sent_frames = harness
+            .recv_from_connection()
+            .await
+            .expect("Did not receive frames from connection");
+        assert_eq!(sent_frames.len(), 1);
+        let push_frame = &sent_frames[0];
+
+        let seq_num = if let Frame::Push { header, payload } = push_frame {
+            assert_eq!(payload.as_ref(), test_data);
+            header.sequence_number
+        } else {
+            panic!("Expected a PUSH frame, got {:?}", push_frame);
+        };
+
+        // The packet should now be in-flight
+        assert_eq!(harness.connection.state.send_buffer.in_flight.len(), 1);
+
+        // Now, simulate the peer sending an ACK for this packet
+        let ack_header = crate::packet::header::ShortHeader {
+            command: Command::Ack,
+            connection_id: 1,
+            recv_window_size: 100,
+            timestamp: 0,
+            sequence_number: 100, // Peer's sequence number, doesn't matter much here
+            recv_next_sequence: 1,
+        };
+        let sack_ranges = vec![crate::packet::sack::SackRange {
+            start: seq_num,
+            end: seq_num,
+        }];
+        let mut ack_payload = bytes::BytesMut::new();
+        crate::packet::sack::encode_sack_ranges(&sack_ranges, &mut ack_payload);
+
+        let ack_frame = Frame::Ack {
+            header: ack_header,
+            payload: ack_payload.freeze(),
+        };
+
+        harness.send_to_connection(ack_frame).await;
+
+        // Tick the connection to process the ACK
+        harness.tick().await;
+
+        // The in-flight buffer should now be empty
+        assert!(harness.connection.state.send_buffer.in_flight.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_0rtt_write() {
+        let mut harness = TestHarness::new_with_state(State::Connecting);
+        let test_data = b"0-rtt data";
+
+        // Write data before the connection is established
+        harness
+            .connection
+            .write_all(test_data)
+            .await
+            .expect("0-RTT write failed");
+
+        // Tick the connection to packetize and send the data
+        harness.tick().await;
+
+        // The connection should have sent a SYN frame with the data
+        let sent_frames = harness
+            .recv_from_connection()
+            .await
+            .expect("Did not receive frames from connection");
+        assert_eq!(sent_frames.len(), 1);
+        let syn_frame = &sent_frames[0];
+
+        if let Frame::Syn { header, payload } = syn_frame {
+            assert_eq!(payload.as_ref(), test_data);
+            assert_eq!(header.command, Command::Syn);
+        } else {
+            panic!("Expected a SYN frame, got {:?}", syn_frame);
+        };
+
+        // Now, simulate the peer sending a SYN-ACK
+        let syn_ack_header = crate::packet::header::LongHeader {
+            command: Command::SynAck,
+            protocol_version: 0,
+            connection_id: 1,
+        };
+        let syn_ack_frame = Frame::SynAck {
+            header: syn_ack_header,
+        };
+        harness.send_to_connection(syn_ack_frame).await;
+
+        // Tick the connection to process the SYN-ACK
+        harness.tick().await;
+
+        // The connection should now be in the Established state
+        assert_eq!(harness.connection.state.state, State::Established);
+    }
+
+    #[tokio::test]
+    async fn test_rto_retransmission() {
+        let mut harness = TestHarness::new_with_state(State::Established);
+        let test_data = b"rto test data";
+
+        harness
+            .connection
+            .write_all(test_data)
+            .await
+            .expect("Write failed");
+        harness.tick().await;
+
+        // The connection should have sent a PUSH frame. We receive it but don't ACK it.
+        let sent_frames = harness
+            .recv_from_connection()
+            .await
+            .expect("Did not receive frames from connection");
+        assert_eq!(sent_frames.len(), 1);
+        let original_seq_num = sent_frames[0].sequence_number().unwrap();
+        assert_eq!(harness.connection.state.send_buffer.in_flight.len(), 1);
+
+        // Advance time past the initial RTO
+        let initial_rto = harness.connection.state.rto_estimator.rto();
+        harness.advance_time(initial_rto + Duration::from_millis(100)).await;
+
+        // The connection should have retransmitted the packet.
+        let retransmitted_frames = harness
+            .recv_from_connection()
+            .await
+            .expect("Did not receive retransmitted frames");
+        assert_eq!(retransmitted_frames.len(), 1);
+        let retransmitted_seq_num = retransmitted_frames[0].sequence_number().unwrap();
+
+        assert_eq!(
+            original_seq_num, retransmitted_seq_num,
+            "The sequence number of the retransmitted packet should be the same"
+        );
+        // The packet is still in-flight
+        assert_eq!(harness.connection.state.send_buffer.in_flight.len(), 1);
     }
 }

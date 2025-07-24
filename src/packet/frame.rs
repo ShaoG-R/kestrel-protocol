@@ -24,9 +24,12 @@ pub enum Frame {
     /// A PING frame.
     /// PING 帧。
     Ping { header: ShortHeader },
-    /// A SYN frame to initiate a connection.
-    /// 用于发起连接的 SYN 帧。
-    Syn { header: LongHeader },
+    /// A SYN frame to initiate a connection. May carry 0-RTT data.
+    /// 用于发起连接的 SYN 帧。可携带0-RTT数据。
+    Syn {
+        header: LongHeader,
+        payload: Bytes,
+    },
     /// A SYN-ACK frame to acknowledge a connection.
     /// 用于确认连接的 SYN-ACK 帧。
     SynAck { header: LongHeader },
@@ -52,8 +55,9 @@ impl Frame {
 
         if command.is_long_header() {
             let header = LongHeader::decode(&mut buf)?;
+            let payload = Bytes::copy_from_slice(buf);
             match header.command {
-                command::Command::Syn => Some(Frame::Syn { header }),
+                command::Command::Syn => Some(Frame::Syn { header, payload }),
                 command::Command::SynAck => Some(Frame::SynAck { header }),
                 _ => None, // Unreachable, as is_long_header is checked
             }
@@ -88,8 +92,9 @@ impl Frame {
             Frame::Ping { header } => {
                 header.encode(buf);
             }
-            Frame::Syn { header } => {
+            Frame::Syn { header, payload } => {
                 header.encode(buf);
+                buf.put_slice(payload);
             }
             Frame::SynAck { header } => {
                 header.encode(buf);
