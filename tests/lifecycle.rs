@@ -86,21 +86,7 @@ async fn test_full_connection_lifecycle() {
     let (mut client_reader, mut client_writer) = tokio::io::split(client_stream);
     let (mut server_reader, mut server_writer) = tokio::io::split(server_stream);
 
-    // 4. Client sends, server receives
-    let client_msg = b"message from client";
-    client_writer
-        .write_all(client_msg)
-        .await
-        .expect("Client write should succeed");
-
-    let mut server_buf = vec![0; client_msg.len()];
-    server_reader
-        .read_exact(&mut server_buf)
-        .await
-        .expect("Server read should succeed");
-    assert_eq!(&server_buf, client_msg);
-
-    // 5. Server sends, client receives
+    // 4. Server sends, client receives. This triggers the SYN-ACK from the server.
     let server_msg = b"response from server";
     server_writer
         .write_all(server_msg)
@@ -113,6 +99,21 @@ async fn test_full_connection_lifecycle() {
         .await
         .expect("Client read should succeed");
     assert_eq!(&client_buf, server_msg);
+
+
+    // 5. Client sends, server receives
+    let client_msg = b"message from client";
+    client_writer
+        .write_all(client_msg)
+        .await
+        .expect("Client write should succeed");
+
+    let mut server_buf = vec![0; client_msg.len()];
+    server_reader
+        .read_exact(&mut server_buf)
+        .await
+        .expect("Server read should succeed");
+    assert_eq!(&server_buf, client_msg);
 
     // 6. Client closes gracefully
     client_writer

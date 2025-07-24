@@ -30,9 +30,12 @@ pub enum Frame {
         header: LongHeader,
         payload: Bytes,
     },
-    /// A SYN-ACK frame to acknowledge a connection.
-    /// 用于确认连接的 SYN-ACK 帧。
-    SynAck { header: LongHeader },
+    /// A SYN-ACK frame to acknowledge a connection. May carry data.
+    /// 用于确认连接的 SYN-ACK 帧。可携带数据。
+    SynAck {
+        header: LongHeader,
+        payload: Bytes,
+    },
     /// A FIN frame to close a connection.
     /// 用于关闭连接的 FIN 帧。
     Fin { header: ShortHeader },
@@ -58,7 +61,7 @@ impl Frame {
             let payload = Bytes::copy_from_slice(buf);
             match header.command {
                 command::Command::Syn => Some(Frame::Syn { header, payload }),
-                command::Command::SynAck => Some(Frame::SynAck { header }),
+                command::Command::SynAck => Some(Frame::SynAck { header, payload }),
                 _ => None, // Unreachable, as is_long_header is checked
             }
         } else {
@@ -96,8 +99,9 @@ impl Frame {
                 header.encode(buf);
                 buf.put_slice(payload);
             }
-            Frame::SynAck { header } => {
+            Frame::SynAck { header, payload } => {
                 header.encode(buf);
+                buf.put_slice(payload);
             }
             Frame::Fin { header } => {
                 header.encode(buf);

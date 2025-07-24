@@ -39,6 +39,7 @@ pub enum StreamCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Connecting,
+    SynReceived,
     Established,
     Closing,
     FinWait,
@@ -70,12 +71,17 @@ impl Endpoint {
         local_cid: u32,
         receiver: mpsc::Receiver<Frame>,
         sender: mpsc::Sender<SendCommand>,
+        initial_data: Option<Bytes>,
     ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Bytes>) {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
 
         let congestion_control = Box::new(Vegas::new(config.clone()));
-        let reliability = ReliabilityLayer::new(config.clone(), congestion_control);
+        let mut reliability = ReliabilityLayer::new(config.clone(), congestion_control);
+        if let Some(data) = initial_data {
+            // Immediately write the 0-RTT data to the stream buffer.
+            reliability.write_to_stream(&data);
+        }
         let now = Instant::now();
 
         let endpoint = Self {
@@ -117,7 +123,7 @@ impl Endpoint {
             remote_addr,
             local_cid,
             peer_cid,
-            state: State::Established,
+            state: State::SynReceived,
             start_time: now,
             reliability,
             peer_recv_window: 32,
@@ -139,11 +145,14 @@ impl Endpoint {
         }
 
         loop {
-            // Main event loop using `tokio::select!`
-            let next_wakeup = self
-                .reliability
-                .next_rto_deadline()
-                .unwrap_or_else(|| Instant::now() + self.config.idle_timeout);
+            // In SynReceived, we don't set a timeout. We wait for the user to accept.
+            let next_wakeup = if self.state == State::SynReceived {
+                Instant::now() + self.config.idle_timeout // Effectively, sleep forever until a message
+            } else {
+                self.reliability
+                    .next_rto_deadline()
+                    .unwrap_or_else(|| Instant::now() + self.config.idle_timeout)
+            };
 
             tokio::select! {
                 biased; // Prioritize incoming packets and user commands
@@ -181,8 +190,10 @@ impl Endpoint {
                 }
             }
 
-            // 6. Packetize and send any pending user data
-            self.packetize_and_send().await?;
+            // 6. Packetize and send any pending user data, but only if established.
+            if self.state == State::Established {
+                self.packetize_and_send().await?;
+            }
             
             // 7. Check if we need to close the connection
             if self.should_close() {
@@ -195,23 +206,34 @@ impl Endpoint {
     async fn handle_frame(&mut self, frame: Frame) -> Result<()> {
         self.last_recv_time = Instant::now();
         match frame {
-            Frame::Syn { header, payload } => {
-                if self.state == State::Connecting {
-                    self.state = State::Established;
-                    self.peer_cid = header.source_cid;
-                    info!(cid = self.local_cid, "Connection established (server-side)");
-                    if !payload.is_empty() {
-                        self.reliability.receive_push(0, payload);
+            Frame::Syn { .. } => {
+                // This is now primarily handled by the Socket creating the Endpoint.
+                // If we receive another SYN, it might be a retransmission from the client
+                // because it hasn't received our SYN-ACK yet.
+                if self.state == State::SynReceived {
+                    info!(cid = self.local_cid, "Received duplicate SYN, ignoring.");
+                    // If we have already been triggered to send a SYN-ACK (i.e., data is in the
+                    // send buffer), we can resend it.
+                    if !self.reliability.is_send_buffer_empty() {
+                        self.send_syn_ack().await?;
                     }
-                    self.send_syn_ack().await?;
                 }
             }
-            Frame::SynAck { header } => {
+            Frame::SynAck { header, payload } => {
                 if self.state == State::Connecting {
                     self.state = State::Established;
                     self.peer_cid = header.source_cid;
                     info!(cid = self.local_cid, "Connection established (client-side)");
-                    self.send_standalone_ack().await?;
+                    if !payload.is_empty() {
+                        self.reliability.receive_push(0, payload);
+                    }
+
+                    // Acknowledge the SYN-ACK, potentially with piggybacked data.
+                    if !self.reliability.is_send_buffer_empty() {
+                        self.packetize_and_send().await?;
+                    } else {
+                        self.send_standalone_ack().await?;
+                    }
                 }
             }
             Frame::Push { header, payload } => {
@@ -240,6 +262,13 @@ impl Endpoint {
         match cmd {
             StreamCommand::SendData(data) => {
                 self.reliability.write_to_stream(&data);
+                // If this is the first data sent on a server-side connection,
+                // it triggers the SYN-ACK and establishes the connection.
+                if self.state == State::SynReceived {
+                    self.state = State::Established;
+                    info!(cid = self.local_cid, "Connection accepted by user, sending SYN-ACK.");
+                    self.send_syn_ack().await?;
+                }
             }
             StreamCommand::Close => {
                 self.shutdown();
@@ -293,7 +322,13 @@ impl Endpoint {
     }
 
     async fn send_initial_syn(&mut self) -> Result<()> {
-        // In a real 0-RTT implementation, we'd packetize here.
+        let initial_payload = self.reliability.take_stream_buffer();
+
+        // The SYN packet itself will be retransmitted on timeout if not acknowledged.
+        // The reliability of the payload is tied to the SYN packet.
+        // We don't need to add it to the in-flight queue separately, as that's for
+        // sequence-numbered PUSH frames.
+
         let syn_header = LongHeader {
             command: crate::packet::command::Command::Syn,
             protocol_version: self.config.protocol_version,
@@ -302,19 +337,23 @@ impl Endpoint {
         };
         let frame = Frame::Syn {
             header: syn_header,
-            payload: Bytes::new(),
+            payload: initial_payload,
         };
         self.send_frames(vec![frame]).await
     }
 
-    async fn send_syn_ack(&self) -> Result<()> {
+    async fn send_syn_ack(&mut self) -> Result<()> {
+        let payload = self.reliability.take_stream_buffer();
         let syn_ack_header = LongHeader {
             command: crate::packet::command::Command::SynAck,
             protocol_version: self.config.protocol_version,
             destination_cid: self.peer_cid,
             source_cid: self.local_cid,
         };
-        let frame = Frame::SynAck { header: syn_ack_header };
+        let frame = Frame::SynAck {
+            header: syn_ack_header,
+            payload,
+        };
         self.send_frames(vec![frame]).await
     }
 

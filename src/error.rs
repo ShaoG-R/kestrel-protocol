@@ -36,6 +36,11 @@ pub enum Error {
     /// 用于任务间通信的内部通道意外关闭。
     #[error("Internal channel is broken")]
     ChannelClosed,
+
+    /// The provided message is larger than the configured `max_payload_size`.
+    /// 提供的消息大于配置的 `max_payload_size`。
+    #[error("the message is too large to be sent")]
+    MessageTooLarge,
 }
 
 /// A specialized `Result` type for this library.
@@ -52,6 +57,7 @@ impl From<Error> for std::io::Error {
             Error::Timeout => ErrorKind::TimedOut.into(),
             Error::InvalidPacket => ErrorKind::InvalidData.into(),
             Error::ChannelClosed => ErrorKind::BrokenPipe.into(),
+            Error::MessageTooLarge => ErrorKind::InvalidInput.into(),
         }
     }
 }

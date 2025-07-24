@@ -125,8 +125,28 @@ impl ReliableUdpSocket {
     /// 这会创建一个新的 `Stream` 实例并生成其事件循环。
     /// 该连接可以立即用于写入0-RTT数据。
     pub async fn connect(&self, remote_addr: SocketAddr) -> Result<Stream> {
-        self.connect_with_config(remote_addr, Config::default())
+        self.connect_with_config(remote_addr, Config::default(), None)
             .await
+    }
+
+    /// Establishes a new reliable connection with 0-RTT data.
+    ///
+    /// The size of `initial_data` must not exceed `max_payload_size` from the config.
+    ///
+    /// 建立一个携带0-RTT数据的新的可靠连接。
+    ///
+    /// `initial_data` 的大小不能超过配置中的 `max_payload_size`。
+    pub async fn connect_with_0rtt(
+        &self,
+        remote_addr: SocketAddr,
+        initial_data: &[u8],
+    ) -> Result<Stream> {
+        self.connect_with_config(
+            remote_addr,
+            Config::default(),
+            Some(bytes::Bytes::copy_from_slice(initial_data)),
+        )
+        .await
     }
 
     /// Establishes a new reliable connection to the given remote address with custom configuration.
@@ -136,7 +156,14 @@ impl ReliableUdpSocket {
         &self,
         remote_addr: SocketAddr,
         config: Config,
+        initial_data: Option<bytes::Bytes>,
     ) -> Result<Stream> {
+        if let Some(data) = &initial_data {
+            if data.len() > config.max_payload_size {
+                return Err(crate::error::Error::MessageTooLarge);
+            }
+        }
+
         let local_cid = rand::random();
 
         let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
@@ -148,6 +175,7 @@ impl ReliableUdpSocket {
             local_cid,
             rx_from_socket,
             self.send_tx.clone(),
+            initial_data,
         );
 
         // Spawn a new task for the connection to run in.

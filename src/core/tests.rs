@@ -23,7 +23,7 @@ struct TestHarness {
 }
 
 /// Sets up an `Endpoint` with a given config and returns a harness to interact with it.
-fn setup_endpoint_with_config(config: Config) -> TestHarness {
+fn setup_endpoint_with_config(config: Config, initial_data: Option<Bytes>) -> TestHarness {
     let remote_addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
     let local_cid = 1;
 
@@ -36,6 +36,7 @@ fn setup_endpoint_with_config(config: Config) -> TestHarness {
         local_cid,
         rx_from_socket,
         tx_from_endpoint_network,
+        initial_data,
     );
 
     tokio::spawn(async move {
@@ -52,7 +53,7 @@ fn setup_endpoint_with_config(config: Config) -> TestHarness {
 
 /// Sets up an `Endpoint` in a spawned task and returns a harness to interact with it.
 fn setup_endpoint() -> TestHarness {
-    setup_endpoint_with_config(Config::default())
+    setup_endpoint_with_config(Config::default(), None)
 }
 
 /// Helper to perform the initial client-side handshake.
@@ -81,6 +82,7 @@ async fn establish_connection(harness: &mut TestHarness) -> u32 {
     };
     let syn_ack_frame = Frame::SynAck {
         header: syn_ack_header,
+        payload: Bytes::new(),
     };
     harness
         .tx_to_endpoint_network
@@ -91,6 +93,29 @@ async fn establish_connection(harness: &mut TestHarness) -> u32 {
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     server_cid
+}
+
+#[tokio::test]
+async fn test_endpoint_client_0rtt_send() {
+    let data = Bytes::from_static(b"0-rtt data");
+    let mut harness = setup_endpoint_with_config(Config::default(), Some(data.clone()));
+
+    // The first command sent should be a SYN with the 0-RTT data in its payload.
+    let send_cmd = tokio::time::timeout(
+        Duration::from_millis(100),
+        harness.rx_from_endpoint_network.recv(),
+    )
+    .await
+    .expect("should receive a SYN command")
+    .expect("command should not be None");
+
+    assert_eq!(send_cmd.frames.len(), 1);
+    if let Frame::Syn { header, payload } = &send_cmd.frames[0] {
+        assert_eq!(header.command, crate::packet::command::Command::Syn);
+        assert_eq!(payload, &data, "SYN packet should carry the 0-RTT data");
+    } else {
+        panic!("Expected a SYN frame");
+    }
 }
 
 #[tokio::test]
@@ -194,7 +219,7 @@ async fn test_endpoint_rto_retransmission() {
     let mut config = Config::default();
     config.initial_rto = Duration::from_millis(50);
     config.min_rto = Duration::from_millis(50);
-    let mut harness = setup_endpoint_with_config(config);
+    let mut harness = setup_endpoint_with_config(config, None);
     establish_connection(&mut harness).await;
 
     harness
@@ -231,7 +256,7 @@ async fn test_endpoint_rto_retransmission() {
 async fn test_endpoint_fast_retransmission() {
     let mut config = Config::default();
     config.fast_retx_threshold = 3;
-    let mut harness = setup_endpoint_with_config(config);
+    let mut harness = setup_endpoint_with_config(config, None);
     let _server_cid = establish_connection(&mut harness).await;
 
     let mut sent_seqs = Vec::new();

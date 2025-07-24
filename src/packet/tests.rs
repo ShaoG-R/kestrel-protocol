@@ -105,6 +105,9 @@ fn test_syn_ack_frame_roundtrip() {
         destination_cid: 5432,
         source_cid: 9876,
     };
-    let frame = Frame::SynAck { header };
+    let frame = Frame::SynAck {
+        header,
+        payload: Bytes::new(),
+    };
     frame_roundtrip_test(frame);
 } 

@@ -169,6 +169,14 @@ impl ReliabilityLayer {
         self.send_buffer.write_to_stream(buf)
     }
 
+    pub fn is_send_buffer_empty(&self) -> bool {
+        self.send_buffer.is_stream_buffer_empty()
+    }
+
+    pub fn take_stream_buffer(&mut self) -> Bytes {
+        self.send_buffer.take_stream_buffer()
+    }
+
     pub fn is_in_flight_empty(&self) -> bool {
         self.send_buffer.is_in_flight_empty()
     }

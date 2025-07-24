@@ -65,6 +65,20 @@ impl SendBuffer {
         Some(self.stream_buffer.split_to(chunk_size).freeze())
     }
 
+    /// Takes all data from the stream buffer.
+    ///
+    /// 取出流缓冲区中的所有数据。
+    pub fn take_stream_buffer(&mut self) -> Bytes {
+        self.stream_buffer.split_to(self.stream_buffer.len()).freeze()
+    }
+
+    /// Checks if the stream buffer is empty.
+    ///
+    /// 检查流缓冲区是否为空。
+    pub fn is_stream_buffer_empty(&self) -> bool {
+        self.stream_buffer.is_empty()
+    }
+
     /// Adds a packet to the in-flight queue.
     pub fn add_in_flight(&mut self, frame: Frame, now: Instant) {
         self.in_flight.push_back(InFlightPacket {
