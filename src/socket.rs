@@ -1,7 +1,7 @@
 //! 包含协议的顶层Socket接口。
 //! Contains the top-level Socket interface for the protocol.
 
-use crate::connection::Connection;
+use crate::connection::{self, Connection, SendCommand};
 use crate::packet::frame::Frame;
 use dashmap::DashMap;
 use std::net::SocketAddr;
@@ -23,6 +23,9 @@ pub struct ReliableUdpSocket {
     /// that can send frames to the connection's task.
     /// 所有活动连接的映射，将远程地址映射到一个可以向连接任务发送帧的发送端。
     connections: Arc<DashMap<SocketAddr, mpsc::Sender<Frame>>>,
+    /// A sender to the central sending task.
+    /// 到中央发送任务的发送端。
+    send_tx: mpsc::Sender<SendCommand>,
 }
 
 impl ReliableUdpSocket {
@@ -34,9 +37,17 @@ impl ReliableUdpSocket {
         let socket = Arc::new(socket);
         let connections = Arc::new(DashMap::new());
 
+        // Create a channel for sending packets.
+        let (send_tx, send_rx) = mpsc::channel::<SendCommand>(1024);
+
+        // Spawn the sender task.
+        let socket_clone = socket.clone();
+        tokio::spawn(sender_task(socket_clone, send_rx));
+
         Ok(Self {
             socket,
             connections,
+            send_tx,
         })
     }
 
@@ -76,27 +87,61 @@ impl ReliableUdpSocket {
                 continue;
             }
 
-            // 如果是新连接 (目前我们简化为：任何我们不认识的地址发来的第一个包)
-            // For a new connection (simplified for now as the first packet from an unknown address)
-            // TODO: In Phase 2, we will only create a connection upon receiving a SYN packet.
-            // 在第二阶段，我们将只在收到SYN包时创建连接。
-            let (mut connection, tx) = Connection::new(remote_addr);
+            // A new connection can only be initiated with a SYN packet.
+            // 只有SYN包才能发起新连接。
+            if let Frame::Syn { .. } = &frame {
+                println!("Received SYN from {}, creating new connection.", remote_addr);
 
-            // Spawn a new task for the connection to run in.
-            // 为连接生成一个新任务来运行。
-            tokio::spawn(async move {
-                connection.run().await;
-            });
+                let (mut connection, tx) = Connection::new(
+                    remote_addr,
+                    connection::State::Connecting,
+                    self.send_tx.clone(),
+                );
 
-            // Store the sender so we can route future packets to it.
-            // 存储发送端，以便我们将来的包可以路由给它。
-            self.connections.insert(remote_addr, tx.clone());
+                // Spawn a new task for the connection to run in.
+                // 为连接生成一个新任务来运行。
+                tokio::spawn(async move {
+                    connection.run().await;
+                });
 
-            // Send the first frame to the newly created connection.
-            // 将第一个帧发送给新创建的连接。
-            if tx.send(frame).await.is_err() {
-                self.connections.remove(&remote_addr);
+                // Store the sender so we can route future packets to it.
+                // 存储发送端，以便我们将来的包可以路由给它。
+                self.connections.insert(remote_addr, tx.clone());
+
+                // Send the first frame to the newly created connection.
+                // 将第一个帧发送给新创建的连接。
+                if tx.send(frame).await.is_err() {
+                    self.connections.remove(&remote_addr);
+                }
+            } else {
+                // Ignore packets from unknown addresses that are not SYN.
+                // 忽略来自未知地址的非SYN包。
+                println!(
+                    "Ignoring non-SYN packet from unknown address {}: {:?}",
+                    remote_addr, frame
+                );
             }
+        }
+    }
+}
+
+/// The dedicated task for sending UDP packets.
+/// This centralizes all writes to the socket.
+///
+/// 用于发送UDP包的专用任务。
+/// 这将所有对套接字的写入操作集中起来。
+async fn sender_task(socket: Arc<UdpSocket>, mut rx: mpsc::Receiver<SendCommand>) {
+    let mut send_buf = Vec::with_capacity(2048);
+
+    while let Some(cmd) = rx.recv().await {
+        send_buf.clear();
+        cmd.frame.encode(&mut send_buf);
+
+        if let Err(e) = socket.send_to(&send_buf, cmd.remote_addr).await {
+            eprintln!(
+                "Failed to send packet to {}: {}",
+                cmd.remote_addr, e
+            );
         }
     }
 }

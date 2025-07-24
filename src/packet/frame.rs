@@ -51,10 +51,13 @@ impl Frame {
         let command = command::Command::from_u8(buf[0])?;
 
         if command.is_long_header() {
-            // TODO: 实现长头的解码逻辑
-            // For now, we don't have a full long header spec, so we can't decode it yet.
-            // 由于我们尚未完全定义长头格式，暂时无法解码。
-            None
+            let header = LongHeader::decode(&mut buf)?;
+            match header.command {
+                command::Command::Syn => Some(Frame::Syn { header }),
+                command::Command::SynAck => Some(Frame::SynAck { header }),
+                command::Command::Fin => Some(Frame::Fin { header }),
+                _ => None, // Unreachable, as is_long_header is checked
+            }
         } else {
             // 解码短头
             // Decode the short header
@@ -86,16 +89,13 @@ impl Frame {
                 header.encode(buf);
             }
             Frame::Syn { header } => {
-                // TODO: 实现长头的编码逻辑
-                // header.encode(buf);
+                header.encode(buf);
             }
             Frame::SynAck { header } => {
-                // TODO: 实现长头的编码逻辑
-                // header.encode(buf);
+                header.encode(buf);
             }
             Frame::Fin { header } => {
-                // TODO: 实现长头的编码逻辑
-                // header.encode(buf);
+                header.encode(buf);
             }
         }
     }

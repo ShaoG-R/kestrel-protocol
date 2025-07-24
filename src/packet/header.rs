@@ -63,10 +63,10 @@ impl ShortHeader {
     }
 }
 
+pub const LONG_HEADER_SIZE: usize = 6;
+
 /// The long header, used for connection management packets.
 /// 长头，用于连接管理包。
-/// (For now, we just define the structure, encoding/decoding can be added later)
-/// (暂时只定义结构，编解码可后续添加)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LongHeader {
     /// The command of the packet.
@@ -78,4 +78,31 @@ pub struct LongHeader {
     /// The connection ID.
     /// 连接ID。
     pub connection_id: u32,
+}
+
+impl LongHeader {
+    /// 将长头编码到缓冲区。
+    /// Encodes the long header into a buffer.
+    pub fn encode<B: BufMut>(&self, buf: &mut B) {
+        buf.put_u8(self.command as u8);
+        buf.put_u8(self.protocol_version);
+        buf.put_u32(self.connection_id);
+    }
+
+    /// 从缓冲区解码长头。
+    /// Decodes a long header from a buffer.
+    pub fn decode<B: Buf>(buf: &mut B) -> Option<Self> {
+        if buf.remaining() < LONG_HEADER_SIZE {
+            return None;
+        }
+        let command = Command::from_u8(buf.get_u8())?;
+        if !command.is_long_header() {
+            return None; // Should be a long header command
+        }
+        Some(LongHeader {
+            command,
+            protocol_version: buf.get_u8(),
+            connection_id: buf.get_u32(),
+        })
+    }
 }
