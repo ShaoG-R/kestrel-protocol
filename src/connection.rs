@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 const INITIAL_RTO: Duration = Duration::from_millis(1000);
 const MIN_RTO: Duration = Duration::from_millis(500);
+const FAST_RETX_THRESHOLD: u16 = 3;
 
 /// An estimator for the round-trip time (RTT).
 ///
@@ -100,6 +101,12 @@ struct ConnectionState {
     sender: mpsc::Sender<SendCommand>,
     sequence_number_counter: u32,
     rto_estimator: RttEstimator,
+    /// The receive window of the peer, in packets.
+    /// 对端的接收窗口（以包为单位）。
+    peer_recv_window: u16,
+    /// The congestion window, in packets.
+    /// 拥塞窗口（以包为单位）。
+    congestion_window: u32,
 }
 
 /// Represents a single reliable connection.
@@ -143,6 +150,10 @@ impl Connection {
             sender,
             sequence_number_counter: 0,
             rto_estimator: RttEstimator::new(),
+            // Initialize with a small default window until we hear from the peer.
+            peer_recv_window: 32,
+            // TODO: This will be managed by the congestion control algorithm.
+            congestion_window: 32,
         };
         let connection = Self {
             state,
@@ -170,10 +181,10 @@ impl Connection {
         let push_header = crate::packet::header::ShortHeader {
             command: crate::packet::command::Command::Push,
             connection_id: 0, // TODO: Use the actual connection ID
-            recv_window_size: 0, // TODO: Update with real value
+            recv_window_size: self.state.recv_buffer.window_size(),
             timestamp: 0, // TODO: Update with real value
             sequence_number: self.state.sequence_number_counter,
-            recv_next_sequence: 0, // TODO: Update with real value
+            recv_next_sequence: self.state.recv_buffer.next_sequence(),
         };
         self.state.sequence_number_counter += 1;
 
@@ -212,7 +223,7 @@ impl Connection {
                     } else {
                         std::future::pending::<()>().await;
                     }
-                }, if !state.send_buffer.is_empty() => {}
+                }, if !state.send_buffer.is_empty() && state.can_send_more() => {}
 
                 _ = rto_timer.tick() => {
                     state.check_for_retransmissions().await;
@@ -274,6 +285,8 @@ impl ConnectionState {
                         self.recv_buffer.receive(header.sequence_number, payload);
                     }
                     Frame::Ack { header, payload } => {
+                        self.peer_recv_window = header.recv_window_size;
+
                         let sack_ranges = decode_sack_ranges(payload);
                         println!("Received ACK with SACK ranges: {:?}", sack_ranges);
 
@@ -284,7 +297,15 @@ impl ConnectionState {
                             }
                         }
 
+                        if acked_seq_numbers.is_empty() {
+                            return; // Nothing to do
+                        }
+
+                        let highest_acked_seq = *acked_seq_numbers.iter().next_back().unwrap();
+
                         let now = Instant::now();
+                        let mut frames_to_fast_retx = Vec::new();
+
                         self.send_buffer.in_flight.retain(|packet| {
                             if let Some(seq) = packet.frame.sequence_number() {
                                 if acked_seq_numbers.contains(&seq) {
@@ -302,6 +323,25 @@ impl ConnectionState {
                             }
                             true // Keep in in_flight
                         });
+
+                        // After removing acknowledged packets, check for fast retransmissions
+                        for packet in self.send_buffer.iter_in_flight_mut() {
+                            if let Some(seq) = packet.frame.sequence_number() {
+                                if seq < highest_acked_seq {
+                                    packet.fast_retx_count += 1;
+                                    if packet.fast_retx_count >= FAST_RETX_THRESHOLD {
+                                        println!("Fast retransmitting packet with seq={}", seq);
+                                        frames_to_fast_retx.push(packet.frame.clone());
+                                        packet.last_sent_at = now;
+                                        packet.fast_retx_count = 0; // Reset count
+                                    }
+                                }
+                            }
+                        }
+
+                        for frame in frames_to_fast_retx {
+                            self.send_frame(frame).await;
+                        }
                     }
                     Frame::Fin { header } => {
                         println!("Received FIN, closing connection and sending ACK.");
@@ -314,7 +354,7 @@ impl ConnectionState {
                         let ack_header = crate::packet::header::ShortHeader {
                             command: crate::packet::command::Command::Ack,
                             connection_id: header.connection_id,
-                            recv_window_size: 0, // TODO
+                            recv_window_size: self.recv_buffer.window_size(),
                             timestamp: 0,        // TODO
                             sequence_number: self.sequence_number_counter,
                             recv_next_sequence: self.recv_buffer.next_sequence(),
@@ -339,6 +379,17 @@ impl ConnectionState {
                 // Should not receive frames in closed state.
             }
         }
+    }
+
+    /// Checks if we are allowed to send more packets based on flow and congestion control.
+    /// 根据流量和拥塞控制检查我们是否被允许发送更多的包。
+    fn can_send_more(&self) -> bool {
+        let in_flight_count = self.send_buffer.in_flight.len() as u32;
+        let peer_recv_window = self.peer_recv_window as u32;
+
+        // The number of packets in flight must be less than both the peer's receive
+        // window and our own congestion window.
+        in_flight_count < peer_recv_window && in_flight_count < self.congestion_window
     }
 
     /// Checks for any in-flight packets that have timed out and retransmits them.

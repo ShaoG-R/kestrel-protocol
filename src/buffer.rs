@@ -7,6 +7,8 @@ use bytes::Bytes;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
+const DEFAULT_RECV_BUFFER_CAPACITY: usize = 256; // In packets
+
 /// A packet that has been sent but not yet acknowledged (in-flight).
 /// 一个已发送但尚未确认的包（在途）。
 #[derive(Debug)]
@@ -17,6 +19,10 @@ pub struct InFlightPacket {
     /// The actual frame that was sent.
     /// 发送的实际帧。
     pub frame: Frame,
+    /// Counter for fast retransmission. Incremented each time an ACK for a later
+    /// packet is received.
+    /// 用于快速重传的计数器。每当收到一个更高序列号包的ACK时递增。
+    pub fast_retx_count: u16,
 }
 
 /// Manages outgoing data, tracking which packets have been sent and acknowledged.
@@ -60,6 +66,7 @@ impl SendBuffer {
         self.in_flight.push_back(InFlightPacket {
             last_sent_at: now,
             frame,
+            fast_retx_count: 0,
         });
     }
 
@@ -78,7 +85,7 @@ impl SendBuffer {
 
 /// Manages incoming data, reordering out-of-order packets and managing acknowledgments.
 /// 管理传入的数据，重排乱序的包并管理确认。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ReceiveBuffer {
     /// The next sequence number we are expecting to deliver to the application.
     /// 我们期望交付给应用程序的下一个序列号。
@@ -88,11 +95,30 @@ pub struct ReceiveBuffer {
     /// 已接收但等待重排和交付的包的映射。
     /// 键是序列号。
     received: BTreeMap<u32, Bytes>,
+    /// The total capacity of the buffer in packets.
+    /// 缓冲区的总容量（以包为单位）。
+    capacity: usize,
+}
+
+impl Default for ReceiveBuffer {
+    fn default() -> Self {
+        Self {
+            next_sequence: 0,
+            received: BTreeMap::new(),
+            capacity: DEFAULT_RECV_BUFFER_CAPACITY,
+        }
+    }
 }
 
 impl ReceiveBuffer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Calculates the available window size in packets.
+    /// 计算可用的窗口大小（以包为单位）。
+    pub fn window_size(&self) -> u16 {
+        (self.capacity.saturating_sub(self.received.len())) as u16
     }
 
     /// Gets the next sequence number that the buffer is expecting.
