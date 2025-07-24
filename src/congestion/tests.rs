@@ -128,3 +128,100 @@ fn test_vegas_random_loss_reaction() {
     // State should remain in CongestionAvoidance
     assert_eq!(vegas.state, State::CongestionAvoidance);
 } 
+
+#[test]
+fn test_vegas_initial_state() {
+    let config = test_config();
+    let vegas = Vegas::new(config);
+
+    assert_eq!(vegas.congestion_window(), 10);
+    assert_eq!(vegas.slow_start_threshold, 100);
+    assert_eq!(vegas.state, State::SlowStart);
+    assert_eq!(vegas.min_rtt, Duration::from_secs(u64::MAX));
+}
+
+#[test]
+fn test_vegas_min_rtt_tracking() {
+    let mut vegas = Vegas::new(test_config());
+
+    vegas.on_ack(Duration::from_millis(200));
+    assert_eq!(vegas.min_rtt, Duration::from_millis(200));
+
+    vegas.on_ack(Duration::from_millis(150));
+    assert_eq!(vegas.min_rtt, Duration::from_millis(150));
+
+    vegas.on_ack(Duration::from_millis(180));
+    assert_eq!(vegas.min_rtt, Duration::from_millis(150));
+}
+
+#[test]
+fn test_vegas_avoidance_decrease_clamp_to_min() {
+    let mut config = test_config();
+    config.min_cwnd_packets = 5;
+    let mut vegas = Vegas::new(config);
+
+    vegas.state = State::CongestionAvoidance;
+    vegas.congestion_window = 5;
+    vegas.min_rtt = Duration::from_millis(100);
+
+    // This would cause a decrease if not for the minimum clamp.
+    vegas.on_ack(Duration::from_millis(200));
+
+    assert_eq!(vegas.congestion_window(), 5);
+}
+
+#[test]
+fn test_vegas_congestive_loss_clamp_to_min() {
+    let mut config = test_config();
+    config.min_cwnd_packets = 5;
+    let mut vegas = Vegas::new(config);
+    vegas.state = State::CongestionAvoidance;
+    // Set cwnd so that cwnd/2 < min_cwnd_packets
+    vegas.congestion_window = 8;
+    vegas.min_rtt = Duration::from_millis(100);
+    // Trigger congestive loss condition
+    vegas.on_ack(Duration::from_millis(130));
+
+    vegas.on_packet_loss(Instant::now());
+
+    // ssthresh should be max(8/2, 5) = 5
+    assert_eq!(vegas.slow_start_threshold, 5);
+    assert_eq!(vegas.congestion_window(), 5);
+}
+
+#[test]
+fn test_vegas_loss_with_no_rtt_sample() {
+    let config = test_config();
+    let mut vegas = Vegas::new(config);
+    vegas.congestion_window = 20;
+    let original_ssthresh = vegas.slow_start_threshold;
+
+    // A loss event before any ACK/RTT sample should be treated as congestive.
+    vegas.on_packet_loss(Instant::now());
+
+    // ssthresh should be halved
+    assert_eq!(vegas.slow_start_threshold, 10);
+    // cwnd should be reset to new ssthresh
+    assert_eq!(vegas.congestion_window(), 10);
+    // State should be SlowStart
+    assert_eq!(vegas.state, State::SlowStart);
+    // Ensure ssthresh was actually changed
+    assert_ne!(vegas.slow_start_threshold, original_ssthresh);
+}
+
+#[test]
+fn test_vegas_random_loss_clamp_to_min() {
+    let mut config = test_config();
+    config.min_cwnd_packets = 15;
+    let mut vegas = Vegas::new(config);
+    vegas.state = State::CongestionAvoidance;
+    vegas.congestion_window = 16; // 16 * 0.8 = 12.8, which is < 15
+    vegas.min_rtt = Duration::from_millis(100);
+    // Trigger non-congestive loss condition
+    vegas.on_ack(Duration::from_millis(100));
+
+    vegas.on_packet_loss(Instant::now());
+
+    // cwnd should be clamped at min_cwnd_packets
+    assert_eq!(vegas.congestion_window(), 15);
+} 
