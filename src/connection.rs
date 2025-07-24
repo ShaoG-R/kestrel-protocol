@@ -43,6 +43,14 @@ pub struct Connection {
     read_buffer: Bytes,
 }
 
+impl Connection {
+    /// Checks if the connection is closed. This happens if the underlying
+    /// worker task has terminated.
+    pub fn is_closed(&self) -> bool {
+        self.tx_to_worker.is_closed()
+    }
+}
+
 // --- Worker Implementation ---
 
 /// The internal worker for a `Connection`. This runs in a separate task
