@@ -1,12 +1,11 @@
 //! The endpoint of a connection, which is the "brain" of the new layered protocol.
 //!
-//! It owns the reliability layer and is responsible for processing incoming and
-//! outgoing packets, managing connection state, and orchestrating the different
-//! protocol layers.
-//!
 //! 连接的端点，是新分层协议的“大脑”。
-//!
-//! 它拥有可靠性层，并负责处理传入和传出的包，管理连接状态，以及协调不同的协议层。
+
+pub mod state;
+
+// For now, keep the main logic here. We will move it to a sub-module later.
+// 暂时将主要逻辑保留在此处。我们稍后会将其移动到子模块中。
 
 use crate::{
     config::Config,
@@ -27,6 +26,7 @@ use tokio::{
     time::{Instant, sleep_until},
 };
 use tracing::info;
+use self::state::ConnectionState;
 
 /// Commands sent from the `Stream` handle to the `Endpoint` worker.
 #[derive(Debug)]
@@ -35,23 +35,12 @@ pub enum StreamCommand {
     Close,
 }
 
-/// The state of a connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum State {
-    Connecting,
-    SynReceived,
-    Established,
-    Closing,
-    FinWait,
-    Closed,
-}
-
 /// Represents one end of a reliable connection.
 pub struct Endpoint {
     remote_addr: SocketAddr,
     local_cid: u32,
     peer_cid: u32,
-    state: State,
+    state: ConnectionState,
     start_time: Instant,
     reliability: ReliabilityLayer,
     peer_recv_window: u32,
@@ -88,7 +77,7 @@ impl Endpoint {
             remote_addr,
             local_cid,
             peer_cid: 0,
-            state: State::Connecting,
+            state: ConnectionState::Connecting,
             start_time: now,
             reliability,
             peer_recv_window: 32,
@@ -123,7 +112,7 @@ impl Endpoint {
             remote_addr,
             local_cid,
             peer_cid,
-            state: State::SynReceived,
+            state: ConnectionState::SynReceived,
             start_time: now,
             reliability,
             peer_recv_window: 32,
@@ -140,13 +129,13 @@ impl Endpoint {
 
     /// Runs the endpoint's main event loop.
     pub async fn run(&mut self) -> Result<()> {
-        if self.state == State::Connecting {
+        if self.state == ConnectionState::Connecting {
             self.send_initial_syn().await?;
         }
 
         loop {
             // In SynReceived, we don't set a timeout. We wait for the user to accept.
-            let next_wakeup = if self.state == State::SynReceived {
+            let next_wakeup = if self.state == ConnectionState::SynReceived {
                 Instant::now() + self.config.idle_timeout // Effectively, sleep forever until a message
             } else {
                 self.reliability
@@ -189,13 +178,13 @@ impl Endpoint {
                     if tx.send(data).await.is_err() {
                         // User's stream handle has been dropped. We can no longer send.
                         self.tx_to_stream = None;
-                        self.state = State::Closing;
+                        self.state = ConnectionState::Closing;
                     }
                 }
             }
 
             // 6. Packetize and send any pending user data, but only if established.
-            if self.state == State::Established || self.state == State::FinWait {
+            if self.state == ConnectionState::Established || self.state == ConnectionState::FinWait {
                 self.packetize_and_send().await?;
             }
             
@@ -214,7 +203,7 @@ impl Endpoint {
                 // This is now primarily handled by the Socket creating the Endpoint.
                 // If we receive another SYN, it might be a retransmission from the client
                 // because it hasn't received our SYN-ACK yet.
-                if self.state == State::SynReceived {
+                if self.state == ConnectionState::SynReceived {
                     info!(cid = self.local_cid, "Received duplicate SYN, ignoring.");
                     // If we have already been triggered to send a SYN-ACK (i.e., data is in the
                     // send buffer), we can resend it.
@@ -224,8 +213,8 @@ impl Endpoint {
                 }
             }
             Frame::SynAck { header, payload } => {
-                if self.state == State::Connecting {
-                    self.state = State::Established;
+                if self.state == ConnectionState::Connecting {
+                    self.state = ConnectionState::Established;
                     self.peer_cid = header.source_cid;
                     info!(cid = self.local_cid, "Connection established (client-side)");
                     if !payload.is_empty() {
@@ -264,8 +253,8 @@ impl Endpoint {
                 self.tx_to_stream.take();
 
                 // Transition to FinWait to allow sending any remaining data before closing.
-                if self.state == State::Established {
-                    self.state = State::FinWait;
+                if self.state == ConnectionState::Established {
+                    self.state = ConnectionState::FinWait;
                 }
             }
             _ => {}
@@ -279,8 +268,8 @@ impl Endpoint {
                 self.reliability.write_to_stream(&data);
                 // If this is the first data sent on a server-side connection,
                 // it triggers the SYN-ACK and establishes the connection.
-                if self.state == State::SynReceived {
-                    self.state = State::Established;
+                if self.state == ConnectionState::SynReceived {
+                    self.state = ConnectionState::Established;
                     info!(cid = self.local_cid, "Connection accepted by user, sending SYN-ACK.");
                     self.send_syn_ack().await?;
                 }
@@ -302,24 +291,24 @@ impl Endpoint {
 
         if now.saturating_duration_since(self.last_recv_time) > self.config.idle_timeout {
             info!(cid = self.local_cid, "Connection timed out");
-            self.state = State::Closed;
+            self.state = ConnectionState::Closed;
         }
         Ok(())
     }
     
     fn should_close(&mut self) -> bool {
-        if self.state == State::Closing && self.reliability.is_in_flight_empty() {
+        if self.state == ConnectionState::Closing && self.reliability.is_in_flight_empty() {
             info!(cid = self.local_cid, "All data ACKed, closing now.");
-            self.state = State::Closed;
+            self.state = ConnectionState::Closed;
         }
         // Endpoint should terminate if the connection is fully closed, or if it's
         // in FinWait and the user stream has also been dropped.
-        self.state == State::Closed || (self.state == State::FinWait && self.tx_to_stream.is_none())
+        self.state == ConnectionState::Closed || (self.state == ConnectionState::FinWait && self.tx_to_stream.is_none())
     }
 
     fn shutdown(&mut self) {
-        if self.state == State::Established || self.state == State::FinWait {
-            self.state = State::Closing;
+        if self.state == ConnectionState::Established || self.state == ConnectionState::FinWait {
+            self.state = ConnectionState::Closing;
         }
     }
 
@@ -328,7 +317,7 @@ impl Endpoint {
             .reliability
             .packetize_stream_data(self.peer_cid, Instant::now(), self.start_time);
 
-        if self.state == State::Closing && !self.reliability.has_fin_in_flight() {
+        if self.state == ConnectionState::Closing && !self.reliability.has_fin_in_flight() {
             let fin_frame = self.create_fin_frame();
             self.reliability.add_fin_to_in_flight(fin_frame.clone(), Instant::now());
             frames_to_send.push(fin_frame);
