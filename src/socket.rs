@@ -89,14 +89,18 @@ impl ReliableUdpSocket {
         remote_addr: SocketAddr,
         config: Config,
     ) -> Result<Connection> {
-        let conn_id = rand::rng().next_u32();
+        let local_cid = rand::rng().next_u32();
+        // For the client, the peer's CID is initially unknown, so we use 0.
+        // The server will tell us its CID in the SYN-ACK.
+        let peer_cid = 0;
 
         let (tx_to_worker, rx_from_worker) = mpsc::channel(128);
 
         // Create a new connection in the `Connecting` state.
         let (mut worker, handle) = connection::ConnectionWorker::new(
             remote_addr,
-            conn_id,
+            local_cid,
+            peer_cid,
             connection::State::Connecting,
             config,
             self.send_tx.clone(),
@@ -172,15 +176,30 @@ impl ReliableUdpSocket {
             // A new connection can only be initiated with a SYN packet from an unknown peer.
             // 只有来自未知对端的SYN包才能发起新连接。
             if let Frame::Syn { header, .. } = &frame {
-                info!(addr = %remote_addr, "Accepting new connection attempt.");
-                let conn_id = header.connection_id;
-                let (tx_to_worker, rx_from_worker) = mpsc::channel(128);
-
                 // TODO: Allow server-side configuration
                 let config = Config::default();
+
+                // Check for version compatibility.
+                if header.protocol_version != config.protocol_version {
+                    warn!(
+                        addr = %remote_addr,
+                        client_version = header.protocol_version,
+                        server_version = config.protocol_version,
+                        "Dropping SYN with incompatible protocol version."
+                    );
+                    continue;
+                }
+
+                info!(addr = %remote_addr, "Accepting new connection attempt.");
+                // The client's CID is in the source_cid field. The destination is our future CID.
+                let peer_cid = header.source_cid;
+                let local_cid = rand::rng().next_u32();
+                let (tx_to_worker, rx_from_worker) = mpsc::channel(128);
+
                 let (mut worker, handle) = connection::ConnectionWorker::new(
                     remote_addr,
-                    conn_id,
+                    local_cid,
+                    peer_cid,
                     connection::State::Connecting,
                     config,
                     self.send_tx.clone(),
@@ -282,8 +301,9 @@ mod tests {
         // 4. Create and send a SYN packet
         let syn_header = crate::packet::header::LongHeader {
             command: Command::Syn,
-            protocol_version: 0,
-            connection_id: 1234,
+            protocol_version: 1, // Use a matching version for the test
+            destination_cid: 0, // Destination is unknown initially
+            source_cid: 1234,   // Client's chosen CID
         };
         let syn_frame = Frame::Syn {
             header: syn_header,

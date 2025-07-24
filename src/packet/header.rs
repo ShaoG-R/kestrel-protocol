@@ -63,7 +63,7 @@ impl ShortHeader {
     }
 }
 
-pub const LONG_HEADER_SIZE: usize = 6;
+pub const LONG_HEADER_SIZE: usize = 10; // command(1) + version(1) + dcid(4) + scid(4)
 
 /// The long header, used for connection management packets.
 /// 长头，用于连接管理包。
@@ -75,9 +75,12 @@ pub struct LongHeader {
     /// The protocol version.
     /// 协议版本。
     pub protocol_version: u8,
-    /// The connection ID.
-    /// 连接ID。
-    pub connection_id: u32,
+    /// The destination connection ID.
+    /// 目标连接ID。
+    pub destination_cid: u32,
+    /// The source connection ID.
+    /// 源连接ID。
+    pub source_cid: u32,
 }
 
 impl LongHeader {
@@ -86,7 +89,8 @@ impl LongHeader {
     pub fn encode<B: BufMut>(&self, buf: &mut B) {
         buf.put_u8(self.command as u8);
         buf.put_u8(self.protocol_version);
-        buf.put_u32(self.connection_id);
+        buf.put_u32(self.destination_cid);
+        buf.put_u32(self.source_cid);
     }
 
     /// 从缓冲区解码长头。
@@ -102,7 +106,8 @@ impl LongHeader {
         Some(LongHeader {
             command,
             protocol_version: buf.get_u8(),
-            connection_id: buf.get_u32(),
+            destination_cid: buf.get_u32(),
+            source_cid: buf.get_u32(),
         })
     }
 }

@@ -8,6 +8,9 @@ use std::time::Duration;
 /// 包含所有连接可配置参数的结构体。
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// The protocol version number. Used in the long header.
+    /// 协议版本号。用于长头中。
+    pub protocol_version: u8,
     /// The initial round-trip time (RTO) for a new connection.
     /// 新连接的初始往返时间 (RTO)。
     pub initial_rto: Duration,
@@ -46,6 +49,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            protocol_version: 1,
             initial_rto: Duration::from_millis(1000),
             min_rto: Duration::from_millis(500),
             fast_retx_threshold: 3,

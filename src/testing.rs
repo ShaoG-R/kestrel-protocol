@@ -37,8 +37,18 @@ impl TestHarness {
         let (tx_to_conn, rx_from_peer) = mpsc::channel::<Frame>(128);
 
         let config = Config::default();
-        let (worker, handle) =
-            connection::ConnectionWorker::new(TEST_SERVER_ADDR, 1, initial_state, config, tx_to_peer, rx_from_peer);
+        // In tests, we can use fixed CIDs for predictability.
+        let local_cid = 1;
+        let peer_cid = 2;
+        let (worker, handle) = connection::ConnectionWorker::new(
+            TEST_SERVER_ADDR,
+            local_cid,
+            peer_cid,
+            initial_state,
+            config,
+            tx_to_peer,
+            rx_from_peer,
+        );
 
         let harness = Self {
             worker,

@@ -154,7 +154,8 @@ pub enum State {
 /// 连接的内含状态，分离出来是为了满足借用检查器。
 struct ConnectionState {
     remote_addr: SocketAddr,
-    connection_id: u32,
+    local_cid: u32,
+    peer_cid: u32,
     start_time: Instant,
     state: State,
     send_buffer: SendBuffer,
@@ -186,7 +187,8 @@ impl ConnectionWorker {
     /// Creates a new `ConnectionWorker` and its associated `Connection` handle.
     pub(crate) fn new(
         remote_addr: SocketAddr,
-        connection_id: u32,
+        local_cid: u32,
+        peer_cid: u32,
         initial_state: State,
         config: Config,
         sender: mpsc::Sender<SendCommand>,
@@ -198,7 +200,8 @@ impl ConnectionWorker {
 
         let state = ConnectionState {
             remote_addr,
-            connection_id,
+            local_cid,
+            peer_cid,
             start_time: Instant::now(),
             state: initial_state,
             send_buffer: SendBuffer::new(),
@@ -412,8 +415,9 @@ impl ConnectionState {
                 debug!(bytes = chunk.len(), "Sending 0-RTT data in SYN packet.");
                 let syn_header = crate::packet::header::LongHeader {
                     command: crate::packet::command::Command::Syn,
-                    protocol_version: 0,
-                    connection_id: self.connection_id,
+                    protocol_version: self.config.protocol_version,
+                    destination_cid: self.peer_cid, // Initially 0 for server
+                    source_cid: self.local_cid,
                 };
                 let frame = Frame::Syn {
                     header: syn_header,
@@ -429,7 +433,7 @@ impl ConnectionState {
         while let Some(chunk) = self.send_buffer.create_chunk(self.config.max_payload_size) {
             let push_header = crate::packet::header::ShortHeader {
                 command: crate::packet::command::Command::Push,
-                connection_id: self.connection_id,
+                connection_id: self.peer_cid,
                 recv_window_size: self.recv_buffer.window_size(),
                 timestamp: self.start_time.elapsed().as_millis() as u32,
                 sequence_number: self.sequence_number_counter,
@@ -471,11 +475,12 @@ impl ConnectionState {
     /// Handles a single incoming frame when the connection is `Connecting`.
     async fn handle_frame_connecting(&mut self, frame: Frame) -> Result<()> {
         match frame {
-            Frame::Syn { header: _, payload } => {
+            Frame::Syn { header, payload } => {
                 // This is the server-side logic for an incoming connection.
-                // 这是服务器端处理新连接的逻辑。
                 info!(addr = %self.remote_addr, "Transitioning to Established state.");
                 self.state = State::Established;
+                // The client's CID is the source CID from their SYN.
+                self.peer_cid = header.source_cid;
 
                 if !payload.is_empty() {
                     // This is 0-RTT data.
@@ -487,22 +492,21 @@ impl ConnectionState {
                 // Respond with a SYN-ACK
                 let syn_ack_header = crate::packet::header::LongHeader {
                     command: crate::packet::command::Command::SynAck,
-                    protocol_version: 0,
-                    connection_id: self.connection_id,
+                    protocol_version: self.config.protocol_version,
+                    destination_cid: self.peer_cid,
+                    source_cid: self.local_cid,
                 };
                 let syn_ack_frame = Frame::SynAck {
                     header: syn_ack_header,
                 };
                 self.send_frames(vec![syn_ack_frame]).await?;
             }
-            Frame::SynAck { header: _ } => {
+            Frame::SynAck { header } => {
                 // This is the client-side logic when receiving the server's ack.
-                // 这是客户端收到服务器ack时的逻辑。
                 info!(addr = %self.remote_addr, "Received SYN-ACK, connection established.");
                 self.state = State::Established;
-                // Our SYN is implicitly acknowledged. The data sent in it can be
-                // considered "in-flight" but since there's no sequence number,
-                // we don't track it for retransmission. We assume it arrived.
+                // The server's CID is the source CID from their SYN-ACK.
+                self.peer_cid = header.source_cid;
             }
             _ => {
                 // Ignore other packets while connecting
@@ -712,7 +716,7 @@ impl ConnectionState {
             if should_send_fin {
                 let fin_header = crate::packet::header::ShortHeader {
                     command: crate::packet::command::Command::Fin,
-                    connection_id: self.connection_id,
+                    connection_id: self.peer_cid,
                     recv_window_size: self.recv_buffer.window_size(),
                     timestamp: self.start_time.elapsed().as_millis() as u32,
                     sequence_number: self.sequence_number_counter,
@@ -762,7 +766,7 @@ impl ConnectionState {
 
         let ack_header = crate::packet::header::ShortHeader {
             command: crate::packet::command::Command::Ack,
-            connection_id: self.connection_id,
+            connection_id: self.peer_cid,
             recv_window_size: self.recv_buffer.window_size(),
             timestamp: self.start_time.elapsed().as_millis() as u32,
             sequence_number: self.sequence_number_counter,
@@ -876,7 +880,7 @@ mod tests {
         // Now, simulate the peer sending an ACK for this packet
         let ack_header = crate::packet::header::ShortHeader {
             command: Command::Ack,
-            connection_id: 1,
+            connection_id: 1, // This should be the peer_cid, but for test simplicity it's ok
             recv_window_size: 100,
             timestamp: 0,
             sequence_number: 100, // Peer's sequence number, doesn't matter much here
@@ -928,6 +932,8 @@ mod tests {
         if let Frame::Syn { header, payload } = syn_frame {
             assert_eq!(payload.as_ref(), test_data);
             assert_eq!(header.command, Command::Syn);
+            assert_eq!(header.protocol_version, 1);
+            assert_eq!(header.source_cid, harness.worker.state.local_cid);
         } else {
             panic!("Expected a SYN frame, got {:?}", syn_frame);
         };
@@ -935,8 +941,9 @@ mod tests {
         // Now, simulate the peer sending a SYN-ACK
         let syn_ack_header = crate::packet::header::LongHeader {
             command: Command::SynAck,
-            protocol_version: 0,
-            connection_id: 1,
+            protocol_version: 1,
+            destination_cid: harness.worker.state.local_cid, // Peer sends to our CID
+            source_cid: 5678,                                 // Peer's new CID
         };
         let syn_ack_frame = Frame::SynAck {
             header: syn_ack_header,
@@ -948,6 +955,8 @@ mod tests {
 
         // The connection should now be in the Established state
         assert_eq!(harness.worker.state.state, State::Established);
+        // And we should have stored the peer's CID
+        assert_eq!(harness.worker.state.peer_cid, 5678);
     }
 
     #[tokio::test]
@@ -1000,7 +1009,7 @@ mod tests {
         let peer_push_frame = Frame::Push {
             header: ShortHeader {
                 command: Command::Push,
-                connection_id: 1,
+                connection_id: harness.worker.state.local_cid, // Peer sends to our CID
                 recv_window_size: 100,
                 timestamp: 0,
                 sequence_number: 0,
@@ -1034,8 +1043,9 @@ mod tests {
             .expect("Did not find PUSH frame");
 
         // Validate the PUSH frame contains our data
-        if let Frame::Push { payload, .. } = push_frame {
+        if let Frame::Push { header, payload } = push_frame {
             assert_eq!(payload.as_ref(), our_data);
+            assert_eq!(header.connection_id, harness.worker.state.peer_cid);
         }
         // Validate the ACK is for the peer's packet
         if let Frame::Ack { header, .. } = ack_frame {
