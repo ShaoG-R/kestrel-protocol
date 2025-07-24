@@ -114,9 +114,11 @@ async fn test_full_connection_lifecycle() {
         .expect("Client read should succeed");
     assert_eq!(&client_buf, server_msg);
 
-    // 6. Client closes
-    drop(client_writer);
-    drop(client_reader);
+    // 6. Client closes gracefully
+    client_writer
+        .shutdown()
+        .await
+        .expect("Client shutdown should succeed");
 
     // 7. Server should detect end-of-file
     let mut final_buf = vec![0; 10];
