@@ -26,7 +26,7 @@ use tokio::{
     sync::mpsc,
     time::{Instant, sleep_until},
 };
-use tracing::{debug, info, warn};
+use tracing::info;
 
 /// Commands sent from the `Stream` handle to the `Endpoint` worker.
 #[derive(Debug)]

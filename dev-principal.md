@@ -4,19 +4,21 @@
 
 ## 1. 项目状态摘要 (Project Status Summary)
 
-当前项目已经实现了一个功能相当完备的可靠UDP协议核心。协议栈的底层设计，包括包结构、无锁并发模型、连接生命周期管理、基于SACK的可靠传输以及基于延迟的拥塞控制，都已基本完成。
+当前项目已经实现了一个分层清晰、功能完备的可靠UDP协议核心。协议栈已成功重构为独立的层次：
 
-项目已经提供了面向用户的 `AsyncRead`/`AsyncWrite` 流式API，并引入了 `thiserror` 进行标准化错误处理。同时，核心的0-RTT连接、包聚合等优化也已实现。
+1.  **端点层 (`Endpoint`)**: 负责连接生命周期管理和事件循环。
+2.  **可靠性层 (`ReliabilityLayer`)**: 封装了基于SACK的ARQ、动态RTO和快速重传逻辑。
+3.  **拥塞控制层 (`CongestionControl` Trait)**: 将拥塞控制算法（当前为 `Vegas`）与可靠性逻辑解耦，实现了可插拔设计。
 
-近期，项目进一步完成了重要的架构重构，引入了结构化日志、统一的`Config`配置系统、服务器端`accept()` API、更安全的双向连接ID握手以及协议版本协商机制，极大地增强了代码库的健壮性、灵活性与专业性。
+这个新的分层架构，结合原有的无锁并发模型、0-RTT连接、四次挥手、面向用户的 `AsyncRead`/`AsyncWrite` 流式API以及统一的 `Config` 配置系统，共同构成了一个健壮、灵活且高度模块化的协议实现。
 
-目前的主要短板在于自动化测试覆盖尚不完整，虽然已经搭建了测试框架，但需要为更多场景补充用例。
+目前的主要短板在于自动化测试覆盖尚不完整，虽然已经搭建了测试框架，但需要为更多场景补充用例，并进行系统的性能分析。
 
 ## 2. 当前阶段评估 (Current Phase Assessment)
 
 根据 `dev-principal.md` 的阶段划分，项目当前的状态是：
 
-**已完成 Phase 1-5 的核心功能，并已进入 Phase 6 的API实现与测试阶段。**
+**已完成 Phase 1-6 的核心功能，并已进入下一阶段的健壮性与性能优化。**
 
 *   **完成度高的部分**:
     *   包的序列化/反序列化 (Phase 1)
@@ -27,35 +29,38 @@
     *   动态RTO、超时重传、快速重传 (Phase 3)
     *   基于SACK的高效确认机制 (Phase 4)
     *   滑动窗口流量控制 (Phase 4)
-    *   基于延迟的拥塞控制 (Phase 5)
+    *   基于延迟的拥塞控制 (Vegas) (Phase 5)
     *   包聚合/粘连与快速应答 (Phase 5)
     *   面向用户的流式API (`AsyncRead`/`AsyncWrite`) (Phase 6)
     *   类似`TcpListener`的服务器端`accept()` API (API)
     *   基于 `tracing` 的结构化日志记录 (Logging)
     *   统一的可配置化 (`Config`结构体) (Configuration)
     *   基于 `thiserror` 的标准化错误处理 (Error Handling)
-    *   核心连接逻辑的模块化重构 (Code Quality)
+    *   **清晰的协议分层 (Code Quality):** 成功将协议栈解耦为 `Endpoint`, `ReliabilityLayer`, 和 `CongestionControl` Trait。
 
 *   **未完成或不完整的部分**:
-    *   单元测试和集成测试覆盖不完整 (Phase 6)
+    *   **测试覆盖不完整 (Testing):** 现有的单元和集成测试需要大幅扩展，特别是针对各种网络异常情况的模拟测试。
+    *   **性能分析与优化 (Performance):** 缺少在真实和模拟网络环境下的系统性性能基准测试与针对性优化。
+    *   **可观测性不足 (Observability):** 内部状态（如拥塞窗口、RTT变化）的监控指标尚未暴露。
 
-## 3. 下一步架构思考：协议分层 (Next Architectural Step: Protocol Layering)
+## 3. 下一步架构思考：健壮性与性能优化 (Next Architectural Step: Robustness & Performance Optimization)
 
-为了进一步提升代码库的模块化程度和灵活性，下一步的核心架构目标是**将协议实现解耦为独立的、可组合的层次**。
+在已完成分层架构的基础上，下一步的核心架构目标是**全面提升协议的健壮性、性能和可观测性**。
 
-*   **目标 (Goal):** 将当前紧密耦合的协议实现拆分为独立的层，特别是将`可靠性`（ARQ, SACK）与`拥塞控制`的逻辑分离。
-
-*   **现状 (Current State):** `Connection`模块目前同时处理了数据包的序列化、可靠性（重传、确认）和拥塞控制，耦合度较高。
+*   **目标 (Goal):** 全面提升协议的健-   现状 (Current State):** 协议的核心功能和分层架构（`Endpoint` -> `ReliabilityLayer` -> `CongestionControl`) 已经完成。`Vegas` 作为默认拥塞控制算法也已集成。API 稳定，但真实网络环境下的测试和性能验证不足。
 
 *   **改进方向 (Improvement Direction):**
-    1.  **可靠性层 (Reliability Layer):** 一个核心层，只负责处理序列号、超时重传（RTO）、SACK确认和乱序重组。它向上层提供“发送可靠数据块”和“接收可靠数据块”的接口，自身不关心拥塞控制。
-    2.  **拥塞控制层 (Congestion Control Layer):** 作为可靠性层的一个插件或包装器（wrapper）。它观察可靠性层的事件（如ACK接收、丢包），并根据其算法动态调整发送速率，最终告诉可靠性层“当前可以发送多少数据”。
-    3.  **流式接口层 (Stream API Layer):** 最高层，负责将可靠性层的数据块接口适配为`AsyncRead`/`AsyncWrite`的连续字节流接口。
-
-*   **优势 (Benefits):**
-    *   **可替换性 (Pluggability):** 可以轻松地替换或禁用拥塞控制算法，甚至实现多种算法供用户在`Config`中选择。
-    *   **可测试性 (Testability):** 每个层次都可以被独立、精确地测试，例如可以只测试可靠性逻辑而无需关心拥塞控制。
-    *   **清晰度 (Clarity):** 代码职责更加单一，逻辑更清晰，便于理解和维护。
+    1.  **全面测试 (Comprehensive Testing):**
+        *   **集成测试:** 编写更多集成测试用例，使用 `tokio-test` 和网络模拟工具，系统性地测试高丢包、高延迟、乱序、带宽限制等场景。
+        *   **压力测试:** 验证高并发连接下的性能和资源使用情况。
+    2.  **性能优化 (Performance Optimization):**
+        *   **零拷贝 (Zero-copy):** 审查从 `UdpSocket` 接收到 `Stream` 读取的整个数据路径，最大限度地减少内存拷贝。
+        *   **批处理优化 (Batching Optimization):** 在 `Endpoint` 的事件循环和 `Socket` 的 I/O 中，优化包的批处理逻辑（Coalescing），减少系统调用频率。
+    3.  **可观测性 (Observability):**
+        *   **精细化日志:** 在关键路径（如：拥塞窗口变化、RTO发生、快速重传触发）上增加更详细的 `tracing` 日志。
+        *   **核心指标导出:** 暴露关键性能指标（如：`srtt`, `rttvar`, `cwnd`, in-flight 包数量等），以便集成到监控系统（如 Prometheus）。
+    4.  **拥塞控制算法扩展 (Congestion Control Algorithm Expansion):**
+        *   实现并集成一个备选的拥塞控制算法（例如简化的 BBR），并允许用户通过 `Config` 进行选择。
 
 ---
 <br/>
