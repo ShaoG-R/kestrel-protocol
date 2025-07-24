@@ -160,6 +160,12 @@ impl Endpoint {
                 // 2. Handle commands from the user stream
                 Some(cmd) = self.rx_from_stream.recv() => {
                     self.handle_stream_command(cmd).await?;
+                    // After handling one command, try to drain any other pending commands
+                    // to process them in a batch. This is especially useful if the user
+                    // calls `write()` multiple times in quick succession.
+                    while let Ok(cmd) = self.rx_from_stream.try_recv() {
+                        self.handle_stream_command(cmd).await?;
+                    }
                 }
 
                 // 3. Handle timeouts

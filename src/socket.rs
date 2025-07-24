@@ -314,30 +314,47 @@ impl ReliableUdpSocket {
 /// 用于发送UDP包的专用任务。
 /// 这将所有对套接字的写入操作集中起来。
 async fn sender_task(socket: Arc<UdpSocket>, mut rx: mpsc::Receiver<SendCommand>) {
+    const MAX_BATCH_SIZE: usize = 64;
     let mut send_buf = Vec::with_capacity(2048);
+    let mut commands = Vec::with_capacity(MAX_BATCH_SIZE);
 
-    while let Some(cmd) = rx.recv().await {
-        send_buf.clear();
-        for frame in cmd.frames {
-            frame.encode(&mut send_buf);
+    while let Some(first_cmd) = rx.recv().await {
+        commands.push(first_cmd);
+
+        // Try to drain the channel of any pending commands to process in a batch.
+        while commands.len() < MAX_BATCH_SIZE {
+            match rx.try_recv() {
+                Ok(cmd) => commands.push(cmd),
+                Err(mpsc::error::TryRecvError::Empty) => break, // No more commands for now.
+                Err(mpsc::error::TryRecvError::Disconnected) => return, // Channel closed.
+            }
         }
 
-        if send_buf.is_empty() {
-            continue;
-        }
-        debug!(
-            addr = %cmd.remote_addr,
-            bytes = send_buf.len(),
-            "sender_task sending datagram"
-        );
+        for cmd in commands.drain(..) {
+            send_buf.clear();
+            // This is "packet coalescing" at the sender level.
+            // Multiple frames for the same destination are encoded into a single UDP datagram.
+            for frame in cmd.frames {
+                frame.encode(&mut send_buf);
+            }
 
-        if let Err(e) = socket.send_to(&send_buf, cmd.remote_addr).await {
-            // A single send error is not fatal to the whole socket.
-            error!(
+            if send_buf.is_empty() {
+                continue;
+            }
+            debug!(
                 addr = %cmd.remote_addr,
-                "Failed to send packet: {}",
-                e
+                bytes = send_buf.len(),
+                "sender_task sending datagram"
             );
+
+            if let Err(e) = socket.send_to(&send_buf, cmd.remote_addr).await {
+                // A single send error is not fatal to the whole socket.
+                error!(
+                    addr = %cmd.remote_addr,
+                    "Failed to send packet: {}",
+                    e
+                );
+            }
         }
     }
 }
