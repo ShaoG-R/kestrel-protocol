@@ -50,6 +50,14 @@ pub struct Config {
     /// 连接在被视为空闲超时之前可以处于空闲状态的最长时间。
     /// 空闲连接是指没有发送或接收数据包的连接。
     pub idle_timeout: Duration,
+    /// The capacity of the user-side send buffer in bytes. Data written by the
+    /// user is stored here before being packetized.
+    /// 用户端发送缓冲区的容量（以字节为单位）。用户写入的数据在打包前存储在此处。
+    pub send_buffer_capacity_bytes: usize,
+    /// The capacity of the receive buffer in packets. This buffer stores out-of-order
+    /// packets waiting for reassembly.
+    /// 接收缓冲区的容量（以数据包为单位）。此缓冲区存储等待重组的乱序数据包。
+    pub recv_buffer_capacity_packets: usize,
 }
 
 impl Default for Config {
@@ -67,6 +75,8 @@ impl Default for Config {
             latency_threshold_ratio: 0.1, // 10%
             cwnd_decrease_factor: 0.9,    // 10% decrease
             idle_timeout: Duration::from_secs(5),
+            send_buffer_capacity_bytes: 1024 * 1024, // 1 MB
+            recv_buffer_capacity_packets: 256,
         }
     }
 } 

@@ -7,8 +7,6 @@ use crate::packet::sack::SackRange;
 use bytes::Bytes;
 use std::collections::BTreeMap;
 
-const DEFAULT_RECV_BUFFER_CAPACITY: usize = 256; // In packets
-
 /// Manages incoming data.
 #[derive(Debug)]
 pub struct ReceiveBuffer {
@@ -25,15 +23,19 @@ impl Default for ReceiveBuffer {
         Self {
             next_sequence: 0,
             received: BTreeMap::new(),
-            capacity: DEFAULT_RECV_BUFFER_CAPACITY,
+            capacity: 256, // In packets
         }
     }
 }
 
 impl ReceiveBuffer {
     /// Creates a new `ReceiveBuffer`.
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(capacity_packets: usize) -> Self {
+        Self {
+            next_sequence: 0,
+            received: BTreeMap::new(),
+            capacity: capacity_packets,
+        }
     }
 
     /// Returns the size of the available receive window in packets.
@@ -140,10 +142,14 @@ mod tests {
     use super::*;
     use bytes::Bytes;
 
+    fn create_test_recv_buffer() -> ReceiveBuffer {
+        ReceiveBuffer::new(256)
+    }
+
     #[test]
 
     fn test_receive_in_order_and_reassemble() {
-        let mut buffer = ReceiveBuffer::new();
+        let mut buffer = create_test_recv_buffer();
 
         buffer.receive(0, Bytes::from("hello"));
         buffer.receive(1, Bytes::from(" world"));
@@ -157,7 +163,7 @@ mod tests {
 
     #[test]
     fn test_receive_out_of_order_and_reassemble() {
-        let mut buffer = ReceiveBuffer::new();
+        let mut buffer = create_test_recv_buffer();
 
         buffer.receive(1, Bytes::from("world"));
         assert!(buffer.reassemble().is_none());
@@ -172,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_receive_duplicate_and_old_packets() {
-        let mut buffer = ReceiveBuffer::new();
+        let mut buffer = create_test_recv_buffer();
 
         buffer.receive(0, Bytes::from("one"));
         buffer.receive(1, Bytes::from("two"));
@@ -196,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_sack_range_generation() {
-        let mut buffer = ReceiveBuffer::new();
+        let mut buffer = create_test_recv_buffer();
         assert!(buffer.get_sack_ranges().is_empty());
 
         // Receive discontinuous packets
@@ -223,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_sack_range_complex() {
-        let mut buffer = ReceiveBuffer::new();
+        let mut buffer = create_test_recv_buffer();
         let received_seqs = [0, 1, 5, 6, 7, 10, 12, 13, 15];
         for &seq in &received_seqs {
             buffer.receive(seq, Bytes::new());

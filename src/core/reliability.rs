@@ -42,8 +42,8 @@ pub struct ReliabilityLayer {
 impl ReliabilityLayer {
     pub fn new(config: Config, congestion_control: Box<dyn CongestionControl>) -> Self {
         Self {
-            send_buffer: SendBuffer::new(),
-            recv_buffer: ReceiveBuffer::new(),
+            send_buffer: SendBuffer::new(config.send_buffer_capacity_bytes),
+            recv_buffer: ReceiveBuffer::new(config.recv_buffer_capacity_packets),
             rto_estimator: RttEstimator::new(config.initial_rto),
             congestion_control,
             config,

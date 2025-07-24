@@ -9,8 +9,6 @@ use bytes::{Bytes, BytesMut};
 use std::collections::{BTreeSet, VecDeque};
 use tokio::time::Instant;
 
-const DEFAULT_SEND_BUFFER_CAPACITY_BYTES: usize = 1024 * 1024; // 1 MB
-
 /// A packet that has been sent but not yet acknowledged (in-flight).
 #[derive(Debug, Clone)]
 pub struct InFlightPacket {
@@ -35,15 +33,19 @@ impl Default for SendBuffer {
         Self {
             stream_buffer: BytesMut::new(),
             in_flight: VecDeque::new(),
-            stream_buffer_capacity: DEFAULT_SEND_BUFFER_CAPACITY_BYTES,
+            stream_buffer_capacity: 1024 * 1024, // 1 MB
         }
     }
 }
 
 impl SendBuffer {
     /// Creates a new `SendBuffer`.
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(capacity_bytes: usize) -> Self {
+        Self {
+            stream_buffer: BytesMut::new(),
+            in_flight: VecDeque::new(),
+            stream_buffer_capacity: capacity_bytes,
+        }
     }
 
     /// Writes data to the stream buffer. Returns the number of bytes written.
@@ -191,9 +193,13 @@ mod tests {
         }
     }
 
+    fn create_test_send_buffer() -> SendBuffer {
+        SendBuffer::new(1024 * 1024)
+    }
+
     #[test]
     fn test_stream_buffering_and_chunking() {
-        let mut buffer = SendBuffer::new();
+        let mut buffer = create_test_send_buffer();
         let data = b"hello world, this is a test";
         
         assert_eq!(buffer.write_to_stream(data), data.len());
@@ -212,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fast_retransmission() {
-        let mut buffer = SendBuffer::new();
+        let mut buffer = create_test_send_buffer();
         let now = Instant::now();
         let threshold = 2; // Let's use 2 for this test.
 
@@ -240,7 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rto_retransmission() {
-        let mut buffer = SendBuffer::new();
+        let mut buffer = create_test_send_buffer();
         let rto = Duration::from_millis(100);
 
         buffer.add_in_flight(create_push_frame(0), Instant::now());
