@@ -274,20 +274,22 @@ async fn test_endpoint_fast_retransmission() {
     }
     assert_eq!(sent_seqs, vec![0, 1, 2, 3, 4]);
 
-    let create_ack = |seq: u32| -> Frame {
+    // This helper creates an ACK that cumulatively acknowledges everything up to `ack_upto`,
+    // and selectively acknowledges a single additional packet `sack_seq`.
+    let create_ack = |ack_upto: u32, sack_seq: u32| -> Frame {
         let ack_header = ShortHeader {
             command: crate::packet::command::Command::Ack,
-            connection_id: 1,
-            sequence_number: 999,
+            connection_id: 1, // Our chosen CID
+            sequence_number: 999, // Sequence numbers for ACKs are not used
             recv_window_size: 1024,
             timestamp: 0,
-            recv_next_sequence: seq, // Acknowledge up to `seq - 1`
+            recv_next_sequence: ack_upto,
         };
         let mut payload = bytes::BytesMut::new();
         crate::packet::sack::encode_sack_ranges(
             &[crate::packet::sack::SackRange {
-                start: seq,
-                end: seq,
+                start: sack_seq,
+                end: sack_seq,
             }],
             &mut payload,
         );
@@ -297,25 +299,28 @@ async fn test_endpoint_fast_retransmission() {
         }
     };
 
-    // ACK packets 0, 2, 3, 4, which should trigger a fast retransmit for packet 1.
+    // 1. ACK packet 0. This establishes the cumulative ack point at 1.
     harness
         .tx_to_endpoint_network
-        .send(create_ack(sent_seqs[0]))
+        .send(create_ack(1, 0))
+        .await
+        .unwrap();
+
+    // 2. ACK packets 2, 3, and 4. The cumulative ack point is still 1.
+    //    This should trigger a fast retransmit for packet 1.
+    harness
+        .tx_to_endpoint_network
+        .send(create_ack(1, 2))
         .await
         .unwrap();
     harness
         .tx_to_endpoint_network
-        .send(create_ack(sent_seqs[2]))
+        .send(create_ack(1, 3))
         .await
         .unwrap();
     harness
         .tx_to_endpoint_network
-        .send(create_ack(sent_seqs[3]))
-        .await
-        .unwrap();
-    harness
-        .tx_to_endpoint_network
-        .send(create_ack(sent_seqs[4]))
+        .send(create_ack(1, 4))
         .await
         .unwrap();
 

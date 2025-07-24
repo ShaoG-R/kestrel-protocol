@@ -121,35 +121,34 @@ impl SendBuffer {
             }
         }
 
-        // Determine the highest sequence number acknowledged in this specific ACK.
+        // The highest sequence number acknowledged in this specific ACK.
         let highest_acked_in_this_ack = acked_seq_numbers.iter().max().copied().unwrap_or(0);
+        let mut frames_to_fast_retx = Vec::new();
 
-        // Increment fast retransmit counter for unacknowledged packets that
-        // are "lower" than the highest acknowledged packet in this ACK.
+        // First, check for packets that need fast retransmission before altering the queue.
         for packet in self.in_flight.iter_mut() {
             if let Some(seq) = packet.frame.sequence_number() {
                 if seq < highest_acked_in_this_ack && !acked_seq_numbers.contains(&seq) {
                     packet.fast_retx_count += 1;
                 }
             }
+
+            if packet.fast_retx_count >= fast_retx_threshold {
+                // Avoid retransmitting the same packet multiple times if it's already in the list.
+                if !frames_to_fast_retx.iter().any(|f: &Frame| f.sequence_number() == packet.frame.sequence_number()) {
+                    frames_to_fast_retx.push(packet.frame.clone());
+                    packet.last_sent_at = now;
+                    packet.fast_retx_count = 0; // Reset after adding to retransmission list.
+                }
+            }
         }
 
-        // Now, remove acknowledged packets from the in-flight queue.
+        // Now, remove all acknowledged packets from the in-flight queue.
         self.in_flight.retain(|p| {
             let seq = p.frame.sequence_number().unwrap_or(u32::MAX);
             let acked = seq < recv_next_seq || acked_seq_numbers.contains(&seq);
             !acked
         });
-
-        // Check for any packets that have now crossed the retransmission threshold.
-        let mut frames_to_fast_retx = Vec::new();
-        for packet in self.in_flight.iter_mut() {
-            if packet.fast_retx_count >= fast_retx_threshold {
-                frames_to_fast_retx.push(packet.frame.clone());
-                packet.last_sent_at = now;
-                packet.fast_retx_count = 0; // Reset count after retransmitting.
-            }
-        }
 
         frames_to_fast_retx
     }
