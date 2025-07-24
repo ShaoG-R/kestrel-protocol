@@ -201,6 +201,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kestrel-protocol"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "dashmap",
+ "futures",
+ "rand",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.174"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -308,18 +320,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02b3e5e68a3a1a02aad3ec490a98007cbc13c37cbe84a3cd7b8e406d76e7f778"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "protocol"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "dashmap",
- "futures",
- "rand",
- "thiserror",
- "tokio",
 ]
 
 [[package]]
