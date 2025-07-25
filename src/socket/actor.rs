@@ -230,13 +230,6 @@ impl<S: BindableUdpSocket> SocketActor<S> {
             // Add to addr->cid map to find this connection for retransmitted SYNs.
             self.addr_to_cid.insert(remote_addr, local_cid);
 
-            if tx_to_endpoint.send((frame.clone(), remote_addr)).await.is_err() {
-                self.connections.remove(&local_cid);
-                self.addr_to_cid.remove(&remote_addr);
-                warn!(addr = %remote_addr, "Failed to send initial SYN to newly created worker.");
-                return;
-            }
-
             let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
             if self.accept_tx.send((stream, remote_addr)).await.is_err() {
                 info!(

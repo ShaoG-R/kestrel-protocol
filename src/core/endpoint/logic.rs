@@ -282,6 +282,11 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 );
                 self.send_frame_to(challenge_frame, new_addr).await?;
             }
+            #[cfg(test)]
+            StreamCommand::UpdatePeerCid(peer_cid) => {
+                // This is a test-only command to simulate the SocketActor's role.
+                self.peer_cid = peer_cid;
+            }
         }
         Ok(())
     }

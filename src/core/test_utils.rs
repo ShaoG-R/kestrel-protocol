@@ -36,6 +36,12 @@ pub struct MockUdpSocket {
     pub sent_packets_count: Arc<AtomicUsize>,
 }
 
+impl std::fmt::Debug for MockUdpSocket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MockUdpSocket {{ local_addr: {}, recv_queue: {:?}, peer_recv_queue: {:?}, sent_packets_count: {:?} }}", self.local_addr, self.recv_queue, self.peer_recv_queue, self.sent_packets_count)
+    }
+}
+
 #[async_trait]
 impl AsyncUdpSocket for MockUdpSocket {
     async fn send_to(&self, buf: &[u8], _target: SocketAddr) -> Result<usize> {
@@ -97,6 +103,8 @@ pub struct ServerTestHarness {
     pub rx_from_endpoint_network: mpsc::Receiver<SenderTaskCommand<MockUdpSocket>>,
     /// The address of the "client" that the server is connected to.
     pub client_addr: SocketAddr,
+    /// The local connection ID of the server endpoint.
+    pub server_cid: u32,
 }
 
 /// Spawns an `Endpoint` and the necessary relay tasks to connect it to a `MockUdpSocket`.
@@ -335,5 +343,6 @@ pub fn setup_server_harness() -> ServerTestHarness {
         tx_to_endpoint_network,
         rx_from_endpoint_network: sender_task_rx,
         client_addr,
+        server_cid,
     }
 } 

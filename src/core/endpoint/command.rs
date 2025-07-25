@@ -13,4 +13,7 @@ pub enum StreamCommand {
         new_addr: SocketAddr,
         notifier: oneshot::Sender<Result<()>>,
     },
+    #[cfg(test)]
+    /// (For testing only) Manually set the peer's connection ID.
+    UpdatePeerCid(u32),
 } 
