@@ -174,4 +174,63 @@ async fn test_actor_sends_to_correct_address_after_accept() {
         }
         _ => panic!("Expected SenderTaskCommand::Send, but got something else"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_actor_concurrent_write_sends_to_correct_addresses() {
+    // 1. Setup
+    let mut harness = ActorTestHarness::new();
+    let client_a_addr: SocketAddr = "127.0.0.1:2001".parse().unwrap();
+    let client_b_addr: SocketAddr = "127.0.0.1:2002".parse().unwrap();
+
+    // 2. Action: Both clients connect
+    harness.send_syn(client_a_addr, 100).await;
+    harness.send_syn(client_b_addr, 200).await;
+
+    // 3. Action: Server accepts both connections
+    let (stream_a, _) = harness.accept_rx.recv().await.unwrap();
+    let (stream_b, _) = harness.accept_rx.recv().await.unwrap();
+
+    // 4. Action: Write to both streams concurrently. This is the key part.
+    let (_, mut writer_a) = tokio::io::split(stream_a);
+    let (_, mut writer_b) = tokio::io::split(stream_b);
+
+    writer_a.write_all(b"to A").await.unwrap();
+    writer_b.write_all(b"to B").await.unwrap();
+
+    // 5. Verification: Collect the two outgoing SendCommands
+    let mut outgoing_commands = HashMap::new();
+    for _ in 0..2 {
+        let cmd = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            harness.outgoing_cmd_rx.recv(),
+        )
+        .await
+        .expect("Failed to receive command from actor")
+        .unwrap();
+
+        if let SenderTaskCommand::Send(send_cmd) = cmd {
+            // We use the payload to identify which command is which
+            let payload = send_cmd
+                .frames
+                .iter()
+                .find_map(|f| match f {
+                    Frame::SynAck { payload, .. } => Some(payload.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            outgoing_commands.insert(payload, send_cmd.remote_addr);
+        }
+    }
+
+    assert_eq!(
+        outgoing_commands.get(&Bytes::from_static(b"to A")),
+        Some(&client_a_addr),
+        "Data for A was sent to the wrong address"
+    );
+    assert_eq!(
+        outgoing_commands.get(&Bytes::from_static(b"to B")),
+        Some(&client_b_addr),
+        "Data for B was sent to the wrong address"
+    );
 } 
