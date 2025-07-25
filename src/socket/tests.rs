@@ -1,7 +1,7 @@
 //! Unit tests for the `socket` module, specifically for the `SocketActor`.
 //! `socket` 模块的单元测试，特别是针对 `SocketActor`。
 
-use super::{actor::SocketActor, command::*, traits::*};
+use super::{actor::SocketActor, command::*, draining::DrainingPool, traits::*};
 use crate::{
     config::Config,
     core::stream::Stream,
@@ -76,12 +76,14 @@ impl ActorTestHarness {
             packet_rx: Arc::new(Mutex::new(incoming_packet_rx)),
         });
 
+        let config = Arc::new(Config::default());
+
         let mut actor = SocketActor {
             socket: mock_socket,
             connections: HashMap::new(),
             addr_to_cid: HashMap::new(),
-            draining_cids: HashMap::new(),
-            config: Arc::new(Config::default()),
+            draining_pool: DrainingPool::new(config.drain_timeout),
+            config: config.clone(),
             send_tx,
             accept_tx,
             command_rx,

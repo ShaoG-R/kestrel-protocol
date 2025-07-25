@@ -3,6 +3,7 @@
 use super::{
     actor::SocketActor,
     command::{SenderTaskCommand, SocketActorCommand},
+    draining::DrainingPool,
     sender::sender_task,
     traits::BindableUdpSocket,
 };
@@ -83,12 +84,14 @@ impl<S: BindableUdpSocket> ReliableUdpSocket<S> {
         let socket_clone = socket.clone();
         tokio::spawn(sender_task(socket_clone, send_rx));
 
+        let config = Arc::new(Config::default());
+
         let mut actor = SocketActor {
             socket,
             connections: std::collections::HashMap::new(),
             addr_to_cid: std::collections::HashMap::new(),
-            draining_cids: std::collections::HashMap::new(),
-            config: Arc::new(Config::default()),
+            draining_pool: DrainingPool::new(config.drain_timeout),
+            config: config.clone(),
             send_tx,
             accept_tx,
             command_rx,

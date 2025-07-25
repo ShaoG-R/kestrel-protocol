@@ -6,6 +6,7 @@ mod command;
 mod handle;
 mod sender;
 mod traits;
+pub mod draining;
 
 pub use command::{SocketActorCommand, SenderTaskCommand, SendCommand};
 pub use handle::{Listener, ReliableUdpSocket};

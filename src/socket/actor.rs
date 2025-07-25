@@ -2,6 +2,7 @@
 
 use super::{
     command::{SenderTaskCommand, SocketActorCommand},
+    draining::DrainingPool,
     traits::BindableUdpSocket,
 };
 use crate::{
@@ -11,7 +12,7 @@ use crate::{
     packet::frame::Frame,
 };
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use tokio::{sync::mpsc, time::Instant};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 /// Metadata associated with each connection managed by the `ReliableUdpSocket`.
@@ -35,7 +36,7 @@ pub(crate) struct SocketActor<S: BindableUdpSocket> {
     pub(crate) socket: Arc<S>,
     pub(crate) connections: HashMap<u32, ConnectionMeta>,
     pub(crate) addr_to_cid: HashMap<SocketAddr, u32>,
-    pub(crate) draining_cids: HashMap<u32, Instant>,
+    pub(crate) draining_pool: DrainingPool,
     pub(crate) config: Arc<Config>,
     pub(crate) send_tx: mpsc::Sender<SenderTaskCommand<S>>,
     pub(crate) accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
@@ -76,7 +77,7 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                 }
                 // 3. Handle periodic cleanup of draining CIDs
                 _ = cleanup_interval.tick() => {
-                    self.cleanup_draining_cids();
+                    self.draining_pool.cleanup();
                 }
                 else => break,
             }
@@ -94,7 +95,7 @@ impl<S: BindableUdpSocket> SocketActor<S> {
             } => {
                 let mut local_cid = rand::random();
                 while self.connections.contains_key(&local_cid)
-                    || self.draining_cids.contains_key(&local_cid)
+                    || self.draining_pool.contains(&local_cid)
                 {
                     local_cid = rand::random();
                 }
@@ -220,7 +221,7 @@ impl<S: BindableUdpSocket> SocketActor<S> {
 
         // 3. If we get here, it's an unroutable, non-SYN packet.
         // We also check the draining CIDs to provide better logging for why a packet might be dropped.
-        if self.draining_cids.contains_key(&cid) {
+        if self.draining_pool.contains(&cid) {
             debug!(
                 "Ignoring packet for draining connection from {} with CID {}: {:?}",
                 remote_addr, cid, frame
@@ -251,7 +252,7 @@ impl<S: BindableUdpSocket> SocketActor<S> {
             let peer_cid = header.source_cid;
             let mut local_cid = rand::random(); // This is OUR CID for the connection.
             while self.connections.contains_key(&local_cid)
-                || self.draining_cids.contains_key(&local_cid)
+                || self.draining_pool.contains(&local_cid)
             {
                 local_cid = rand::random();
             }
@@ -323,27 +324,8 @@ impl<S: BindableUdpSocket> SocketActor<S> {
         self.addr_to_cid.retain(|_addr, c| *c != cid);
         
         // Instead of forgetting the CID, move it to the draining state.
-        self.draining_cids.insert(cid, Instant::now());
+        self.draining_pool.insert(cid);
 
         info!(cid = %cid, "Cleaned up connection state. CID is now in draining state.");
-    }
-
-    /// Periodically cleans up CIDs that have been in the draining state for long enough.
-    fn cleanup_draining_cids(&mut self) {
-        let now = Instant::now();
-        let drain_timeout = self.config.drain_timeout;
-        
-        let before_count = self.draining_cids.len();
-        if before_count == 0 {
-            return;
-        }
-
-        self.draining_cids
-            .retain(|_cid, start_time| now.duration_since(*start_time) < drain_timeout);
-        
-        let after_count = self.draining_cids.len();
-        if after_count < before_count {
-            debug!(cleaned_count = before_count - after_count, "Cleaned up expired draining CIDs.");
-        }
     }
 } 
