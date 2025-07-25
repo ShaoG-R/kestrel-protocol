@@ -17,7 +17,7 @@ use crate::{
         frame::Frame,
         sack::decode_sack_ranges,
     },
-    socket::{AsyncUdpSocket, SendCommand, SenderTaskCommand, SocketCommand},
+    socket::{AsyncUdpSocket, SendCommand, SenderTaskCommand, SocketActorCommand},
 };
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -53,7 +53,7 @@ pub struct Endpoint<S: AsyncUdpSocket> {
     last_recv_time: Instant,
     receiver: mpsc::Receiver<(Frame, SocketAddr)>,
     sender: mpsc::Sender<SenderTaskCommand<S>>,
-    socket_command_tx: mpsc::Sender<SocketCommand>,
+    command_tx: mpsc::Sender<SocketActorCommand>,
     rx_from_stream: mpsc::Receiver<StreamCommand>,
     tx_to_stream: Option<mpsc::Sender<Vec<Bytes>>>,
 }
@@ -66,7 +66,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         local_cid: u32,
         receiver: mpsc::Receiver<(Frame, SocketAddr)>,
         sender: mpsc::Sender<SenderTaskCommand<S>>,
-        socket_command_tx: mpsc::Sender<SocketCommand>,
+        command_tx: mpsc::Sender<SocketActorCommand>,
         initial_data: Option<Bytes>,
     ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>) {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
@@ -92,7 +92,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             last_recv_time: now,
             receiver,
             sender,
-            socket_command_tx,
+            command_tx,
             rx_from_stream,
             tx_to_stream: Some(tx_to_stream),
         };
@@ -108,7 +108,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         peer_cid: u32,
         receiver: mpsc::Receiver<(Frame, SocketAddr)>,
         sender: mpsc::Sender<SenderTaskCommand<S>>,
-        socket_command_tx: mpsc::Sender<SocketCommand>,
+        command_tx: mpsc::Sender<SocketActorCommand>,
     ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>) {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
@@ -129,7 +129,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             last_recv_time: now,
             receiver,
             sender,
-            socket_command_tx,
+            command_tx,
             rx_from_stream,
             tx_to_stream: Some(tx_to_stream),
         };
@@ -339,8 +339,8 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                         
                         // Notify ReliableUdpSocket to update the addr_to_cid map.
                         let _ = self
-                            .socket_command_tx
-                            .send(SocketCommand::UpdateAddr {
+                            .command_tx
+                            .send(SocketActorCommand::UpdateAddr {
                                 cid: self.local_cid,
                                 new_addr,
                             })

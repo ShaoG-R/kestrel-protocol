@@ -5,7 +5,7 @@ use crate::{
     config::Config,
     error::Result,
     packet::frame::Frame,
-    socket::{AsyncUdpSocket, SenderTaskCommand, SocketCommand},
+    socket::{AsyncUdpSocket, SenderTaskCommand, SocketActorCommand},
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -205,7 +205,7 @@ pub fn setup_client_server_with_filter(
         let peer_cid = 2; // Pre-determined for the test
         let (tx_to_endpoint_network, rx_from_socket) = mpsc::channel(128);
         let (sender_task_tx, sender_task_rx) = mpsc::channel(128);
-        let (socket_command_tx, _) = mpsc::channel::<SocketCommand>(128);
+        let (command_tx, _) = mpsc::channel::<SocketActorCommand>(128);
 
         let (mut endpoint, tx_to_user, rx_from_user) = Endpoint::new_client(
             client_config,
@@ -213,7 +213,7 @@ pub fn setup_client_server_with_filter(
             local_cid,
             rx_from_socket,
             sender_task_tx.clone(),
-            socket_command_tx.clone(),
+            command_tx.clone(),
             None,
         );
         endpoint.set_peer_cid(peer_cid);
@@ -237,7 +237,7 @@ pub fn setup_client_server_with_filter(
         let local_cid = 2;
         let (tx_to_endpoint_network, rx_from_socket) = mpsc::channel(128);
         let (sender_task_tx, sender_task_rx) = mpsc::channel(128);
-        let (socket_command_tx, _) = mpsc::channel::<SocketCommand>(128);
+        let (command_tx, _) = mpsc::channel::<SocketActorCommand>(128);
 
         let (endpoint, tx_to_user, rx_from_user) = Endpoint::new_server(
             server_config,
@@ -246,7 +246,7 @@ pub fn setup_client_server_with_filter(
             client_peer_cid,
             rx_from_socket,
             sender_task_tx.clone(),
-            socket_command_tx,
+            command_tx,
         );
 
         spawn_endpoint(
@@ -281,7 +281,7 @@ pub fn setup_server_harness() -> ServerTestHarness {
 
     let (tx_to_endpoint_network, rx_from_socket) = mpsc::channel(128);
     let (sender_task_tx, sender_task_rx) = mpsc::channel(128);
-    let (socket_command_tx, _socket_command_rx) = mpsc::channel::<SocketCommand>(128);
+    let (command_tx, _command_rx) = mpsc::channel::<SocketActorCommand>(128);
 
     let server_cid = 2;
     let client_cid = 1;
@@ -293,7 +293,7 @@ pub fn setup_server_harness() -> ServerTestHarness {
         client_cid,
         rx_from_socket,
         sender_task_tx,
-        socket_command_tx,
+        command_tx,
     );
 
     // Unlike other test setups, we only spawn the main endpoint task.
