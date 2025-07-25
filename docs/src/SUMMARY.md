@@ -23,6 +23,7 @@
     - [基于SACK的高效确认](./features/02-core-protocol/06-sack.md)
     - [滑动窗口流量控制](./features/02-core-protocol/07-flow-control.md)
     - [基于延迟的拥塞控制 (Vegas)](./features/02-core-protocol/08-congestion-control-vegas.md)
+    - [拥塞控制之慢启动](./features/02-core-protocol/09-slow-start.md)
 - [并发与连接管理](./features/03-concurrency/README.md)
     - [基于MPSC的无锁并发模型](./features/03-concurrency/01-mpsc-concurrency-model.md)
     - [流迁移与NAT穿透](./features/03-concurrency/02-connection-migration.md)
