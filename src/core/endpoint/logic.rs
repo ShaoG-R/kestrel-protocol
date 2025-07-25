@@ -12,7 +12,7 @@ use crate::{
     socket::{AsyncUdpSocket, SocketActorCommand},
 };
 use tokio::time::{sleep_until, Instant};
-use tracing::info;
+use tracing::{debug, error, info, warn};
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
     /// Runs the endpoint's main event loop.
@@ -138,15 +138,45 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     self.peer_cid = header.source_cid;
                     info!(cid = self.local_cid, "Connection established (client-side)");
                     if !payload.is_empty() {
+                        debug!(
+                            cid = self.local_cid,
+                            payload_len = payload.len(),
+                            "SYN-ACK contains payload, processing."
+                        );
                         // On SYN-ACK, we receive a single payload, but the reassembly
                         // and stream channel expect a Vec. Wrap it.
                         self.reliability.receive_push(0, payload);
                         if let Some(data_vec) = self.reliability.reassemble() {
+                            debug!(
+                                cid = self.local_cid,
+                                count = data_vec.len(),
+                                "Reassembled initial data from SYN-ACK."
+                            );
                             if let Some(tx) = self.tx_to_stream.as_ref() {
                                 if tx.send(data_vec).await.is_err() {
+                                    // User's stream handle has been dropped. We can no longer send.
+                                    error!(
+                                        cid = self.local_cid,
+                                        "Failed to send initial data to stream: receiver dropped."
+                                    );
                                     self.tx_to_stream = None;
+                                } else {
+                                    debug!(
+                                        cid = self.local_cid,
+                                        "Successfully sent initial data to stream."
+                                    );
                                 }
+                            } else {
+                                warn!(
+                                    cid = self.local_cid,
+                                    "Cannot send initial data: stream tx is None."
+                                );
                             }
+                        } else {
+                            warn!(
+                                cid = self.local_cid,
+                                "Failed to reassemble initial data from SYN-ACK."
+                            );
                         }
                     }
 

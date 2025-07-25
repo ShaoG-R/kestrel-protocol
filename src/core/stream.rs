@@ -110,44 +110,161 @@ impl AsyncRead for Stream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        // If we have leftover data from a previous read, use it first.
-        while !self.read_buffer.is_empty() {
-            let current_chunk = &mut self.read_buffer[0];
-            let len = std::cmp::min(current_chunk.len(), buf.remaining());
+        loop {
+            // First, try to fulfill the read from the internal buffer.
+            if !self.read_buffer.is_empty() {
+                let current_chunk = &mut self.read_buffer[0];
+                let len = std::cmp::min(current_chunk.len(), buf.remaining());
 
-            if len > 0 {
-                buf.put_slice(&current_chunk[..len]);
-                current_chunk.advance(len);
+                if len > 0 {
+                    buf.put_slice(&current_chunk[..len]);
+                    current_chunk.advance(len);
+                }
+
+                if current_chunk.is_empty() {
+                    self.read_buffer.pop_front();
+                }
+
+                // If we copied ANY data, we MUST return Ready. This is the fix.
+                // It prevents us from incorrectly returning Pending later.
+                if len > 0 {
+                    return Poll::Ready(Ok(()));
+                }
             }
 
-            // If we've finished with the current chunk, drop it.
-            if current_chunk.is_empty() {
-                self.read_buffer.pop_front();
-            }
-
-            // If the user's buffer is full, we're done for now.
-            if buf.remaining() == 0 {
-                return Poll::Ready(Ok(()));
+            // If we reached here, the internal buffer was empty and we copied no data.
+            // Now, we must try to poll the channel for new data.
+            match self.rx_from_endpoint.poll_recv(cx) {
+                Poll::Ready(Some(data_vec)) => {
+                    // We got new data. It's crucial to continue the loop to
+                    // process this new data immediately.
+                    self.read_buffer.extend(data_vec);
+                    continue;
+                }
+                Poll::Ready(None) => {
+                    // Channel closed, and internal buffer is empty. This is EOF.
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Pending => {
+                    // No data in our buffer, and no data from the channel. We must wait.
+                    return Poll::Pending;
+                }
             }
         }
+    }
+}
 
-        // Buffer is empty, try to receive new data from the worker.
-        match self.rx_from_endpoint.poll_recv(cx) {
-            Poll::Ready(Some(data_vec)) => {
-                // Extend the buffer with the new chunks.
-                self.read_buffer.extend(data_vec);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::endpoint::StreamCommand;
+    use bytes::Bytes;
+    use tokio::io::AsyncReadExt;
 
-                // Now that we have new data, try to fulfill the read request again
-                // by calling poll_read recursively. The `while` loop at the start
-                // will handle the actual copying.
-                // It's safe to call poll_read again because we're in a Poll::Ready state.
-                self.poll_read(cx, buf)
+    /// Creates a Stream and the sender-side of its internal command channel
+    /// for testing purposes.
+    fn setup_stream() -> (
+        Stream,
+        mpsc::Sender<StreamCommand>,
+        mpsc::Sender<Vec<Bytes>>,
+    ) {
+        let (tx_to_endpoint, _) = mpsc::channel::<StreamCommand>(10);
+        let (tx_from_endpoint, rx_from_endpoint) = mpsc::channel::<Vec<Bytes>>(10);
+
+        let stream = Stream::new(tx_to_endpoint.clone(), rx_from_endpoint);
+        (stream, tx_to_endpoint, tx_from_endpoint)
+    }
+
+    #[tokio::test]
+    async fn test_stream_read_simple() {
+        let (mut stream, _tx_cmd, tx_data) = setup_stream();
+
+        let data = Bytes::from("hello");
+        tx_data.send(vec![data.clone()]).await.unwrap();
+
+        let mut buf = vec![0; 5];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(buf, data);
+    }
+
+    #[tokio::test]
+    async fn test_stream_read_pre_buffered() {
+        let (mut stream, _tx_cmd, tx_data) = setup_stream();
+
+        // Send data before the stream is ever read from.
+        tx_data.send(vec![Bytes::from("world")]).await.unwrap();
+
+        let mut buf = vec![0; 5];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"world");
+    }
+
+    #[tokio::test]
+    async fn test_stream_read_multiple_chunks() {
+        let (mut stream, _tx_cmd, tx_data) = setup_stream();
+
+        // Send data as multiple chunks in a single Vec
+        let chunks = vec![Bytes::from("he"), Bytes::from("llo"), Bytes::from(" world")];
+        tx_data.send(chunks).await.unwrap();
+
+        let mut buf = vec![0; 11];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn test_stream_read_multiple_sends() {
+        let (mut stream, _tx_cmd, tx_data) = setup_stream();
+
+        // Send data in multiple distinct sends
+        tokio::spawn({
+            let tx_data = tx_data.clone();
+            async move {
+                tx_data.send(vec![Bytes::from("hello ")]).await.unwrap();
+                // small delay to ensure reads happen in parts
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                tx_data.send(vec![Bytes::from("world")]).await.unwrap();
             }
-            Poll::Ready(None) => {
-                // Channel closed, indicating the end of the stream.
-                Poll::Ready(Ok(()))
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        });
+
+        let mut buf = vec![0; 11];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn test_stream_read_into_small_buffers() {
+        let (mut stream, _tx_cmd, tx_data) = setup_stream();
+        tx_data
+            .send(vec![Bytes::from("first_second_third")])
+            .await
+            .unwrap();
+
+        let mut buf1 = vec![0; 6];
+        stream.read_exact(&mut buf1).await.unwrap();
+        assert_eq!(&buf1, b"first_");
+
+        let mut buf2 = vec![0; 6];
+        stream.read_exact(&mut buf2).await.unwrap();
+        assert_eq!(&buf2, b"second");
+
+        let mut buf3 = vec![0; 6];
+        stream.read_exact(&mut buf3).await.unwrap();
+        assert_eq!(&buf3, b"_third");
+    }
+
+    #[tokio::test]
+    async fn test_stream_eof() {
+        let (mut stream, _tx_cmd, tx_data) = setup_stream();
+        tx_data.send(vec![Bytes::from("final")]).await.unwrap();
+        drop(tx_data); // Close the channel to signal EOF
+
+        let mut buf = vec![0; 5];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"final");
+
+        // The next read should return 0 bytes, indicating EOF.
+        let n = stream.read(&mut buf).await.unwrap();
+        assert_eq!(n, 0);
     }
 }
