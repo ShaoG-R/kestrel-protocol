@@ -22,4 +22,7 @@
   - [3.1 基于MPSC的无锁并发模型](./features/03-concurrency/01-mpsc-concurrency-model.md)
   - [3.2 流迁移与NAT穿透](./features/03-concurrency/02-connection-migration.md)
 - [4. 性能优化](./features/04-performance/README.md)
+  - [4.1 包聚合与快速应答](./features/04-performance/01-packet-optimization.md)
+  - [4.2 批处理与内存优化](./features/04-performance/02-batching-and-memory.md)
 - [5. 用户接口](./features/05-api/README.md)
+  - [5.1 Listener & Stream API](./features/05-api/01-user-api.md)
