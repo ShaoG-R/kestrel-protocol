@@ -183,4 +183,26 @@ impl Frame {
             _ => None,
         }
     }
+
+    /// Returns the destination connection ID of the frame.
+    ///
+    /// For `SYN` packets, this can be 0 if it's an initial connection attempt.
+    /// For all other packets, this identifies the recipient's endpoint.
+    ///
+    /// 返回帧的目标连接ID。
+    ///
+    /// 对于 `SYN` 包，如果它是初始连接尝试，则可以为0。
+    /// 对于所有其他包，这标识了接收者的端点。
+    pub fn destination_cid(&self) -> u32 {
+        match self {
+            Frame::Syn { header, .. } => header.destination_cid,
+            Frame::SynAck { header, .. } => header.destination_cid,
+            Frame::Push { header, .. } => header.connection_id,
+            Frame::Ack { header, .. } => header.connection_id,
+            Frame::Fin { header, .. } => header.connection_id,
+            Frame::Ping { header, .. } => header.connection_id,
+            Frame::PathChallenge { header, .. } => header.connection_id,
+            Frame::PathResponse { header, .. } => header.connection_id,
+        }
+    }
 } 

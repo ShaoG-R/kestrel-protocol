@@ -104,12 +104,15 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                     }
                 });
 
+                // The key in the `connections` map is always OUR endpoint's CID.
                 self.connections.insert(
                     local_cid,
                     ConnectionMeta {
                         sender: tx_to_endpoint,
                     },
                 );
+                // For outgoing connections, we initially map the remote address to our own CID
+                // until the handshake completes and we learn the peer's CID.
                 self.addr_to_cid.insert(remote_addr, local_cid);
 
                 let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
@@ -151,17 +154,35 @@ impl<S: BindableUdpSocket> SocketActor<S> {
 
     /// Dispatches a received frame to the appropriate connection task.
     async fn dispatch_frame(&mut self, frame: Frame, remote_addr: SocketAddr) {
-        if let Some(&cid) = self.addr_to_cid.get(&remote_addr) {
+        let cid = frame.destination_cid();
+
+        // 1. Try to route to an established connection via its destination CID.
+        // This is the primary routing mechanism and supports connection migration.
+        // CIDs are non-zero for established connections.
+        if cid != 0 {
             if let Some(meta) = self.connections.get(&cid) {
                 if meta.sender.send((frame, remote_addr)).await.is_err() {
-                    debug!(addr = %remote_addr, cid = %cid, "Endpoint task died. Removing connection.");
+                    debug!(addr = %remote_addr, cid = %cid, "Endpoint (looked up by CID) died. Removing connection.");
                     self.connections.remove(&cid);
-                    self.addr_to_cid.remove(&remote_addr);
                 }
                 return;
             }
         }
 
+        // 2. Handle packets for connections that are still in handshake (e.g. retransmitted SYN)
+        // by looking up the remote address.
+        if let Some(&existing_cid) = self.addr_to_cid.get(&remote_addr) {
+            if let Some(meta) = self.connections.get(&existing_cid) {
+                if meta.sender.send((frame, remote_addr)).await.is_err() {
+                     debug!(addr = %remote_addr, cid = %existing_cid, "Endpoint (looked up by addr) died. Removing connection.");
+                     self.connections.remove(&existing_cid);
+                     self.addr_to_cid.remove(&remote_addr);
+                }
+                return;
+            }
+        }
+
+        // 3. If the packet could not be routed, it must be a SYN for a new connection.
         if let Frame::Syn { header, .. } = &frame {
             let config = Config::default();
             if header.protocol_version != config.protocol_version {
@@ -176,7 +197,7 @@ impl<S: BindableUdpSocket> SocketActor<S> {
 
             info!(addr = %remote_addr, "Accepting new connection attempt.");
             let peer_cid = header.source_cid;
-            let local_cid = rand::random();
+            let local_cid = rand::random(); // This is OUR CID for the connection.
             let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
             let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
@@ -189,7 +210,7 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                     self.send_tx.clone(),
                     self.command_tx.clone(),
                 );
-
+            
             tokio::spawn(async move {
                 info!(addr = %remote_addr, cid = %local_cid, "Spawning new endpoint task for inbound connection");
                 if let Err(e) = endpoint.run().await {
@@ -197,12 +218,14 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                 }
             });
 
+            // Add to connections map using OUR local_cid.
             self.connections.insert(
                 local_cid,
                 ConnectionMeta {
                     sender: tx_to_endpoint.clone(),
                 },
             );
+            // Add to addr->cid map to find this connection for retransmitted SYNs.
             self.addr_to_cid.insert(remote_addr, local_cid);
 
             if tx_to_endpoint.send((frame.clone(), remote_addr)).await.is_err() {
@@ -223,8 +246,8 @@ impl<S: BindableUdpSocket> SocketActor<S> {
             }
         } else {
             debug!(
-                "Ignoring non-SYN packet from unknown address {}: {:?}",
-                remote_addr, frame
+                "Ignoring non-SYN packet from unknown source {} with unroutable CID {}: {:?}",
+                remote_addr, cid, frame
             );
         }
     }
