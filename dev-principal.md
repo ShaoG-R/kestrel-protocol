@@ -55,7 +55,8 @@
 
 在已完成分层架构的基础上，下一步的核心架构目标是**全面提升协议的健壮性、性能和可观测性**。
 
-*   **目标 (Goal):** 全面提升协议的健-   现状 (Current State):** 协议的核心功能和分层架构（`Endpoint` -> `ReliabilityLayer` -> `CongestionControl`) 已经完成。`Vegas` 作为默认拥塞控制算法也已集成。API 稳定，但真实网络环境下的测试和性能验证不足。
+*   **目标 (Goal):** 全面提升协议的健壮性
+-   现状 (Current State):** 协议的核心功能和分层架构（`Endpoint` -> `ReliabilityLayer` -> `CongestionControl`) 已经完成。`Vegas` 作为默认拥塞控制算法也已集成。API 稳定，但真实网络环境下的测试和性能验证不足。
 
 *   **改进方向 (Improvement Direction):**
     1.  **全面测试 (Comprehensive Testing):**
