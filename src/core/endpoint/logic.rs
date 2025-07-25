@@ -12,7 +12,7 @@ use crate::{
     socket::{AsyncUdpSocket, SocketActorCommand},
 };
 use tokio::time::{sleep_until, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
     /// Runs the endpoint's main event loop.
@@ -31,6 +31,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     .unwrap_or_else(|| Instant::now() + self.config.idle_timeout)
             };
 
+            trace!(cid = self.local_cid, state = ?self.state, "Main loop waiting for event.");
             tokio::select! {
                 biased; // Prioritize incoming packets and user commands
 
@@ -65,10 +66,16 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             }
 
             // After handling all immediate events, perform follow-up actions.
+            trace!(cid = self.local_cid, "Event handled, performing follow-up actions.");
 
             // 5. Reassemble data and send to the user stream
             if let Some(data_vec) = self.reliability.reassemble() {
                 if !data_vec.is_empty() {
+                    trace!(
+                        cid = self.local_cid,
+                        count = data_vec.len(),
+                        "Reassembled data, sending to stream."
+                    );
                     if let Some(tx) = self.tx_to_stream.as_ref() {
                         if tx.send(data_vec).await.is_err() {
                             // User's stream handle has been dropped. We can no longer send.
