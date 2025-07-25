@@ -23,6 +23,7 @@ use crate::{
 };
 use bytes::Bytes;
 use tokio::time::Instant;
+use tracing::{debug, trace};
 
 /// The reliability layer for a connection.
 ///
@@ -69,11 +70,24 @@ impl ReliabilityLayer {
         // Update RTT and congestion control with real samples.
         for rtt_sample in rtt_samples {
             self.rto_estimator.update(rtt_sample, self.config.min_rto);
+            let old_cwnd = self.congestion_control.congestion_window();
             self.congestion_control.on_ack(rtt_sample);
+            let new_cwnd = self.congestion_control.congestion_window();
+            if old_cwnd != new_cwnd {
+                trace!(old_cwnd, new_cwnd, "Congestion window updated on ACK");
+            }
         }
 
         if !frames_to_retx.is_empty() {
+            let old_cwnd = self.congestion_control.congestion_window();
             self.congestion_control.on_packet_loss(now);
+            let new_cwnd = self.congestion_control.congestion_window();
+            debug!(
+                old_cwnd,
+                new_cwnd,
+                count = frames_to_retx.len(),
+                "Congestion window reduced due to fast retransmission"
+            );
         }
 
         frames_to_retx
@@ -85,7 +99,15 @@ impl ReliabilityLayer {
         let frames_to_resend = self.send_buffer.check_for_rto(rto, now);
 
         if !frames_to_resend.is_empty() {
+            let old_cwnd = self.congestion_control.congestion_window();
             self.congestion_control.on_packet_loss(now);
+            let new_cwnd = self.congestion_control.congestion_window();
+            debug!(
+                old_cwnd,
+                new_cwnd,
+                count = frames_to_resend.len(),
+                "Congestion window reduced due to RTO"
+            );
             self.rto_estimator.backoff();
         }
 

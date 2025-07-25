@@ -2,6 +2,7 @@
 //! RTT 估算器。
 
 use std::time::Duration;
+use tracing::{debug, trace};
 
 const ALPHA: f64 = 1.0 / 8.0;
 const BETA: f64 = 1.0 / 4.0;
@@ -60,6 +61,14 @@ impl RttEstimator {
 
         let rto_f64 = self.srtt + (4.0 * self.rttvar);
         self.rto = Duration::from_secs_f64(rto_f64).max(min_rto);
+
+        trace!(
+            sample_ms = rtt_sample.as_millis(),
+            srtt_ms = (self.srtt * 1000.0) as u64,
+            rttvar_ms = (self.rttvar * 1000.0) as u64,
+            rto_ms = self.rto.as_millis(),
+            "RTT updated"
+        );
     }
 
     /// Doubles the RTO for exponential backoff, up to a maximum value.
@@ -67,7 +76,9 @@ impl RttEstimator {
     /// 将 RTO 加倍以实现指数退避，直至达到最大值。
     pub fn backoff(&mut self) {
         // TODO: Consider adding a max_rto to config
+        let old_rto = self.rto;
         self.rto *= 2;
+        debug!(old_rto_ms = old_rto.as_millis(), new_rto_ms = self.rto.as_millis(), "RTO backoff");
     }
 }
 

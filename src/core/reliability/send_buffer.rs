@@ -9,6 +9,7 @@ use bytes::{Bytes, BytesMut};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::time::Instant;
+use tracing::debug;
 
 /// A packet that has been sent but not yet acknowledged (in-flight).
 #[derive(Debug, Clone)]
@@ -162,6 +163,7 @@ impl SendBuffer {
                         .iter()
                         .any(|f: &Frame| f.sequence_number() == Some(seq))
                     {
+                        debug!(seq, "Fast retransmission triggered");
                         frames_to_fast_retx.push(packet.frame.clone());
                         packet.last_sent_at = now;
                         packet.fast_retx_count = 0; // Reset after adding.
@@ -178,6 +180,10 @@ impl SendBuffer {
         let mut frames_to_resend = Vec::new();
         for packet in self.in_flight.values_mut() {
             if now.duration_since(packet.last_sent_at) > rto {
+                debug!(
+                    seq = packet.frame.sequence_number().unwrap_or(u32::MAX),
+                    "RTO retransmission triggered"
+                );
                 frames_to_resend.push(packet.frame.clone());
                 packet.last_sent_at = now;
             }

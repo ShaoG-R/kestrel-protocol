@@ -5,7 +5,8 @@
 
 use crate::packet::sack::SackRange;
 use bytes::Bytes;
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap};
+use tracing::trace;
 
 /// Manages incoming data.
 #[derive(Debug)]
@@ -60,8 +61,16 @@ impl ReceiveBuffer {
         // We only care about packets that are at or after the next expected sequence.
         // Duplicates of already processed packets are ignored.
         if sequence_number >= self.next_sequence {
-            // Use entry API to avoid overwriting existing packets (duplicates).
-            self.received.entry(sequence_number).or_insert(payload);
+            if let Entry::Vacant(entry) = self.received.entry(sequence_number) {
+                entry.insert(payload);
+                if sequence_number > self.next_sequence {
+                    trace!(
+                        seq = sequence_number,
+                        next_expected = self.next_sequence,
+                        "Buffered out-of-order packet"
+                    );
+                }
+            }
         }
     }
 
@@ -147,7 +156,6 @@ mod tests {
     }
 
     #[test]
-
     fn test_receive_in_order_and_reassemble() {
         let mut buffer = create_test_recv_buffer();
 
