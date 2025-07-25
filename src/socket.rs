@@ -12,7 +12,43 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
+
+/// An asynchronous UDP socket interface.
+///
+/// This trait allows for abstracting over the underlying UDP socket implementation,
+/// enabling custom socket implementations for testing or other purposes.
+///
+/// 异步UDP套接字接口。
+///
+/// 此trait允许对底层UDP套接字实现进行抽象，从而可以为测试或其他目的自定义套接字实现。
+#[async_trait]
+pub trait AsyncUdpSocket: Send + Sync + 'static {
+    /// Sends data on the socket to the given address.
+    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> Result<usize>;
+
+    /// Receives a single datagram on the socket.
+    async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)>;
+
+    /// Returns the local address that this socket is bound to.
+    fn local_addr(&self) -> Result<SocketAddr>;
+}
+
+#[async_trait]
+impl AsyncUdpSocket for UdpSocket {
+    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> Result<usize> {
+        UdpSocket::send_to(self, buf, target).await.map_err(Into::into)
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
+        UdpSocket::recv_from(self, buf).await.map_err(Into::into)
+    }
+
+    fn local_addr(&self) -> Result<SocketAddr> {
+        UdpSocket::local_addr(self).map_err(Into::into)
+    }
+}
 
 /// A command for the central socket sender task.
 /// 用于中央套接字发送任务的命令。
@@ -64,8 +100,8 @@ impl ConnectionListener {
 /// 一个可靠的UDP套接字。
 ///
 /// 这是协议的主要入口点。它负责绑定一个UDP套接字并管理所有的连接。
-pub struct ReliableUdpSocket {
-    socket: Arc<UdpSocket>,
+pub struct ReliableUdpSocket<S: AsyncUdpSocket> {
+    socket: Arc<S>,
     /// A map of all active connections, mapping a remote address to a sender
     /// that can send frames to the connection's task.
     /// 所有活动连接的映射，将远程地址映射到一个可以向连接任务发送帧的发送端。
@@ -78,7 +114,7 @@ pub struct ReliableUdpSocket {
     accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
 }
 
-impl ReliableUdpSocket {
+impl ReliableUdpSocket<UdpSocket> {
     /// Creates a new `ReliableUdpSocket` and binds it to the given address.
     ///
     /// Returns a `ReliableUdpSocket` for managing connections and a
@@ -90,6 +126,21 @@ impl ReliableUdpSocket {
     /// `ConnectionListener`。
     pub async fn bind(addr: SocketAddr) -> Result<(Self, ConnectionListener)> {
         let socket = UdpSocket::bind(addr).await?;
+        Self::with_socket(socket)
+    }
+}
+
+impl<S: AsyncUdpSocket> ReliableUdpSocket<S> {
+    /// Creates a new `ReliableUdpSocket` with a provided socket implementation.
+    ///
+    /// Returns a `ReliableUdpSocket` for managing connections and a
+    /// `ConnectionListener` for accepting them.
+    ///
+    /// 使用提供的套接字实现创建一个新的 `ReliableUdpSocket`。
+    ///
+    /// 返回一个用于管理连接的 `ReliableUdpSocket` 和一个用于接受连接的
+    /// `ConnectionListener`。
+    pub fn with_socket(socket: S) -> Result<(Self, ConnectionListener)> {
         let socket = Arc::new(socket);
         let connections = Arc::new(DashMap::new());
 
@@ -313,7 +364,7 @@ impl ReliableUdpSocket {
 ///
 /// 用于发送UDP包的专用任务。
 /// 这将所有对套接字的写入操作集中起来。
-async fn sender_task(socket: Arc<UdpSocket>, mut rx: mpsc::Receiver<SendCommand>) {
+async fn sender_task<S: AsyncUdpSocket>(socket: Arc<S>, mut rx: mpsc::Receiver<SendCommand>) {
     const MAX_BATCH_SIZE: usize = 64;
     let mut send_buf = Vec::with_capacity(2048);
     let mut commands = Vec::with_capacity(MAX_BATCH_SIZE);
@@ -367,30 +418,94 @@ mod tests {
     use crate::packet::command::Command;
     use bytes::Bytes;
     use std::time::Duration;
+    use std::collections::VecDeque;
+    use std::sync::{Mutex};
+    use tokio::io::AsyncWriteExt;
+
+    /// A mock UDP socket for testing purposes.
+    struct MockUdpSocket {
+        local_addr: SocketAddr,
+        sent_packets: Arc<Mutex<Vec<(Bytes, SocketAddr)>>>,
+        recv_queue: Arc<Mutex<VecDeque<(Bytes, SocketAddr)>>>,
+    }
+
+    impl MockUdpSocket {
+        fn new(
+            local_addr: SocketAddr,
+            sent_packets: Arc<Mutex<Vec<(Bytes, SocketAddr)>>>,
+            recv_queue: Arc<Mutex<VecDeque<(Bytes, SocketAddr)>>>,
+        ) -> Self {
+            Self {
+                local_addr,
+                sent_packets,
+                recv_queue,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AsyncUdpSocket for MockUdpSocket {
+        async fn send_to(&self, buf: &[u8], target: SocketAddr) -> Result<usize> {
+            let mut sent = self.sent_packets.lock().unwrap();
+            sent.push((Bytes::copy_from_slice(buf), target));
+            Ok(buf.len())
+        }
+
+        async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
+            loop {
+                let maybe_data = {
+                    // Lock, check, and release inside this block
+                    let mut queue = self.recv_queue.lock().unwrap();
+                    queue.pop_front()
+                };
+
+                if let Some((data, addr)) = maybe_data {
+                    let len = data.len();
+                    buf[..len].copy_from_slice(&data);
+                    return Ok((len, addr));
+                }
+                
+                // If we're here, the queue was empty. Yield to the scheduler.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        fn local_addr(&self) -> Result<SocketAddr> {
+            Ok(self.local_addr)
+        }
+    }
     
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_server_accept() {
-        // 1. Setup a listener socket
+        // 1. Setup mock environment
         let listener_addr = "127.0.0.1:9999".parse().unwrap();
-        let (socket, mut listener) = ReliableUdpSocket::bind(listener_addr).await.unwrap();
+        let client_addr = "127.0.0.1:1111".parse().unwrap();
+
+        let server_recv_queue = Arc::new(Mutex::new(VecDeque::new()));
+        let server_sent_packets = Arc::new(Mutex::new(Vec::new()));
+
+        let mock_socket = MockUdpSocket::new(
+            listener_addr,
+            server_sent_packets.clone(),
+            server_recv_queue.clone(),
+        );
+
+        // 2. Setup the ReliableUdpSocket with the mock
+        let (socket, mut listener) = ReliableUdpSocket::with_socket(mock_socket).unwrap();
         let socket_arc = Arc::new(socket);
 
-        // 2. Spawn the listener's run loop
+        // 3. Spawn the listener's run loop
         let socket_run = socket_arc.clone();
         let run_handle = tokio::spawn(async move {
             socket_run.run().await;
         });
 
-        // 3. Setup a "client" socket to send a SYN
-        let client_addr = "127.0.0.1:1111".parse().unwrap();
-        let client_socket = UdpSocket::bind(client_addr).await.unwrap();
-
-        // 4. Create and send a SYN packet
+        // 4. Simulate a client sending a SYN packet by populating the mock's receive queue
         let syn_header = crate::packet::header::LongHeader {
             command: Command::Syn,
             protocol_version: 1, // Use a matching version for the test
-            destination_cid: 0, // Destination is unknown initially
-            source_cid: 1234,   // Client's chosen CID
+            destination_cid: 0,  // Destination is unknown initially
+            source_cid: 1234,    // Client's chosen CID
         };
         let syn_frame = Frame::Syn {
             header: syn_header,
@@ -398,10 +513,11 @@ mod tests {
         };
         let mut send_buf = Vec::new();
         syn_frame.encode(&mut send_buf);
-        client_socket
-            .send_to(&send_buf, listener_addr)
-            .await
-            .unwrap();
+
+        server_recv_queue
+            .lock()
+            .unwrap()
+            .push_back((Bytes::from(send_buf), client_addr));
 
         // 5. Call accept() on the listener.
         // It should unblock and return a connection.
@@ -410,14 +526,34 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), listener.accept()).await;
 
         assert!(accept_result.is_ok(), "accept() timed out");
-        let (conn, remote_addr) = accept_result.unwrap().unwrap();
+        let (mut conn, remote_addr) = accept_result.unwrap().unwrap();
 
         // 6. Verify the remote address is the client's address
         assert_eq!(remote_addr, client_addr);
-        // A simple check to see if the connection handle is usable
         assert!(!conn.is_closed());
 
-        // 7. Cleanup
+        // 7. Simulate the application writing data back. Per design, this is what
+        // triggers the server to send the SYN-ACK and establish the connection.
+        conn.write_all(b"server-hello").await.unwrap();
+
+        // 8. Verify that a SYN-ACK was sent back by the server
+        // A little delay to allow the server task to process and send.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let sent_packets = server_sent_packets.lock().unwrap();
+        assert_eq!(sent_packets.len(), 1, "Expected one packet to be sent");
+        let (sent_data, sent_addr) = &sent_packets[0];
+        assert_eq!(*sent_addr, client_addr);
+
+        // Decode the frame to check if it's a SYN-ACK
+        let response_frame = Frame::decode(sent_data).expect("Failed to decode response frame");
+        assert!(
+            matches!(response_frame, Frame::SynAck { .. }),
+            "Expected SYN-ACK, got {:?}",
+            response_frame
+        );
+
+        // 9. Cleanup
         run_handle.abort();
     }
 

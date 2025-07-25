@@ -144,7 +144,9 @@
 
 ### 2.2. 连接生命周期 (Connection Lifecycle)
 
-*   **快速连接建立 (Fast Connection Establishment):** 借鉴AP-KCP和QUIC的0-RTT思想。客户端发出的第一个 `SYN` 包可以直接携带业务数据。服务器若同意连接，回复 `SYN-ACK`，连接即进入 `Established` 状态。这消除了传统三次握手的延迟。
+*   **快速连接建立 (Fast Connection Establishment):** 借鉴AP-KCP和QUIC的0-RTT思想。
+    *   **客户端 (Client):** 客户端发出的第一个 `SYN` 包可以直接携带业务数据。
+    *   **服务端 (Server):** 服务器若同意连接，会先返回一个 `Stream` 句柄给应用层。连接此时处于“半开”状态。当应用层首次调用 `write()` 准备发送数据时，协议栈才会将 `SYN-ACK` 与业务数据一同打包发送给客户端。这确保了 `SYN-ACK` 的发送与服务器的实际就绪状态同步，构成了完整的0-RTT交互，避免了空 `SYN-ACK` 包。客户端收到 `SYN-ACK` 后，连接即进入 `Established` 状态。
 *   **可靠连接断开 (Reliable Disconnection):** 保持标准的四次挥手 (`FIN` -> `ACK` -> `FIN` -> `ACK`)，确保双方数据都已完整传输和确认，防止数据丢失。
 *   **状态机 (State Machine):** 每个连接必须维护一个明确的状态机 (e.g., `SynSent`, `Established`, `FinWait`, `Closed`)。
 
