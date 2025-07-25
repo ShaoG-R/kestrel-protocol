@@ -80,6 +80,8 @@ impl ActorTestHarness {
             socket: mock_socket,
             connections: HashMap::new(),
             addr_to_cid: HashMap::new(),
+            draining_cids: HashMap::new(),
+            config: Arc::new(Config::default()),
             send_tx,
             accept_tx,
             command_rx,

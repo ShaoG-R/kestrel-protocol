@@ -11,7 +11,7 @@ use crate::{
     packet::frame::Frame,
 };
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::Instant};
 use tracing::{debug, error, info, warn};
 
 /// Metadata associated with each connection managed by the `ReliableUdpSocket`.
@@ -35,6 +35,8 @@ pub(crate) struct SocketActor<S: BindableUdpSocket> {
     pub(crate) socket: Arc<S>,
     pub(crate) connections: HashMap<u32, ConnectionMeta>,
     pub(crate) addr_to_cid: HashMap<SocketAddr, u32>,
+    pub(crate) draining_cids: HashMap<u32, Instant>,
+    pub(crate) config: Arc<Config>,
     pub(crate) send_tx: mpsc::Sender<SenderTaskCommand<S>>,
     pub(crate) accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
     pub(crate) command_rx: mpsc::Receiver<SocketActorCommand>,
@@ -45,6 +47,8 @@ impl<S: BindableUdpSocket> SocketActor<S> {
     /// Runs the actor's main event loop.
     pub(crate) async fn run(&mut self) {
         let mut recv_buf = [0u8; 2048]; // Max UDP packet size
+        let mut cleanup_interval =
+            tokio::time::interval(self.config.draining_cleanup_interval);
 
         loop {
             tokio::select! {
@@ -70,6 +74,10 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                         self.dispatch_frame(frame, remote_addr).await;
                     }
                 }
+                // 3. Handle periodic cleanup of draining CIDs
+                _ = cleanup_interval.tick() => {
+                    self.cleanup_draining_cids();
+                }
                 else => break,
             }
         }
@@ -85,7 +93,9 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                 response_tx,
             } => {
                 let mut local_cid = rand::random();
-                while self.connections.contains_key(&local_cid) {
+                while self.connections.contains_key(&local_cid)
+                    || self.draining_cids.contains_key(&local_cid)
+                {
                     local_cid = rand::random();
                 }
 
@@ -209,16 +219,24 @@ impl<S: BindableUdpSocket> SocketActor<S> {
         }
 
         // 3. If we get here, it's an unroutable, non-SYN packet.
-        debug!(
-            "Ignoring non-SYN packet from unknown source {} with unroutable CID {}: {:?}",
-            remote_addr, cid, frame
-        );
+        // We also check the draining CIDs to provide better logging for why a packet might be dropped.
+        if self.draining_cids.contains_key(&cid) {
+            debug!(
+                "Ignoring packet for draining connection from {} with CID {}: {:?}",
+                remote_addr, cid, frame
+            );
+        } else {
+            debug!(
+                "Ignoring non-SYN packet from unknown source {} with unroutable CID {}: {:?}",
+                remote_addr, cid, frame
+            );
+        }
     }
 
     /// Handles a new connection attempt based on a SYN frame.
     async fn accept_new_connection(&mut self, frame: Frame, remote_addr: SocketAddr) {
         if let Frame::Syn { header, .. } = frame {
-            let config = Config::default();
+            let config = self.config.as_ref();
             if header.protocol_version != config.protocol_version {
                 warn!(
                     addr = %remote_addr,
@@ -232,14 +250,16 @@ impl<S: BindableUdpSocket> SocketActor<S> {
             info!(addr = %remote_addr, "Accepting new connection attempt.");
             let peer_cid = header.source_cid;
             let mut local_cid = rand::random(); // This is OUR CID for the connection.
-            while self.connections.contains_key(&local_cid) {
+            while self.connections.contains_key(&local_cid)
+                || self.draining_cids.contains_key(&local_cid)
+            {
                 local_cid = rand::random();
             }
             let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
             let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
                 Endpoint::new_server(
-                    config,
+                    config.clone(),
                     remote_addr,
                     local_cid,
                     peer_cid,
@@ -301,7 +321,29 @@ impl<S: BindableUdpSocket> SocketActor<S> {
 
         // Find and remove the corresponding address mapping.
         self.addr_to_cid.retain(|_addr, c| *c != cid);
+        
+        // Instead of forgetting the CID, move it to the draining state.
+        self.draining_cids.insert(cid, Instant::now());
 
-        info!(cid = %cid, "Cleaned up connection state and address mapping.");
+        info!(cid = %cid, "Cleaned up connection state. CID is now in draining state.");
+    }
+
+    /// Periodically cleans up CIDs that have been in the draining state for long enough.
+    fn cleanup_draining_cids(&mut self) {
+        let now = Instant::now();
+        let drain_timeout = self.config.drain_timeout;
+        
+        let before_count = self.draining_cids.len();
+        if before_count == 0 {
+            return;
+        }
+
+        self.draining_cids
+            .retain(|_cid, start_time| now.duration_since(*start_time) < drain_timeout);
+        
+        let after_count = self.draining_cids.len();
+        if after_count < before_count {
+            debug!(cleaned_count = before_count - after_count, "Cleaned up expired draining CIDs.");
+        }
     }
 } 

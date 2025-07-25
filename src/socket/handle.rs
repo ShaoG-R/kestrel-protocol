@@ -87,6 +87,8 @@ impl<S: BindableUdpSocket> ReliableUdpSocket<S> {
             socket,
             connections: std::collections::HashMap::new(),
             addr_to_cid: std::collections::HashMap::new(),
+            draining_cids: std::collections::HashMap::new(),
+            config: Arc::new(Config::default()),
             send_tx,
             accept_tx,
             command_rx,
