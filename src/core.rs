@@ -6,4 +6,6 @@ pub mod reliability;
 pub mod stream;
 
 #[cfg(test)]
-mod tests; 
+mod tests;
+#[cfg(test)]
+pub mod test_utils; 
