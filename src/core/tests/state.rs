@@ -40,6 +40,7 @@ async fn test_address_reuse_after_connection_close() {
         let (mut server_stream_b, _) = listener.accept().await.unwrap();
         info!("Accepted second connection.");
         let mut buf = vec![0; 20];
+        
         let len = server_stream_b.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..len], b"hello from client B");
         info!("Second connection on server verified.");

@@ -371,8 +371,20 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     }
 
     fn shutdown(&mut self) {
-        if self.state == ConnectionState::Established || self.state == ConnectionState::FinWait {
-            self.state = ConnectionState::Closing;
+        match self.state {
+            // Standard active close from Established or after peer has closed (FinWait)
+            ConnectionState::Established | ConnectionState::FinWait => {
+                self.state = ConnectionState::Closing;
+            }
+            // If user closes during handshake or path validation, just abort.
+            ConnectionState::Connecting
+            | ConnectionState::SynReceived
+            | ConnectionState::ValidatingPath { .. } => {
+                info!(cid = self.local_cid, state = ?self.state, "Connection closed by user during non-established state, aborting.");
+                self.state = ConnectionState::Closed;
+            }
+            // If already closing or closed, do nothing.
+            ConnectionState::Closing | ConnectionState::Closed => {}
         }
     }
 } 

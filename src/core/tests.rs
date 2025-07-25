@@ -7,4 +7,5 @@ mod concurrency;
 mod handshake;
 mod lifecycle;
 mod reliability;
+mod shutdown;
 mod state;
