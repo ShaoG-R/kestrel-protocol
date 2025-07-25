@@ -23,7 +23,7 @@ use tokio::{
     sync::mpsc,
     time::Instant,
 };
-use tracing::warn;
+use tracing::trace;
 
 /// A guard that ensures the connection is cleaned up in the `SocketActor`
 /// when the `Endpoint` is dropped.
@@ -38,20 +38,11 @@ struct ConnectionCleaner<S: AsyncUdpSocket> {
 
 impl<S: AsyncUdpSocket> Drop for ConnectionCleaner<S> {
     fn drop(&mut self) {
-        // Use a blocking send to ensure the cleanup command is sent. This is
-        // acceptable because this is only called when the endpoint's task is
-        // terminating, so we are not in an async context. If the channel is
-        // full, this will wait, preventing the cleanup message from being
-        // dropped.
-        if self
-            .command_tx
-            .blocking_send(SocketActorCommand::RemoveConnection { cid: self.cid })
-            .is_err()
-        {
-            // This can only happen if the SocketActor itself has shut down,
-            // which means the application is terminating. In that case,
-            // logging might not even work, but we try.
-            warn!(cid = self.cid, "Failed to send RemoveConnection command: SocketActor is gone.");
+        // Use `try_send` to avoid blocking in a drop implementation. This is a
+        // "best-effort" cleanup. If the channel is full or closed, the actor
+        // will eventually clean up the connection via timeout.
+        if let Err(e) = self.command_tx.try_send(SocketActorCommand::RemoveConnection { cid: self.cid }) {
+            trace!(cid = self.cid, "Failed to send remove command during drop: {}", e);
         }
     }
 }
