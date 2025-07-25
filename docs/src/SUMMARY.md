@@ -1,6 +1,11 @@
 # Summary
 
-- [Introduction](./chapter_1.md)
+- [项目介绍](./Introduction.md)
+
+# 项目指南
+
+- [项目现状分析报告](./project-guidance/01-status-report.md)
+- [AI开发指南](./project-guidance/02-ai-dev-guide.md)
 
 # Features
 
