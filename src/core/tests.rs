@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::packet::frame::Frame;
 use crate::socket::SenderTaskCommand;
 use bytes::Bytes;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -87,12 +88,30 @@ impl TestNetHub {
                 let packet = server_ingress_queue.lock().unwrap().pop_front();
 
                 if let Some((data, src_addr)) = packet {
-                    if let Some(frame) = Frame::decode(&data) {
-                        if let Some(sender) = endpoint_senders.get_mut(&src_addr) {
-                            if sender.send((frame, src_addr)).await.is_err() {
-                                // Endpoint is gone, remove it to prevent further sends.
-                                endpoint_senders.remove(&src_addr);
+                    // --- DEBUG LOG: Print raw bytes received by the server-side hub ---
+                    let mut hasher = Sha256::new();
+                    hasher.update(&data);
+                    let hash = hasher.finalize();
+                    println!(
+                        "[SERVER DEMUX] RECV FROM {} -> len: {}, hash: {:x}",
+                        src_addr,
+                        data.len(),
+                        hash
+                    );
+                    // --- END DEBUG LOG ---
+
+                    let mut cursor = &data[..];
+                    while !cursor.is_empty() {
+                        if let Some(frame) = Frame::decode(&mut cursor) {
+                            if let Some(sender) = endpoint_senders.get_mut(&src_addr) {
+                                if sender.send((frame, src_addr)).await.is_err() {
+                                    // Endpoint is gone, remove it to prevent further sends.
+                                    endpoint_senders.remove(&src_addr);
+                                }
                             }
+                        } else {
+                            // Could not decode further, stop processing this datagram.
+                            break;
                         }
                     }
                 } else {
@@ -108,7 +127,7 @@ impl TestNetHub {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_core_multiple_clients_concurrently() {
-    const NUM_CLIENTS: usize = 1;
+    const NUM_CLIENTS: usize = 50;
     let server_addr: SocketAddr = "127.0.0.1:8000".parse().unwrap();
 
     let hub = Arc::new(TestNetHub::new(server_addr));
@@ -182,6 +201,14 @@ async fn test_core_multiple_clients_concurrently() {
             // Client sends its unique data, now a larger payload.
             let payload = vec![i as u8; 10 * 1024]; // 10 KB
             let msg = Bytes::from(payload);
+
+            // --- DEBUG LOG: Print bytes being sent from the client side ---
+            let mut hasher = Sha256::new();
+            hasher.update(&msg);
+            let hash = hasher.finalize();
+            println!("[CLIENT {}] SENDING PAYLOAD -> len: {}, hash: {:x}", i, msg.len(), hash);
+            // --- END DEBUG LOG ---
+
             tx_to_client_user
                 .send(StreamCommand::SendData(msg.clone()))
                 .await

@@ -105,7 +105,22 @@ impl ReliabilityLayer {
         start_time: Instant,
     ) -> Vec<Frame> {
         let mut frames = Vec::new();
-        while self.can_send_more(self.recv_buffer.window_size() as u32) {
+        // Calculate the sending permit before the loop to ensure atomicity for this call.
+        let permit = self
+            .congestion_control
+            .congestion_window()
+            .saturating_sub(self.send_buffer.in_flight_count() as u32);
+
+        for _ in 0..permit {
+            if self.is_send_buffer_empty() {
+                break;
+            }
+            // We re-check can_send_more inside the loop to respect the peer_recv_window,
+            // which is less likely to change mid-function but is still good practice.
+            if !self.can_send_more(self.recv_buffer.window_size() as u32) {
+                break;
+            }
+
             let Some(chunk) = self.send_buffer.create_chunk(self.config.max_payload_size) else {
                 break;
             };

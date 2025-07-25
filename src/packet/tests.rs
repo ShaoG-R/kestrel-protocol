@@ -9,7 +9,9 @@ use crate::packet::header;
 fn frame_roundtrip_test(frame: Frame) {
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);
-    let decoded_frame = Frame::decode(&buf).expect("decode should succeed");
+    let mut cursor = &buf[..];
+    let decoded_frame = Frame::decode(&mut cursor).expect("decode should succeed");
+    assert!(cursor.is_empty(), "decode should consume the entire buffer");
     assert_eq!(frame, decoded_frame);
 }
 
@@ -135,7 +137,9 @@ fn test_frame_decode_no_header_pollution() {
     original_frame.encode(&mut encoded_buffer);
 
     // 3. Decode the buffer back into a frame.
-    let decoded_frame = Frame::decode(&encoded_buffer).expect("Decoding should succeed");
+    let mut cursor = &encoded_buffer[..];
+    let decoded_frame = Frame::decode(&mut cursor).expect("Decoding should succeed");
+    assert!(cursor.is_empty(), "decode should consume the entire buffer for a single frame");
 
     // 4. Assert that the decoded frame is correct and the payload is not polluted.
     if let Frame::Push {

@@ -40,7 +40,8 @@ pub struct MockUdpSocket {
 impl AsyncUdpSocket for MockUdpSocket {
     async fn send_to(&self, buf: &[u8], _target: SocketAddr) -> Result<usize> {
         // A datagram might contain multiple frames. For test simplicity, we only check the first.
-        if let Some(frame) = Frame::decode(buf) {
+        let mut cursor = &buf[..];
+        if let Some(frame) = Frame::decode(&mut cursor) {
             if !(self.packet_tx_filter)(&frame) {
                 // Packet dropped by the filter.
                 return Ok(buf.len());
@@ -110,15 +111,35 @@ pub fn spawn_endpoint(
     let socket_clone = socket.clone();
     tokio::spawn(async move {
         while let Some(SenderTaskCommand::Send(cmd)) = sender_task_rx.recv().await {
-            let mut send_buf = Vec::new();
+            // We can't just encode all frames into one buffer because PUSH/ACK frames
+            // have variable length payloads, and our protocol doesn't include a length
+            // prefix for them. This means any PUSH or ACK frame *must* be the last
+            // frame in a datagram.
+            let mut current_datagram = bytes::BytesMut::new();
             for frame in cmd.frames {
-                frame.encode(&mut send_buf);
+                // If the current datagram is not empty and we are about to add a
+                // variable-length frame, we must send the current datagram first.
+                if !current_datagram.is_empty() {
+                    if matches!(&frame, Frame::Push {..} | Frame::Ack {..}) {
+                        // Send the datagram containing only fixed-length frames so far.
+                        socket_clone.send_to(&current_datagram, cmd.remote_addr).await.unwrap();
+                        current_datagram.clear();
+                    }
+                }
+
+                frame.encode(&mut current_datagram);
+
+                // If we just encoded a variable-length frame, we must send it now
+                // as its own datagram.
+                if matches!(&frame, Frame::Push {..} | Frame::Ack {..}) {
+                    socket_clone.send_to(&current_datagram, cmd.remote_addr).await.unwrap();
+                    current_datagram.clear();
+                }
             }
-            if !send_buf.is_empty() {
-                socket_clone
-                    .send_to(&send_buf, cmd.remote_addr)
-                    .await
-                    .unwrap();
+
+            // Send any remaining buffered frames (will only be fixed-length ones).
+            if !current_datagram.is_empty() {
+                socket_clone.send_to(&current_datagram, cmd.remote_addr).await.unwrap();
             }
         }
     });
@@ -129,9 +150,15 @@ pub fn spawn_endpoint(
         let mut recv_buf = [0u8; 2048];
         loop {
             if let Ok((len, src_addr)) = socket.recv_from(&mut recv_buf).await {
-                if let Some(frame) = Frame::decode(&recv_buf[..len]) {
-                    if tx_to_endpoint_network.send((frame, src_addr)).await.is_err() {
-                        break; // Endpoint closed
+                let mut cursor = &recv_buf[..len];
+                while !cursor.is_empty() {
+                    if let Some(frame) = Frame::decode(&mut cursor) {
+                        if tx_to_endpoint_network.send((frame, src_addr)).await.is_err() {
+                            break; // Endpoint closed
+                        }
+                    } else {
+                        // Could not decode further, stop processing this datagram.
+                        break;
                     }
                 }
             }

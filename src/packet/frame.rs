@@ -3,7 +3,7 @@
 
 use super::command;
 use super::header::{LongHeader, ShortHeader};
-use bytes::{BufMut, Bytes};
+use bytes::{Buf, BufMut, Bytes};
 
 /// A complete protocol frame that can be sent or received.
 /// 一个可以被发送或接收的完整协议帧。
@@ -54,66 +54,72 @@ pub enum Frame {
 }
 
 impl Frame {
-    /// 从缓冲区解码一个完整的帧。
-    /// Decodes a complete frame from a buffer.
+    /// Decodes a single frame from the front of a buffer cursor.
+    /// The cursor is advanced past the decoded frame.
     ///
-    /// The buffer is expected to contain exactly one UDP datagram's payload.
-    /// 缓冲区应包含一个完整的UDP数据报的载荷。
-    pub fn decode(mut buf: &[u8]) -> Option<Self> {
-        if buf.is_empty() {
+    /// 从缓冲区光标的前端解码单个帧。
+    /// 光标会前进到已解码帧之后。
+    pub fn decode(cursor: &mut &[u8]) -> Option<Self> {
+        if cursor.is_empty() {
             return None;
         }
 
-        // 偷窥第一个字节来决定是长头还是短头
         // Peek the first byte to decide between long and short header
-        let command = command::Command::from_u8(buf[0])?;
+        let command = command::Command::from_u8(cursor[0])?;
 
         if command.is_long_header() {
-            let header = LongHeader::decode(&mut buf)?;
-            let payload = Bytes::copy_from_slice(buf);
-            match header.command {
+            // Because Long-Header packets (SYN, SYN-ACK) have payloads that consume the
+            // rest of the datagram, they MUST be the only frame in the datagram.
+            let header = LongHeader::decode(cursor)?;
+            let payload = Bytes::copy_from_slice(*cursor);
+            cursor.advance(cursor.len());
+            return match header.command {
                 command::Command::Syn => Some(Frame::Syn { header, payload }),
                 command::Command::SynAck => Some(Frame::SynAck { header, payload }),
-                _ => None, // Unreachable, as is_long_header is checked
-            }
-        } else {
-            // 解码短头
-            // Decode the short header
-            let header = ShortHeader::decode(&mut buf)?;
+                _ => None,
+            };
+        }
 
-            match header.command {
-                command::Command::Push => {
-                    let payload = Bytes::copy_from_slice(buf);
-                    Some(Frame::Push { header, payload })
-                }
-                command::Command::Ack => {
-                    let payload = Bytes::copy_from_slice(buf);
-                    Some(Frame::Ack { header, payload })
-                }
-                command::Command::Ping => Some(Frame::Ping { header }),
-                command::Command::Fin => Some(Frame::Fin { header }),
-                command::Command::PathChallenge => {
-                    if buf.len() < 8 {
-                        return None;
-                    }
-                    let challenge_data = u64::from_be_bytes(buf[..8].try_into().ok()?);
-                    Some(Frame::PathChallenge {
-                        header,
-                        challenge_data,
-                    })
-                }
-                command::Command::PathResponse => {
-                    if buf.len() < 8 {
-                        return None;
-                    }
-                    let challenge_data = u64::from_be_bytes(buf[..8].try_into().ok()?);
-                    Some(Frame::PathResponse {
-                        header,
-                        challenge_data,
-                    })
-                }
-                _ => None, // 不应该是长头指令
+        // Short header frames can be coalesced.
+        let header = ShortHeader::decode(cursor)?;
+        match header.command {
+            // Frames with variable-length payloads MUST be the last frame in a datagram.
+            command::Command::Push => {
+                let payload = Bytes::copy_from_slice(*cursor);
+                cursor.advance(cursor.len());
+                Some(Frame::Push { header, payload })
             }
+            command::Command::Ack => {
+                let payload = Bytes::copy_from_slice(*cursor);
+                cursor.advance(cursor.len());
+                Some(Frame::Ack { header, payload })
+            }
+            // Frames with fixed-length or no payload can be followed by others.
+            command::Command::Ping => Some(Frame::Ping { header }),
+            command::Command::Fin => Some(Frame::Fin { header }),
+            command::Command::PathChallenge => {
+                if cursor.len() < 8 {
+                    return None;
+                }
+                let challenge_data = u64::from_be_bytes(cursor[..8].try_into().ok()?);
+                cursor.advance(8);
+                Some(Frame::PathChallenge {
+                    header,
+                    challenge_data,
+                })
+            }
+            command::Command::PathResponse => {
+                if cursor.len() < 8 {
+                    return None;
+                }
+                let challenge_data = u64::from_be_bytes(cursor[..8].try_into().ok()?);
+                cursor.advance(8);
+                Some(Frame::PathResponse {
+                    header,
+                    challenge_data,
+                })
+            }
+            _ => None, // Not a short header command, or is a long header one.
         }
     }
 

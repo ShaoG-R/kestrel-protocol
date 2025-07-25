@@ -58,15 +58,17 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                 // 2. Handle incoming UDP packets
                 Ok((len, remote_addr)) = self.socket.recv_from(&mut recv_buf) => {
                     debug!(len, addr = %remote_addr, "Received UDP datagram");
-                    let data = &recv_buf[..len];
-                    let frame = match Frame::decode(data) {
-                        Some(frame) => frame,
-                        None => {
-                            warn!(addr = %remote_addr, "Received an invalid packet");
-                            continue;
-                        }
-                    };
-                    self.dispatch_frame(frame, remote_addr).await;
+                    let mut cursor = &recv_buf[..len];
+                    while !cursor.is_empty() {
+                        let frame = match Frame::decode(&mut cursor) {
+                            Some(frame) => frame,
+                            None => {
+                                warn!(addr = %remote_addr, "Received an invalid or partially decoded packet");
+                                break; // Stop processing this datagram
+                            }
+                        };
+                        self.dispatch_frame(frame, remote_addr).await;
+                    }
                 }
                 else => break,
             }
