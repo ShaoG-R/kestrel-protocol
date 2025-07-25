@@ -26,6 +26,12 @@ pub enum Command {
     /// (Short Header) Keep-alive and network probing packet.
     /// (短头) 用于保活和网络探测的心跳包。
     Ping = 0x12,
+    /// Path challenge packet, for connection migration.
+    /// 路径验证请求，用于连接迁移。
+    PathChallenge = 0x13,
+    /// Path response packet, for connection migration.
+    /// 路径验证响应，用于连接迁移。
+    PathResponse = 0x14,
 }
 
 impl Command {
@@ -39,6 +45,8 @@ impl Command {
             0x10 => Some(Command::Push),
             0x11 => Some(Command::Ack),
             0x12 => Some(Command::Ping),
+            0x13 => Some(Command::PathChallenge),
+            0x14 => Some(Command::PathResponse),
             _ => None,
         }
     }
@@ -59,6 +67,8 @@ impl fmt::Display for Command {
             Command::Push => "PUSH",
             Command::Ack => "ACK",
             Command::Ping => "PING",
+            Command::PathChallenge => "PATH_CHALLENGE",
+            Command::PathResponse => "PATH_RESPONSE",
         };
         write!(f, "{}", s)
     }

@@ -39,6 +39,18 @@ pub enum Frame {
     /// A FIN frame to close a connection.
     /// 用于关闭连接的 FIN 帧。
     Fin { header: ShortHeader },
+    /// A path challenge packet for connection migration.
+    /// 用于连接迁移的路径质询包。
+    PathChallenge {
+        header: ShortHeader,
+        challenge_data: u64,
+    },
+    /// A path response packet for connection migration.
+    /// 用于连接迁移的路径响应包。
+    PathResponse {
+        header: ShortHeader,
+        challenge_data: u64,
+    },
 }
 
 impl Frame {
@@ -68,13 +80,38 @@ impl Frame {
             // 解码短头
             // Decode the short header
             let header = ShortHeader::decode(&mut buf)?;
-            let payload = Bytes::copy_from_slice(buf);
 
             match header.command {
-                command::Command::Push => Some(Frame::Push { header, payload }),
-                command::Command::Ack => Some(Frame::Ack { header, payload }),
+                command::Command::Push => {
+                    let payload = Bytes::copy_from_slice(buf);
+                    Some(Frame::Push { header, payload })
+                }
+                command::Command::Ack => {
+                    let payload = Bytes::copy_from_slice(buf);
+                    Some(Frame::Ack { header, payload })
+                }
                 command::Command::Ping => Some(Frame::Ping { header }),
                 command::Command::Fin => Some(Frame::Fin { header }),
+                command::Command::PathChallenge => {
+                    if buf.len() < 8 {
+                        return None;
+                    }
+                    let challenge_data = u64::from_be_bytes(buf[..8].try_into().ok()?);
+                    Some(Frame::PathChallenge {
+                        header,
+                        challenge_data,
+                    })
+                }
+                command::Command::PathResponse => {
+                    if buf.len() < 8 {
+                        return None;
+                    }
+                    let challenge_data = u64::from_be_bytes(buf[..8].try_into().ok()?);
+                    Some(Frame::PathResponse {
+                        header,
+                        challenge_data,
+                    })
+                }
                 _ => None, // 不应该是长头指令
             }
         }
@@ -106,6 +143,20 @@ impl Frame {
             Frame::Fin { header } => {
                 header.encode(buf);
             }
+            Frame::PathChallenge {
+                header,
+                challenge_data,
+            } => {
+                header.encode(buf);
+                buf.put_slice(&challenge_data.to_be_bytes());
+            }
+            Frame::PathResponse {
+                header,
+                challenge_data,
+            } => {
+                header.encode(buf);
+                buf.put_slice(&challenge_data.to_be_bytes());
+            }
         }
     }
 
@@ -117,7 +168,9 @@ impl Frame {
             Frame::Ack { header, .. } => Some(header.sequence_number),
             Frame::Ping { header } => Some(header.sequence_number),
             Frame::Fin { header } => Some(header.sequence_number),
-            _ => None,
+            Frame::PathChallenge { header, .. } => Some(header.sequence_number),
+            Frame::PathResponse { header, .. } => Some(header.sequence_number),
+            Frame::Syn { .. } | Frame::SynAck { .. } => None,
         }
     }
 

@@ -62,6 +62,17 @@ pub struct SendCommand {
     pub frames: Vec<Frame>,
 }
 
+/// Commands sent from an Endpoint to the main Socket task.
+///
+/// 从Endpoint发送到主Socket任务的命令。
+#[derive(Debug)]
+pub enum SocketCommand {
+    /// Requests the socket to update the address mapping for a connection.
+    ///
+    /// 请求套接字更新连接的地址映射。
+    UpdateAddr { cid: u32, new_addr: SocketAddr },
+}
+
 /// A listener for incoming reliable UDP connections.
 ///
 /// This is created by `ReliableUdpSocket::bind` and can be used to accept
@@ -92,6 +103,15 @@ impl ConnectionListener {
     }
 }
 
+/// Metadata associated with each connection managed by the `ReliableUdpSocket`.
+///
+/// 与每个由 `ReliableUdpSocket` 管理的连接相关联的元数据。
+struct ConnectionMeta {
+    /// The channel sender to the connection's `Endpoint` task.
+    /// 到连接 `Endpoint` 任务的通道发送端。
+    sender: mpsc::Sender<(Frame, SocketAddr)>,
+}
+
 /// A reliable UDP socket.
 ///
 /// This is the main entry point for the protocol. It is responsible for
@@ -102,16 +122,24 @@ impl ConnectionListener {
 /// 这是协议的主要入口点。它负责绑定一个UDP套接字并管理所有的连接。
 pub struct ReliableUdpSocket<S: AsyncUdpSocket> {
     socket: Arc<S>,
-    /// A map of all active connections, mapping a remote address to a sender
-    /// that can send frames to the connection's task.
-    /// 所有活动连接的映射，将远程地址映射到一个可以向连接任务发送帧的发送端。
-    connections: Arc<DashMap<SocketAddr, mpsc::Sender<Frame>>>,
+    /// A map from Connection ID to the connection's metadata.
+    /// This is the primary lookup for dispatching packets.
+    /// 从连接ID到连接元数据的映射。这是分发数据包的主要查找表。
+    connections: Arc<DashMap<u32, ConnectionMeta>>,
+    /// A map from remote `SocketAddr` to Connection ID.
+    /// This is a secondary lookup to quickly find a connection by its address.
+    /// 从远程 `SocketAddr` 到连接ID的映射。这是一个通过地址快速查找连接的辅助查找表。
+    addr_to_cid: Arc<DashMap<SocketAddr, u32>>,
     /// A sender to the central sending task.
     /// 到中央发送任务的发送端。
     send_tx: mpsc::Sender<SendCommand>,
     /// A sender for newly accepted connections.
     /// 用于新接受连接的发送端。
     accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
+    /// Sender for internal commands from Endpoints to the Socket task.
+    socket_command_tx: mpsc::Sender<SocketCommand>,
+    /// Receiver for internal commands. Used in the `run` loop.
+    socket_command_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<SocketCommand>>>,
 }
 
 impl ReliableUdpSocket<UdpSocket> {
@@ -126,7 +154,8 @@ impl ReliableUdpSocket<UdpSocket> {
     /// `ConnectionListener`。
     pub async fn bind(addr: SocketAddr) -> Result<(Self, ConnectionListener)> {
         let socket = UdpSocket::bind(addr).await?;
-        Self::with_socket(socket)
+        let (socket_handle, listener, _cmd_rx) = Self::with_socket(socket)?;
+        Ok((socket_handle, listener))
     }
 }
 
@@ -140,15 +169,25 @@ impl<S: AsyncUdpSocket> ReliableUdpSocket<S> {
     ///
     /// 返回一个用于管理连接的 `ReliableUdpSocket` 和一个用于接受连接的
     /// `ConnectionListener`。
-    pub fn with_socket(socket: S) -> Result<(Self, ConnectionListener)> {
+    pub fn with_socket(
+        socket: S,
+    ) -> Result<(
+        Self,
+        ConnectionListener,
+        mpsc::Receiver<SocketCommand>,
+    )> {
         let socket = Arc::new(socket);
         let connections = Arc::new(DashMap::new());
+        let addr_to_cid = Arc::new(DashMap::new());
 
         // Create a channel for sending packets.
         let (send_tx, send_rx) = mpsc::channel::<SendCommand>(1024);
 
         // Create a channel for accepting new connections.
         let (accept_tx, accept_rx) = mpsc::channel(128);
+
+        // Create a channel for internal socket commands.
+        let (socket_command_tx, socket_command_rx) = mpsc::channel(128);
 
         // Spawn the sender task.
         let socket_clone = socket.clone();
@@ -158,12 +197,18 @@ impl<S: AsyncUdpSocket> ReliableUdpSocket<S> {
         let socket_handle = Self {
             socket,
             connections,
+            addr_to_cid,
             send_tx,
             accept_tx,
+            socket_command_tx,
+            socket_command_rx: Arc::new(tokio::sync::Mutex::new(socket_command_rx)),
         };
         let listener = ConnectionListener { accept_rx };
 
-        Ok((socket_handle, listener))
+        // The raw receiver is returned here only for the `bind` function to discard it.
+        // The `run` loop will use the mutex-wrapped one in `self`.
+        let (_, new_rx) = mpsc::channel(1);
+        Ok((socket_handle, listener, new_rx))
     }
 
     /// Establishes a new reliable connection to the given remote address.
@@ -217,7 +262,10 @@ impl<S: AsyncUdpSocket> ReliableUdpSocket<S> {
 
         let local_cid = rand::random();
 
-        let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
+        let (tx_to_endpoint, rx_from_socket): (
+            mpsc::Sender<(Frame, SocketAddr)>,
+            mpsc::Receiver<(Frame, SocketAddr)>,
+        ) = mpsc::channel(128);
 
         // Create a new Endpoint and get the stream handles
         let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) = Endpoint::new_client(
@@ -226,19 +274,26 @@ impl<S: AsyncUdpSocket> ReliableUdpSocket<S> {
             local_cid,
             rx_from_socket,
             self.send_tx.clone(),
+            self.socket_command_tx.clone(),
             initial_data,
         );
 
         // Spawn a new task for the connection to run in.
         tokio::spawn(async move {
-            info!(addr = %remote_addr, "Spawning new endpoint task for outbound connection");
+            info!(addr = %remote_addr, cid = %local_cid, "Spawning new endpoint task for outbound connection");
             if let Err(e) = endpoint.run().await {
-                error!(addr = %remote_addr, "Endpoint closed with error: {}", e);
+                error!(addr = %remote_addr, cid = %local_cid, "Endpoint closed with error: {}", e);
             }
         });
 
         // Insert the sender into the map so that incoming packets can be routed.
-        self.connections.insert(remote_addr, tx_to_endpoint);
+        self.connections.insert(
+            local_cid,
+            ConnectionMeta {
+                sender: tx_to_endpoint,
+            },
+        );
+        self.addr_to_cid.insert(remote_addr, local_cid);
 
         // Create and return the user-facing Stream handle
         let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
@@ -252,108 +307,151 @@ impl<S: AsyncUdpSocket> ReliableUdpSocket<S> {
     /// 这个方法应该在一个单独的任务中被spawn。
     pub async fn run(&self) {
         let mut recv_buf = [0u8; 2048]; // Max UDP packet size
+        let mut command_rx = self.socket_command_rx.lock().await;
 
         loop {
-            let (len, remote_addr) = match self.socket.recv_from(&mut recv_buf).await {
-                Ok(val) => val,
-                Err(e) => {
-                    // Log the error but continue running. A single recv error is not fatal.
-                    error!("Failed to receive from socket: {}", e);
-                    continue;
+            tokio::select! {
+                // 1. Handle incoming UDP packets
+                Ok((len, remote_addr)) = self.socket.recv_from(&mut recv_buf) => {
+                    debug!(len, addr = %remote_addr, "Received UDP datagram");
+                    let data = &recv_buf[..len];
+                    let frame = match Frame::decode(data) {
+                        Some(frame) => frame,
+                        None => {
+                            warn!(addr = %remote_addr, "Received an invalid packet");
+                            continue;
+                        }
+                    };
+                    self.dispatch_frame(frame, remote_addr).await;
                 }
-            };
-            debug!(len, addr = %remote_addr, "Received UDP datagram");
+                // 2. Handle internal commands from Endpoints
+                Some(command) = command_rx.recv() => {
+                    self.handle_socket_command(command).await;
+                }
+                else => break,
+            }
+        }
+    }
 
-            let data = &recv_buf[..len];
-            let frame = match Frame::decode(data) {
-                Some(frame) => frame,
-                None => {
-                    // Log and drop invalid packets.
-                    warn!(addr = %remote_addr, "Received an invalid packet");
-                    continue;
+    /// Dispatches a received frame to the appropriate connection task.
+    async fn dispatch_frame(&self, frame: Frame, remote_addr: SocketAddr) {
+        // 优先通过 SocketAddr 查找连接
+        if let Some(cid_ref) = self.addr_to_cid.get(&remote_addr) {
+            let cid = *cid_ref;
+            if let Some(meta) = self.connections.get(&cid) {
+                if meta.sender.send((frame, remote_addr)).await.is_err() {
+                    // The endpoint task has died. Remove it from both maps.
+                    debug!(addr = %remote_addr, cid = %cid, "Endpoint task died. Removing connection.");
+                    self.connections.remove(&cid);
+                    self.addr_to_cid.remove(&remote_addr);
                 }
-            };
+                return;
+            }
+        }
 
-            // 如果我们已经有这个连接的记录，直接发送
-            if let Some(tx) = self.connections.get(&remote_addr) {
-                if tx.send(frame).await.is_err() {
-                    // This means the connection task has died. Remove it.
-                    // 这意味着连接任务已经死亡。移除它。
-                    debug!(addr = %remote_addr, "Connection task appears to have died. Removing.");
-                    self.connections.remove(&remote_addr);
-                }
-                continue;
+        // A new connection can only be initiated with a SYN packet from an unknown peer.
+        // 只有来自未知对端的SYN包才能发起新连接。
+        if let Frame::Syn { header, .. } = &frame {
+            // TODO: Allow server-side configuration
+            let config = Config::default();
+
+            // Check for version compatibility.
+            if header.protocol_version != config.protocol_version {
+                warn!(
+                    addr = %remote_addr,
+                    client_version = header.protocol_version,
+                    server_version = config.protocol_version,
+                    "Dropping SYN with incompatible protocol version."
+                );
+                return;
             }
 
-            // A new connection can only be initiated with a SYN packet from an unknown peer.
-            // 只有来自未知对端的SYN包才能发起新连接。
-            if let Frame::Syn { header, .. } = &frame {
-                // TODO: Allow server-side configuration
-                let config = Config::default();
+            info!(addr = %remote_addr, "Accepting new connection attempt.");
+            // The client's CID is in the source_cid field. The destination is our future CID.
+            let peer_cid = header.source_cid;
+            let local_cid = rand::random();
+            let (tx_to_endpoint, rx_from_socket): (
+                mpsc::Sender<(Frame, SocketAddr)>,
+                mpsc::Receiver<(Frame, SocketAddr)>,
+            ) = mpsc::channel(128);
 
-                // Check for version compatibility.
-                if header.protocol_version != config.protocol_version {
-                    warn!(
-                        addr = %remote_addr,
-                        client_version = header.protocol_version,
-                        server_version = config.protocol_version,
-                        "Dropping SYN with incompatible protocol version."
-                    );
-                    continue;
-                }
-
-                info!(addr = %remote_addr, "Accepting new connection attempt.");
-                // The client's CID is in the source_cid field. The destination is our future CID.
-                let peer_cid = header.source_cid;
-                let local_cid = rand::random();
-                let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
-
-                let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
-                    Endpoint::new_server(
-                        config,
-                        remote_addr,
-                        local_cid,
-                        peer_cid,
-                        rx_from_socket,
-                        self.send_tx.clone(),
-                    );
-
-                // Spawn a new task for the connection to run in.
-                tokio::spawn(async move {
-                    info!(addr = %remote_addr, "Spawning new endpoint task for inbound connection");
-                    if let Err(e) = endpoint.run().await {
-                        error!(addr = %remote_addr, "Endpoint closed with error: {}", e);
-                    }
-                });
-
-                // Insert into map so future packets are routed.
-                self.connections
-                    .insert(remote_addr, tx_to_endpoint.clone());
-
-                // Send the initial frame to the newly created connection.
-                if tx_to_endpoint.send(frame.clone()).await.is_err() {
-                    // Worker died immediately.
-                    self.connections.remove(&remote_addr);
-                    warn!(addr = %remote_addr, "Failed to send initial SYN to newly created worker.");
-                    continue;
-                }
-
-                // Create the stream handle and send it to the user calling accept().
-                let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
-                if self.accept_tx.send((stream, remote_addr)).await.is_err() {
-                    // No one is listening for new connections.
-                    info!(
-                        "No active listener on accept(), dropping new connection from {}",
-                        remote_addr
-                    );
-                    self.connections.remove(&remote_addr); // Clean up
-                }
-            } else {
-                // Ignore packets from unknown addresses that are not SYN.
-                debug!(
-                    "Ignoring non-SYN packet from unknown address {}: {:?}",
-                    remote_addr, frame
+            let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
+                Endpoint::new_server(
+                    config,
+                    remote_addr,
+                    local_cid,
+                    peer_cid,
+                    rx_from_socket,
+                    self.send_tx.clone(),
+                    self.socket_command_tx.clone(),
                 );
+
+            // Spawn a new task for the connection to run in.
+            tokio::spawn(async move {
+                info!(addr = %remote_addr, cid = %local_cid, "Spawning new endpoint task for inbound connection");
+                if let Err(e) = endpoint.run().await {
+                    error!(addr = %remote_addr, cid = %local_cid, "Endpoint closed with error: {}", e);
+                }
+            });
+
+            // Insert into map so future packets are routed.
+            self.connections.insert(
+                local_cid,
+                ConnectionMeta {
+                    sender: tx_to_endpoint.clone(),
+                },
+            );
+            self.addr_to_cid.insert(remote_addr, local_cid);
+
+            // Send the initial frame to the newly created connection.
+            if tx_to_endpoint.send((frame.clone(), remote_addr)).await.is_err() {
+                // Worker died immediately. Clean up from both maps.
+                self.connections.remove(&local_cid);
+                self.addr_to_cid.remove(&remote_addr);
+                warn!(addr = %remote_addr, "Failed to send initial SYN to newly created worker.");
+                return;
+            }
+
+            // Create the stream handle and send it to the user calling accept().
+            let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
+            if self.accept_tx.send((stream, remote_addr)).await.is_err() {
+                // No one is listening for new connections. Clean up.
+                info!(
+                    "No active listener on accept(), dropping new connection from {}",
+                    remote_addr
+                );
+                self.connections.remove(&local_cid);
+                self.addr_to_cid.remove(&remote_addr);
+            }
+        } else {
+            // Ignore packets from unknown addresses that are not SYN.
+            // This is where connection migration logic will eventually go.
+            debug!(
+                "Ignoring non-SYN packet from unknown address {}: {:?}",
+                remote_addr, frame
+            );
+        }
+    }
+
+    /// Handles an internal command from an endpoint.
+    async fn handle_socket_command(&self, command: SocketCommand) {
+        match command {
+            SocketCommand::UpdateAddr { cid, new_addr } => {
+                info!(cid = %cid, new_addr = %new_addr, "Updating connection address");
+                // To prevent race conditions, we need to find the old address to remove it.
+                // We iterate through `addr_to_cid` to find the address associated with the given cid.
+                let mut old_addr = None;
+                for entry in self.addr_to_cid.iter() {
+                    if *entry.value() == cid {
+                        old_addr = Some(*entry.key());
+                        break;
+                    }
+                }
+
+                if let Some(addr) = old_addr {
+                    self.addr_to_cid.remove(&addr);
+                }
+                self.addr_to_cid.insert(new_addr, cid);
             }
         }
     }
@@ -491,7 +589,8 @@ mod tests {
         );
 
         // 2. Setup the ReliableUdpSocket with the mock
-        let (socket, mut listener) = ReliableUdpSocket::with_socket(mock_socket).unwrap();
+        let (socket, mut listener, _cmd_rx) =
+            ReliableUdpSocket::with_socket(mock_socket).unwrap();
         let socket_arc = Arc::new(socket);
 
         // 3. Spawn the listener's run loop

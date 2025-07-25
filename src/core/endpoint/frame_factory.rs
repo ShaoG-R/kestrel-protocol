@@ -92,6 +92,48 @@ pub(super) fn create_fin_frame(
     Frame::Fin { header: fin_header }
 }
 
+/// Creates a PATH_CHALLENGE frame.
+pub(crate) fn create_path_challenge_frame(
+    peer_cid: u32,
+    sequence_number: u32,
+    start_time: Instant,
+    challenge_data: u64,
+) -> Frame {
+    let header = ShortHeader {
+        command: Command::PathChallenge,
+        connection_id: peer_cid,
+        recv_window_size: 0, // Not relevant
+        timestamp: Instant::now().duration_since(start_time).as_millis() as u32,
+        sequence_number,
+        recv_next_sequence: 0, // Not relevant
+    };
+    Frame::PathChallenge {
+        header,
+        challenge_data,
+    }
+}
+
+/// Creates a PATH_RESPONSE frame.
+pub(crate) fn create_path_response_frame(
+    peer_cid: u32,
+    sequence_number: u32,
+    start_time: Instant,
+    challenge_data: u64,
+) -> Frame {
+    let header = ShortHeader {
+        command: Command::PathResponse,
+        connection_id: peer_cid,
+        recv_window_size: 0, // Not relevant
+        timestamp: Instant::now().duration_since(start_time).as_millis() as u32,
+        sequence_number,
+        recv_next_sequence: 0, // Not relevant
+    };
+    Frame::PathResponse {
+        header,
+        challenge_data,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,6 +2,8 @@
 //!
 //! 定义端点的连接状态机。
 
+use std::net::SocketAddr;
+
 /// The state of a connection.
 /// 连接的状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,7 +19,11 @@ pub enum ConnectionState {
     /// The connection is fully established and can send/receive data.
     /// 连接已完全建立，可以发送/接收数据。
     Established,
-    
+    /// The connection is validating a new path.
+    ValidatingPath {
+        new_addr: SocketAddr,
+        challenge_data: u64,
+    },
     /// The endpoint has initiated closing and sent a FIN.
     /// 端点已启动关闭过程并发送了FIN。
     Closing,

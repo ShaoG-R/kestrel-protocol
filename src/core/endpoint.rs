@@ -17,7 +17,7 @@ use crate::{
         frame::Frame,
         sack::decode_sack_ranges,
     },
-    socket::SendCommand,
+    socket::{SendCommand, SocketCommand},
 };
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -47,8 +47,9 @@ pub struct Endpoint {
     peer_recv_window: u32,
     config: Config,
     last_recv_time: Instant,
-    receiver: mpsc::Receiver<Frame>,
+    receiver: mpsc::Receiver<(Frame, SocketAddr)>,
     sender: mpsc::Sender<SendCommand>,
+    socket_command_tx: mpsc::Sender<SocketCommand>,
     rx_from_stream: mpsc::Receiver<StreamCommand>,
     tx_to_stream: Option<mpsc::Sender<Vec<Bytes>>>,
 }
@@ -59,8 +60,9 @@ impl Endpoint {
         config: Config,
         remote_addr: SocketAddr,
         local_cid: u32,
-        receiver: mpsc::Receiver<Frame>,
+        receiver: mpsc::Receiver<(Frame, SocketAddr)>,
         sender: mpsc::Sender<SendCommand>,
+        socket_command_tx: mpsc::Sender<SocketCommand>,
         initial_data: Option<Bytes>,
     ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>) {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
@@ -86,6 +88,7 @@ impl Endpoint {
             last_recv_time: now,
             receiver,
             sender,
+            socket_command_tx,
             rx_from_stream,
             tx_to_stream: Some(tx_to_stream),
         };
@@ -99,8 +102,9 @@ impl Endpoint {
         remote_addr: SocketAddr,
         local_cid: u32,
         peer_cid: u32,
-        receiver: mpsc::Receiver<Frame>,
+        receiver: mpsc::Receiver<(Frame, SocketAddr)>,
         sender: mpsc::Sender<SendCommand>,
+        socket_command_tx: mpsc::Sender<SocketCommand>,
     ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>) {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
@@ -121,6 +125,7 @@ impl Endpoint {
             last_recv_time: now,
             receiver,
             sender,
+            socket_command_tx,
             rx_from_stream,
             tx_to_stream: Some(tx_to_stream),
         };
@@ -148,12 +153,12 @@ impl Endpoint {
                 biased; // Prioritize incoming packets and user commands
 
                 // 1. Handle frames from the network
-                Some(frame) = self.receiver.recv() => {
-                    self.handle_frame(frame).await?;
+                Some((frame, src_addr)) = self.receiver.recv() => {
+                    self.handle_frame(frame, src_addr).await?;
                     // After handling one frame, try to drain any other pending frames
                     // to process them in a batch.
-                    while let Ok(frame) = self.receiver.try_recv() {
-                        self.handle_frame(frame).await?;
+                    while let Ok((frame, src_addr)) = self.receiver.try_recv() {
+                        self.handle_frame(frame, src_addr).await?;
                     }
                 }
 
@@ -205,8 +210,29 @@ impl Endpoint {
         Ok(())
     }
     
-    async fn handle_frame(&mut self, frame: Frame) -> Result<()> {
+    async fn handle_frame(&mut self, frame: Frame, src_addr: SocketAddr) -> Result<()> {
         self.last_recv_time = Instant::now();
+        
+        // --- Path Migration Logic ---
+        if src_addr != self.remote_addr && self.state == ConnectionState::Established {
+            // Address has changed, initiate path validation.
+            let challenge_data = rand::random();
+            self.state = ConnectionState::ValidatingPath {
+                new_addr: src_addr,
+                challenge_data,
+            };
+            let challenge_frame = create_path_challenge_frame(
+                self.peer_cid,
+                self.reliability.next_sequence_number(),
+                self.start_time,
+                challenge_data,
+            );
+            self.send_frame_to(challenge_frame, src_addr).await?;
+            // From now on, we will continue processing packets from the old address,
+            // but will not send anything other than path validation packets to the new address.
+        }
+        // --- End Path Migration Logic ---
+
         match frame {
             Frame::Syn { .. } => {
                 // This is now primarily handled by the Socket creating the Endpoint.
@@ -273,6 +299,39 @@ impl Endpoint {
                 // Transition to FinWait to allow sending any remaining data before closing.
                 if self.state == ConnectionState::Established {
                     self.state = ConnectionState::FinWait;
+                }
+            }
+            Frame::PathChallenge { header, challenge_data } => {
+                let response_frame = create_path_response_frame(
+                    self.peer_cid,
+                    header.sequence_number, // Echo the sequence number
+                    self.start_time,
+                    challenge_data,
+                );
+                // The response MUST be sent back to the address the challenge came from.
+                self.send_frame_to(response_frame, src_addr).await?;
+            }
+            Frame::PathResponse { header: _, challenge_data } => {
+                if let ConnectionState::ValidatingPath { new_addr, challenge_data: expected_challenge } = self.state {
+                    if src_addr == new_addr && challenge_data == expected_challenge {
+                        // Path validation successful!
+                        info!(cid = self.local_cid, old_addr = %self.remote_addr, new_addr = %new_addr, "Path validation successful, migrating connection.");
+                        let _old_addr = self.remote_addr;
+                        self.remote_addr = new_addr;
+                        self.state = ConnectionState::Established;
+
+                        // Notify ReliableUdpSocket to update the addr_to_cid map.
+                        let _ = self
+                            .socket_command_tx
+                            .send(SocketCommand::UpdateAddr {
+                                cid: self.local_cid,
+                                new_addr,
+                            })
+                            .await;
+                    } else {
+                        // Invalid path response, ignore it.
+                        info!(cid = self.local_cid, "Received invalid PathResponse, ignoring.");
+                    }
                 }
             }
             _ => {}
@@ -385,6 +444,14 @@ impl Endpoint {
         let cmd = SendCommand {
             remote_addr: self.remote_addr,
             frames,
+        };
+        self.sender.send(cmd).await.map_err(|_| Error::ChannelClosed)
+    }
+
+    async fn send_frame_to(&self, frame: Frame, remote_addr: SocketAddr) -> Result<()> {
+        let cmd = SendCommand {
+            remote_addr,
+            frames: vec![frame],
         };
         self.sender.send(cmd).await.map_err(|_| Error::ChannelClosed)
     }

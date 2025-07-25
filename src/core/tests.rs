@@ -4,7 +4,7 @@ use super::endpoint::{Endpoint, StreamCommand};
 use crate::config::Config;
 use crate::packet::frame::Frame;
 use crate::packet::header::ShortHeader;
-use crate::socket::SendCommand;
+use crate::socket::{SendCommand, SocketCommand};
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -13,13 +13,15 @@ use tokio::sync::mpsc;
 /// A test harness that wraps an `Endpoint` and its communication channels.
 struct TestHarness {
     /// To simulate frames coming from the network into the Endpoint.
-    tx_to_endpoint_network: mpsc::Sender<Frame>,
+    tx_to_endpoint_network: mpsc::Sender<(Frame, SocketAddr)>,
     /// To capture frames/commands sent from the Endpoint to the network.
     rx_from_endpoint_network: mpsc::Receiver<SendCommand>,
     /// To simulate the user application sending commands (e.g., data) to the Endpoint.
     tx_to_endpoint_user: mpsc::Sender<StreamCommand>,
     /// To capture reassembled data that the Endpoint makes available to the user application.
     rx_from_endpoint_user: mpsc::Receiver<Vec<Bytes>>,
+    /// The remote address of the peer.
+    remote_addr: SocketAddr,
 }
 
 /// Sets up an `Endpoint` with a given config and returns a harness to interact with it.
@@ -29,6 +31,7 @@ fn setup_endpoint_with_config(config: Config, initial_data: Option<Bytes>) -> Te
 
     let (tx_to_endpoint_network, rx_from_socket) = mpsc::channel(128);
     let (tx_from_endpoint_network, rx_from_endpoint_network) = mpsc::channel(128);
+    let (socket_command_tx, _socket_command_rx) = mpsc::channel::<SocketCommand>(128);
 
     let (mut endpoint, tx_to_endpoint_user, rx_from_endpoint_user) = Endpoint::new_client(
         config,
@@ -36,6 +39,7 @@ fn setup_endpoint_with_config(config: Config, initial_data: Option<Bytes>) -> Te
         local_cid,
         rx_from_socket,
         tx_from_endpoint_network,
+        socket_command_tx,
         initial_data,
     );
 
@@ -48,6 +52,7 @@ fn setup_endpoint_with_config(config: Config, initial_data: Option<Bytes>) -> Te
         rx_from_endpoint_network,
         tx_to_endpoint_user,
         rx_from_endpoint_user,
+        remote_addr,
     }
 }
 
@@ -86,7 +91,7 @@ async fn establish_connection(harness: &mut TestHarness) -> u32 {
     };
     harness
         .tx_to_endpoint_network
-        .send(syn_ack_frame)
+        .send((syn_ack_frame, harness.remote_addr))
         .await
         .unwrap();
 
@@ -170,12 +175,12 @@ async fn test_endpoint_receive_data_and_send_ack() {
 
     harness
         .tx_to_endpoint_network
-        .send(create_push(0, b"part1"))
+        .send((create_push(0, b"part1"), harness.remote_addr))
         .await
         .unwrap();
     harness
         .tx_to_endpoint_network
-        .send(create_push(1, b"part2"))
+        .send((create_push(1, b"part2"), harness.remote_addr))
         .await
         .unwrap();
 
@@ -310,7 +315,7 @@ async fn test_endpoint_fast_retransmission() {
     // 1. ACK packet 0. This establishes the cumulative ack point at 1.
     harness
         .tx_to_endpoint_network
-        .send(create_ack(1, 0))
+        .send((create_ack(1, 0), harness.remote_addr))
         .await
         .unwrap();
 
@@ -318,17 +323,17 @@ async fn test_endpoint_fast_retransmission() {
     //    This should trigger a fast retransmit for packet 1.
     harness
         .tx_to_endpoint_network
-        .send(create_ack(1, 2))
+        .send((create_ack(1, 2), harness.remote_addr))
         .await
         .unwrap();
     harness
         .tx_to_endpoint_network
-        .send(create_ack(1, 3))
+        .send((create_ack(1, 3), harness.remote_addr))
         .await
         .unwrap();
     harness
         .tx_to_endpoint_network
-        .send(create_ack(1, 4))
+        .send((create_ack(1, 4), harness.remote_addr))
         .await
         .unwrap();
 
@@ -346,4 +351,91 @@ async fn test_endpoint_fast_retransmission() {
         retransmit_seq, sent_seqs[1],
         "Should have retransmitted packet with seq 1"
     );
+}
+
+#[tokio::test]
+async fn test_connection_migration() {
+    let mut harness = setup_endpoint();
+    let _server_cid = establish_connection(&mut harness).await;
+
+    // 1. Simulate the client's address changing.
+    let new_addr: SocketAddr = "127.0.0.1:5678".parse().unwrap();
+    assert_ne!(new_addr, harness.remote_addr);
+
+    // 2. Send a PUSH packet from the new address, which will trigger path validation.
+    let create_push = |seq: u32, data: &'static [u8]| -> Frame {
+        let push_header = ShortHeader {
+            command: crate::packet::command::Command::Push,
+            connection_id: 1, // Our chosen CID
+            sequence_number: seq,
+            recv_window_size: 1024,
+            timestamp: 0,
+            recv_next_sequence: 1,
+        };
+        Frame::Push {
+            header: push_header,
+            payload: Bytes::from_static(data),
+        }
+    };
+    harness
+        .tx_to_endpoint_network
+        .send((create_push(1, b"data from new address"), new_addr))
+        .await
+        .unwrap();
+
+    // 3. The endpoint should respond with two packets in some order:
+    //    - A PATH_CHALLENGE to the new address.
+    //    - An ACK for the PUSH, sent to the old, validated address.
+    let cmd1 = harness.rx_from_endpoint_network.recv().await.unwrap();
+    let cmd2 = harness.rx_from_endpoint_network.recv().await.unwrap();
+
+    let (challenge_cmd, ack_cmd) = if matches!(cmd1.frames[0], Frame::PathChallenge { .. }) {
+        (cmd1, cmd2)
+    } else {
+        (cmd2, cmd1)
+    };
+
+    // Verify the PATH_CHALLENGE packet
+    assert_eq!(challenge_cmd.remote_addr, new_addr, "Challenge should be sent to the new address");
+    let challenge_data = if let Frame::PathChallenge { challenge_data, .. } = challenge_cmd.frames[0] {
+        challenge_data
+    } else {
+        panic!("Expected a PathChallenge frame, got {:?}", challenge_cmd.frames[0]);
+    };
+
+    // Verify the ACK packet
+    assert_eq!(ack_cmd.remote_addr, harness.remote_addr, "ACK should be sent to the old address");
+    assert!(matches!(ack_cmd.frames[0], Frame::Ack { .. }));
+
+    // 4. Simulate the client sending a PATH_RESPONSE back.
+    let response_frame = crate::core::endpoint::frame_factory::create_path_response_frame(
+        1, // Our CID
+        999, // Sequence number is not critical for this test
+        tokio::time::Instant::now(), // Timestamp also not critical
+        challenge_data,
+    );
+    harness
+        .tx_to_endpoint_network
+        .send((response_frame, new_addr))
+        .await
+        .unwrap();
+
+    // 5. The endpoint should now be migrated. To confirm, send data from the user side
+    //    and verify it gets sent to the new address.
+    harness
+        .tx_to_endpoint_user
+        .send(StreamCommand::SendData(Bytes::from_static(b"data after migration")))
+        .await
+        .unwrap();
+    
+    let push_after_migration_cmd = tokio::time::timeout(
+        Duration::from_millis(100),
+        harness.rx_from_endpoint_network.recv(),
+    )
+    .await
+    .expect("should receive a PUSH after migration")
+    .unwrap();
+    
+    assert_eq!(push_after_migration_cmd.remote_addr, new_addr, "PUSH should now be sent to the new, migrated address");
+    assert!(matches!(push_after_migration_cmd.frames[0], Frame::Push { .. }));
 } 
