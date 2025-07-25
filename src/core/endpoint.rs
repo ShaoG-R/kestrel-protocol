@@ -17,7 +17,7 @@ use crate::{
         frame::Frame,
         sack::decode_sack_ranges,
     },
-    socket::{SendCommand, SocketCommand},
+    socket::{AsyncUdpSocket, SendCommand, SenderTaskCommand, SocketCommand},
 };
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -41,7 +41,7 @@ pub enum StreamCommand {
 }
 
 /// Represents one end of a reliable connection.
-pub struct Endpoint {
+pub struct Endpoint<S: AsyncUdpSocket> {
     remote_addr: SocketAddr,
     local_cid: u32,
     peer_cid: u32,
@@ -52,20 +52,20 @@ pub struct Endpoint {
     config: Config,
     last_recv_time: Instant,
     receiver: mpsc::Receiver<(Frame, SocketAddr)>,
-    sender: mpsc::Sender<SendCommand>,
+    sender: mpsc::Sender<SenderTaskCommand<S>>,
     socket_command_tx: mpsc::Sender<SocketCommand>,
     rx_from_stream: mpsc::Receiver<StreamCommand>,
     tx_to_stream: Option<mpsc::Sender<Vec<Bytes>>>,
 }
 
-impl Endpoint {
+impl<S: AsyncUdpSocket> Endpoint<S> {
     /// Creates a new `Endpoint` for the client-side.
     pub fn new_client(
         config: Config,
         remote_addr: SocketAddr,
         local_cid: u32,
         receiver: mpsc::Receiver<(Frame, SocketAddr)>,
-        sender: mpsc::Sender<SendCommand>,
+        sender: mpsc::Sender<SenderTaskCommand<S>>,
         socket_command_tx: mpsc::Sender<SocketCommand>,
         initial_data: Option<Bytes>,
     ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>) {
@@ -107,7 +107,7 @@ impl Endpoint {
         local_cid: u32,
         peer_cid: u32,
         receiver: mpsc::Receiver<(Frame, SocketAddr)>,
-        sender: mpsc::Sender<SendCommand>,
+        sender: mpsc::Sender<SenderTaskCommand<S>>,
         socket_command_tx: mpsc::Sender<SocketCommand>,
     ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>) {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
@@ -489,7 +489,10 @@ impl Endpoint {
             remote_addr: self.remote_addr,
             frames,
         };
-        self.sender.send(cmd).await.map_err(|_| Error::ChannelClosed)
+        self.sender
+            .send(SenderTaskCommand::Send(cmd))
+            .await
+            .map_err(|_| Error::ChannelClosed)
     }
 
     async fn send_frame_to(&self, frame: Frame, remote_addr: SocketAddr) -> Result<()> {
@@ -497,6 +500,9 @@ impl Endpoint {
             remote_addr,
             frames: vec![frame],
         };
-        self.sender.send(cmd).await.map_err(|_| Error::ChannelClosed)
+        self.sender
+            .send(SenderTaskCommand::Send(cmd))
+            .await
+            .map_err(|_| Error::ChannelClosed)
     }
 }

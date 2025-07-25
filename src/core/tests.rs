@@ -4,7 +4,7 @@ use super::endpoint::{Endpoint, StreamCommand};
 use crate::config::Config;
 use crate::packet::frame::Frame;
 use crate::packet::header::ShortHeader;
-use crate::socket::{SendCommand, SocketCommand};
+use crate::socket::{ReliableUdpSocket, SenderTaskCommand, SocketCommand};
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -15,7 +15,7 @@ struct TestHarness {
     /// To simulate frames coming from the network into the Endpoint.
     tx_to_endpoint_network: mpsc::Sender<(Frame, SocketAddr)>,
     /// To capture frames/commands sent from the Endpoint to the network.
-    rx_from_endpoint_network: mpsc::Receiver<SendCommand>,
+    rx_from_endpoint_network: mpsc::Receiver<SenderTaskCommand<ReliableUdpSocket>>,
     /// To simulate the user application sending commands (e.g., data) to the Endpoint.
     tx_to_endpoint_user: mpsc::Sender<StreamCommand>,
     /// To capture reassembled data that the Endpoint makes available to the user application.

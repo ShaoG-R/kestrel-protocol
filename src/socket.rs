@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
@@ -60,6 +60,17 @@ pub struct SendCommand {
     /// The frames to send.
     /// 要发送的帧。
     pub frames: Vec<Frame>,
+}
+
+/// Commands for the central socket sender task.
+///
+/// 用于中央套接字发送任务的命令。
+#[derive(Debug)]
+pub enum SenderTaskCommand<S: AsyncUdpSocket> {
+    /// Send a batch of frames to a remote address.
+    Send(SendCommand),
+    /// Swap the underlying socket.
+    SwapSocket(Arc<S>),
 }
 
 /// Commands sent from an Endpoint to the main Socket task.
@@ -121,7 +132,7 @@ struct ConnectionMeta {
 ///
 /// 这是协议的主要入口点。它负责绑定一个UDP套接字并管理所有的连接。
 pub struct ReliableUdpSocket<S: AsyncUdpSocket> {
-    socket: Arc<S>,
+    socket: Arc<RwLock<Arc<S>>>,
     /// A map from Connection ID to the connection's metadata.
     /// This is the primary lookup for dispatching packets.
     /// 从连接ID到连接元数据的映射。这是分发数据包的主要查找表。
@@ -132,7 +143,7 @@ pub struct ReliableUdpSocket<S: AsyncUdpSocket> {
     addr_to_cid: Arc<DashMap<SocketAddr, u32>>,
     /// A sender to the central sending task.
     /// 到中央发送任务的发送端。
-    send_tx: mpsc::Sender<SendCommand>,
+    send_tx: mpsc::Sender<SenderTaskCommand<S>>,
     /// A sender for newly accepted connections.
     /// 用于新接受连接的发送端。
     accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
@@ -156,6 +167,33 @@ impl ReliableUdpSocket<UdpSocket> {
         let socket = UdpSocket::bind(addr).await?;
         let (socket_handle, listener, _cmd_rx) = Self::with_socket(socket)?;
         Ok((socket_handle, listener))
+    }
+
+    /// Rebinds the underlying UDP socket to a new local address.
+    ///
+    /// This allows for changing the local port or IP address while keeping existing
+    /// connections alive.
+    ///
+    /// 将底层UDP套接字重新绑定到一个新的本地地址。
+    ///
+    /// 这允许在保持现有连接活动的同时更改本地端口或IP地址。
+    pub async fn rebind(&self, new_local_addr: SocketAddr) -> Result<()> {
+        // 1. Create and bind a new UDP socket.
+        let new_socket = Arc::new(UdpSocket::bind(new_local_addr).await?);
+
+        // 2. Command the sender_task to swap to the new socket.
+        self.send_tx
+            .send(SenderTaskCommand::SwapSocket(new_socket.clone()))
+            .await
+            .map_err(|_| crate::error::Error::ChannelClosed)?;
+
+        // 3. Update the socket used by the main `run` loop for receiving packets.
+        let mut socket_w = self.socket.write().await;
+        *socket_w = new_socket;
+
+        info!(addr = ?new_local_addr, "Socket rebound to new local address");
+
+        Ok(())
     }
 }
 
@@ -181,7 +219,7 @@ impl<S: AsyncUdpSocket> ReliableUdpSocket<S> {
         let addr_to_cid = Arc::new(DashMap::new());
 
         // Create a channel for sending packets.
-        let (send_tx, send_rx) = mpsc::channel::<SendCommand>(1024);
+        let (send_tx, send_rx) = mpsc::channel::<SenderTaskCommand<S>>(1024);
 
         // Create a channel for accepting new connections.
         let (accept_tx, accept_rx) = mpsc::channel(128);
@@ -195,7 +233,7 @@ impl<S: AsyncUdpSocket> ReliableUdpSocket<S> {
 
         info!(addr = ?socket.local_addr().ok(), "ReliableUdpSocket created and running");
         let socket_handle = Self {
-            socket,
+            socket: Arc::new(RwLock::new(socket)),
             connections,
             addr_to_cid,
             send_tx,
@@ -268,7 +306,11 @@ impl<S: AsyncUdpSocket> ReliableUdpSocket<S> {
         ) = mpsc::channel(128);
 
         // Create a new Endpoint and get the stream handles
-        let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) = Endpoint::new_client(
+        let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle): (
+            Endpoint<S>,
+            _,
+            _,
+        ) = Endpoint::new_client(
             config,
             remote_addr,
             local_cid,
@@ -310,9 +352,11 @@ impl<S: AsyncUdpSocket> ReliableUdpSocket<S> {
         let mut command_rx = self.socket_command_rx.lock().await;
 
         loop {
+            let socket = self.socket.read().await;
             tokio::select! {
                 // 1. Handle incoming UDP packets
-                Ok((len, remote_addr)) = self.socket.recv_from(&mut recv_buf) => {
+                Ok((len, remote_addr)) = socket.recv_from(&mut recv_buf) => {
+                    drop(socket); // Release the read lock as soon as possible
                     debug!(len, addr = %remote_addr, "Received UDP datagram");
                     let data = &recv_buf[..len];
                     let frame = match Frame::decode(data) {
@@ -326,6 +370,7 @@ impl<S: AsyncUdpSocket> ReliableUdpSocket<S> {
                 }
                 // 2. Handle internal commands from Endpoints
                 Some(command) = command_rx.recv() => {
+                    drop(socket); // Release the read lock
                     self.handle_socket_command(command).await;
                 }
                 else => break,
@@ -375,16 +420,19 @@ impl<S: AsyncUdpSocket> ReliableUdpSocket<S> {
                 mpsc::Receiver<(Frame, SocketAddr)>,
             ) = mpsc::channel(128);
 
-            let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
-                Endpoint::new_server(
-                    config,
-                    remote_addr,
-                    local_cid,
-                    peer_cid,
-                    rx_from_socket,
-                    self.send_tx.clone(),
-                    self.socket_command_tx.clone(),
-                );
+            let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle): (
+                Endpoint<S>,
+                _,
+                _,
+            ) = Endpoint::new_server(
+                config,
+                remote_addr,
+                local_cid,
+                peer_cid,
+                rx_from_socket,
+                self.send_tx.clone(),
+                self.socket_command_tx.clone(),
+            );
 
             // Spawn a new task for the connection to run in.
             tokio::spawn(async move {
@@ -462,47 +510,58 @@ impl<S: AsyncUdpSocket> ReliableUdpSocket<S> {
 ///
 /// 用于发送UDP包的专用任务。
 /// 这将所有对套接字的写入操作集中起来。
-async fn sender_task<S: AsyncUdpSocket>(socket: Arc<S>, mut rx: mpsc::Receiver<SendCommand>) {
+async fn sender_task<S: AsyncUdpSocket>(
+    mut socket: Arc<S>,
+    mut rx: mpsc::Receiver<SenderTaskCommand<S>>,
+) {
     const MAX_BATCH_SIZE: usize = 64;
     let mut send_buf = Vec::with_capacity(2048);
     let mut commands = Vec::with_capacity(MAX_BATCH_SIZE);
 
-    while let Some(first_cmd) = rx.recv().await {
-        commands.push(first_cmd);
+    loop {
+        // Wait for the first command to arrive.
+        let first_cmd = match rx.recv().await {
+            Some(cmd) => cmd,
+            None => return, // Channel closed.
+        };
 
-        // Try to drain the channel of any pending commands to process in a batch.
-        while commands.len() < MAX_BATCH_SIZE {
-            match rx.try_recv() {
-                Ok(cmd) => commands.push(cmd),
-                Err(mpsc::error::TryRecvError::Empty) => break, // No more commands for now.
-                Err(mpsc::error::TryRecvError::Disconnected) => return, // Channel closed.
+        match first_cmd {
+            SenderTaskCommand::Send(send_cmd) => {
+                commands.push(send_cmd);
+
+                // Try to drain the channel of any pending Send commands to process in a batch.
+                while commands.len() < MAX_BATCH_SIZE {
+                    if let Ok(SenderTaskCommand::Send(cmd)) = rx.try_recv() {
+                        commands.push(cmd);
+                    } else {
+                        break;
+                    }
+                }
+
+                for cmd in commands.drain(..) {
+                    send_buf.clear();
+                    // This is "packet coalescing" at the sender level.
+                    for frame in cmd.frames {
+                        frame.encode(&mut send_buf);
+                    }
+
+                    if send_buf.is_empty() {
+                        continue;
+                    }
+                    debug!(
+                        addr = %cmd.remote_addr,
+                        bytes = send_buf.len(),
+                        "sender_task sending datagram"
+                    );
+
+                    if let Err(e) = socket.send_to(&send_buf, cmd.remote_addr).await {
+                        error!(addr = %cmd.remote_addr, "Failed to send packet: {}", e);
+                    }
+                }
             }
-        }
-
-        for cmd in commands.drain(..) {
-            send_buf.clear();
-            // This is "packet coalescing" at the sender level.
-            // Multiple frames for the same destination are encoded into a single UDP datagram.
-            for frame in cmd.frames {
-                frame.encode(&mut send_buf);
-            }
-
-            if send_buf.is_empty() {
-                continue;
-            }
-            debug!(
-                addr = %cmd.remote_addr,
-                bytes = send_buf.len(),
-                "sender_task sending datagram"
-            );
-
-            if let Err(e) = socket.send_to(&send_buf, cmd.remote_addr).await {
-                // A single send error is not fatal to the whole socket.
-                error!(
-                    addr = %cmd.remote_addr,
-                    "Failed to send packet: {}",
-                    e
-                );
+            SenderTaskCommand::SwapSocket(new_socket) => {
+                info!("Sender task is swapping to a new socket.");
+                socket = new_socket;
             }
         }
     }
