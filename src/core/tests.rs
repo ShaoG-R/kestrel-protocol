@@ -4,6 +4,7 @@ use super::endpoint::StreamCommand;
 use super::test_utils::*;
 use crate::config::Config;
 use crate::packet::frame::Frame;
+use crate::socket::SenderTaskCommand;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -283,12 +284,110 @@ async fn test_endpoint_fast_retransmission() {
     assert_eq!(all_received_data, expected_data);
 }
 
-/*
-// NOTE: Connection migration requires a more advanced network simulation that can
-// handle address changes, which is beyond the scope of the current filter-based model.
-// This test will be implemented in a future step with an upgraded mock network.
 #[tokio::test]
 async fn test_connection_migration() {
-    // ...
-}
-*/ 
+    let mut harness = setup_server_harness();
+    let old_addr = harness.client_addr;
+    let new_addr: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
+
+    // 1. Manually establish the connection from the old_addr
+    // The server is in SynReceived state initially. Sending data will trigger SYN-ACK.
+    harness
+        .tx_to_endpoint_user
+        .send(StreamCommand::SendData(Bytes::from_static(b"initial data")))
+        .await
+        .unwrap();
+
+    // The server should send a SYN-ACK back to the client. We'll just drain this for now.
+    let syn_ack_cmd = harness.rx_from_endpoint_network.recv().await.unwrap();
+    if let SenderTaskCommand::Send(cmd) = syn_ack_cmd {
+        assert!(matches!(cmd.frames[0], Frame::SynAck { .. }));
+        assert_eq!(cmd.remote_addr, old_addr);
+    } else {
+        panic!("Expected a Send command");
+    }
+
+    // 2. Simulate a PUSH packet arriving from a new address. This should trigger path validation.
+    let push_from_new_addr = Frame::Push {
+        header: crate::packet::header::ShortHeader {
+            command: crate::packet::command::Command::Push,
+            connection_id: 2, // The server's CID
+            sequence_number: 10,
+            recv_window_size: 1024,
+            timestamp: 0,
+            recv_next_sequence: 0,
+        },
+        payload: Bytes::from_static(b"data from new address"),
+    };
+    harness
+        .tx_to_endpoint_network
+        .send((push_from_new_addr, new_addr))
+        .await
+        .unwrap();
+
+    // 3. The server should respond with two packets in some order:
+    //    - A PATH_CHALLENGE to the new address.
+    //    - An ACK for the PUSH, sent to the *old*, validated address.
+    let cmd1_enum = harness.rx_from_endpoint_network.recv().await.unwrap();
+    let cmd2_enum = harness.rx_from_endpoint_network.recv().await.unwrap();
+    let cmd1 = match cmd1_enum {
+        SenderTaskCommand::Send(c) => c,
+        _ => panic!("Expected Send"),
+    };
+    let cmd2 = match cmd2_enum {
+        SenderTaskCommand::Send(c) => c,
+        _ => panic!("Expected Send"),
+    };
+
+    let (challenge_cmd, ack_cmd) = if matches!(cmd1.frames[0], Frame::PathChallenge { .. }) {
+        (cmd1, cmd2)
+    } else {
+        (cmd2, cmd1)
+    };
+
+    // Verify the PATH_CHALLENGE packet
+    assert_eq!(challenge_cmd.remote_addr, new_addr, "Challenge should be sent to the new address");
+    let challenge_data = if let Frame::PathChallenge { challenge_data, .. } = challenge_cmd.frames[0] {
+        challenge_data
+    } else {
+        panic!("Expected a PathChallenge frame, got {:?}", challenge_cmd.frames[0]);
+    };
+
+    // Verify the ACK packet
+    assert_eq!(ack_cmd.remote_addr, old_addr, "ACK should be sent to the old address");
+    assert!(matches!(ack_cmd.frames[0], Frame::Ack { .. }));
+
+    // 4. Simulate the client sending a PATH_RESPONSE back.
+    let response_frame = crate::core::endpoint::frame_factory::create_path_response_frame(
+        2,   // Server's CID
+        999, // Sequence number is not critical for this test
+        tokio::time::Instant::now(), // Timestamp also not critical
+        challenge_data,
+    );
+    harness
+        .tx_to_endpoint_network
+        .send((response_frame, new_addr))
+        .await
+        .unwrap();
+
+    // 5. The endpoint should now be migrated. To confirm, send data from the user side
+    //    and verify it gets sent to the new address.
+    harness
+        .tx_to_endpoint_user
+        .send(StreamCommand::SendData(Bytes::from_static(b"data after migration")))
+        .await
+        .unwrap();
+
+    let push_after_migration_cmd =
+        tokio::time::timeout(Duration::from_millis(100), harness.rx_from_endpoint_network.recv())
+            .await
+            .expect("should receive a PUSH after migration")
+            .unwrap();
+
+    if let SenderTaskCommand::Send(cmd) = push_after_migration_cmd {
+        assert_eq!(cmd.remote_addr, new_addr, "PUSH should now be sent to the new, migrated address");
+        assert!(matches!(cmd.frames[0], Frame::Push { .. }));
+    } else {
+        panic!("Expected a Send command");
+    }
+} 

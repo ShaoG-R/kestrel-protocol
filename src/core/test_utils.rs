@@ -83,6 +83,21 @@ pub struct EndpointHarness {
     pub rx_from_endpoint_user: mpsc::Receiver<Vec<Bytes>>,
 }
 
+/// A harness for testing a server-side `Endpoint` in isolation.
+/// It provides direct access to the "network" and "user" channels.
+pub struct ServerTestHarness {
+    /// To send user commands (e.g., data) to the Endpoint.
+    pub tx_to_endpoint_user: mpsc::Sender<StreamCommand>,
+    /// To receive data from the Endpoint that would go to the user.
+    pub rx_from_endpoint_user: mpsc::Receiver<Vec<Bytes>>,
+    /// To send frames to the Endpoint, simulating network ingress.
+    pub tx_to_endpoint_network: mpsc::Sender<(Frame, SocketAddr)>,
+    /// To receive commands from the Endpoint that would go to the network.
+    pub rx_from_endpoint_network: mpsc::Receiver<SenderTaskCommand<MockUdpSocket>>,
+    /// The address of the "client" that the server is connected to.
+    pub client_addr: SocketAddr,
+}
+
 /// Spawns an `Endpoint` and the necessary relay tasks to connect it to a `MockUdpSocket`.
 pub fn spawn_endpoint(
     mut endpoint: Endpoint<MockUdpSocket>,
@@ -253,4 +268,45 @@ pub fn setup_client_server_with_filter(
         client_sent_count,
         server_sent_count,
     )
+}
+
+/// Sets up a server-side `Endpoint` for isolated testing.
+///
+/// This does NOT spawn the relay tasks, allowing the test to act as the network
+/// by directly using the `tx_to_endpoint_network` and `rx_from_endpoint_network` channels.
+pub fn setup_server_harness() -> ServerTestHarness {
+    let _server_addr: SocketAddr = "127.0.0.1:5678".parse().unwrap();
+    let client_addr: SocketAddr = "127.0.0.1:1234".parse().unwrap(); // "old" client addr
+    let config = Config::default();
+
+    let (tx_to_endpoint_network, rx_from_socket) = mpsc::channel(128);
+    let (sender_task_tx, sender_task_rx) = mpsc::channel(128);
+    let (socket_command_tx, _socket_command_rx) = mpsc::channel::<SocketCommand>(128);
+
+    let server_cid = 2;
+    let client_cid = 1;
+
+    let (mut endpoint, tx_to_user, rx_from_user) = Endpoint::new_server(
+        config,
+        client_addr,
+        server_cid,
+        client_cid,
+        rx_from_socket,
+        sender_task_tx,
+        socket_command_tx,
+    );
+
+    // Unlike other test setups, we only spawn the main endpoint task.
+    // The test itself will drive the network channels.
+    tokio::spawn(async move {
+        let _ = endpoint.run().await;
+    });
+
+    ServerTestHarness {
+        tx_to_endpoint_user: tx_to_user,
+        rx_from_endpoint_user: rx_from_user,
+        tx_to_endpoint_network,
+        rx_from_endpoint_network: sender_task_rx,
+        client_addr,
+    }
 } 
