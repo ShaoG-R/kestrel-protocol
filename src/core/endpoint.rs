@@ -137,6 +137,13 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         (endpoint, tx_to_endpoint, rx_from_endpoint)
     }
 
+    /// Sets the peer's connection ID.
+    /// This is primarily used for testing setups where CIDs are pre-determined.
+    #[cfg(test)]
+    pub fn set_peer_cid(&mut self, peer_cid: u32) {
+        self.peer_cid = peer_cid;
+    }
+
     /// Runs the endpoint's main event loop.
     pub async fn run(&mut self) -> Result<()> {
         if self.state == ConnectionState::Connecting {

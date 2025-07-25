@@ -12,6 +12,11 @@ pub enum Error {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// An error occurred during address parsing.
+    /// 地址解析期间发生错误。
+    #[error("Address parsing error: {0}")]
+    AddressParse(#[from] std::net::AddrParseError),
+
     /// A received packet was invalid and could not be decoded.
     /// 接收到的包无效，无法解码。
     #[error("Invalid packet received")]
@@ -62,6 +67,7 @@ impl From<Error> for std::io::Error {
         use std::io::ErrorKind;
         match err {
             Error::Io(e) => e,
+            Error::AddressParse(e) => std::io::Error::new(ErrorKind::InvalidInput, e),
             Error::ConnectionClosed => ErrorKind::ConnectionReset.into(),
             Error::ConnectionAborted => ErrorKind::ConnectionAborted.into(),
             Error::ConnectionTimeout => ErrorKind::TimedOut.into(),
