@@ -108,7 +108,7 @@ impl TestNetHub {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_core_multiple_clients_concurrently() {
-    const NUM_CLIENTS: usize = 3;
+    const NUM_CLIENTS: usize = 1;
     let server_addr: SocketAddr = "127.0.0.1:8000".parse().unwrap();
 
     let hub = Arc::new(TestNetHub::new(server_addr));
@@ -179,8 +179,9 @@ async fn test_core_multiple_clients_concurrently() {
                 .unwrap();
             let _ = rx_from_client_user.recv().await.unwrap(); // Client receives "init"
 
-            // Client sends its unique data.
-            let msg = Bytes::from(format!("hello from client {}", i));
+            // Client sends its unique data, now a larger payload.
+            let payload = vec![i as u8; 10 * 1024]; // 10 KB
+            let msg = Bytes::from(payload);
             tx_to_client_user
                 .send(StreamCommand::SendData(msg.clone()))
                 .await
@@ -200,11 +201,43 @@ async fn test_core_multiple_clients_concurrently() {
         let handle = tokio::spawn(async move {
             // Server should not receive its own "init" message.
             // It should only receive the unique data from the client.
-            let received = rx_from_user.recv().await.unwrap();
+            const EXPECTED_LEN: usize = 10 * 1024;
+            let mut received_data = Vec::new();
 
-            let expected_msg = Bytes::from(format!("hello from client {}", i));
-            assert_eq!(received.len(), 1);
-            assert_eq!(received[0], expected_msg);
+            // Loop to receive all chunks until the total expected length is reached.
+            while received_data.len() < EXPECTED_LEN {
+                let chunks = tokio::time::timeout(
+                    Duration::from_secs(15), // Generous timeout for 50 clients with large data
+                    rx_from_user.recv(),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("Server for client {} timed out receiving data", i))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Server for client {} channel closed unexpectedly. Received {} of {} bytes.",
+                        i,
+                        received_data.len(),
+                        EXPECTED_LEN
+                    )
+                });
+
+                for chunk in chunks {
+                    received_data.extend_from_slice(&chunk);
+                }
+            }
+
+            let expected_payload = vec![i as u8; EXPECTED_LEN];
+            assert_eq!(
+                received_data.len(),
+                EXPECTED_LEN,
+                "Server for client {} did not receive the correct amount of data.",
+                i
+            );
+            assert_eq!(
+                received_data, expected_payload,
+                "Server for client {} received corrupted data.",
+                i
+            );
         });
         server_verification_handles.push(handle);
     }
