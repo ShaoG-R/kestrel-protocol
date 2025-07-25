@@ -57,7 +57,7 @@ async fn test_full_connection_lifecycle() {
     // 1. Setup server
     let server_addr = "127.0.0.1:9998".parse().unwrap();
     let (server_socket, mut server_listener) =
-        ReliableUdpSocket::bind(server_addr).await.unwrap();
+        ReliableUdpSocket::<tokio::net::UdpSocket>::bind(server_addr).await.unwrap();
     let server = Arc::new(server_socket);
     let server_run = server.clone();
     tokio::spawn(async move { server_run.run().await });
@@ -65,7 +65,7 @@ async fn test_full_connection_lifecycle() {
     // 2. Setup client
     let client_addr = "127.0.0.1:9997".parse().unwrap();
     let (client_socket, _client_listener) =
-        ReliableUdpSocket::bind(client_addr).await.unwrap();
+        ReliableUdpSocket::<tokio::net::UdpSocket>::bind(client_addr).await.unwrap();
     let client = Arc::new(client_socket);
     let client_run = client.clone();
     tokio::spawn(async move { client_run.run().await });

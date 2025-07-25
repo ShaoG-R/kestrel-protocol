@@ -50,6 +50,28 @@ impl AsyncUdpSocket for UdpSocket {
     }
 }
 
+/// A trait for UDP sockets that can be bound to a local address.
+///
+/// This extends the `AsyncUdpSocket` trait with the ability to create a new
+/// socket by binding to an address.
+///
+/// 可绑定到本地地址的UDP套接字 trait。
+///
+/// 该 trait 扩展了 `AsyncUdpSocket`，增加了通过绑定地址创建新套接字的能力。
+#[async_trait]
+pub trait BindableUdpSocket: AsyncUdpSocket + Sized {
+    /// Binds a new socket to the given address.
+    /// 将新套接字绑定到给定地址。
+    async fn bind(addr: SocketAddr) -> Result<Self>;
+}
+
+#[async_trait]
+impl BindableUdpSocket for UdpSocket {
+    async fn bind(addr: SocketAddr) -> Result<Self> {
+        UdpSocket::bind(addr).await.map_err(Into::into)
+    }
+}
+
 /// A command for the central socket sender task.
 /// 用于中央套接字发送任务的命令。
 #[derive(Debug)]
@@ -153,7 +175,7 @@ pub struct ReliableUdpSocket<S: AsyncUdpSocket> {
     socket_command_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<SocketCommand>>>,
 }
 
-impl ReliableUdpSocket<UdpSocket> {
+impl<S: BindableUdpSocket> ReliableUdpSocket<S> {
     /// Creates a new `ReliableUdpSocket` and binds it to the given address.
     ///
     /// Returns a `ReliableUdpSocket` for managing connections and a
@@ -164,7 +186,7 @@ impl ReliableUdpSocket<UdpSocket> {
     /// 返回一个用于管理连接的 `ReliableUdpSocket` 和一个用于接受连接的
     /// `ConnectionListener`。
     pub async fn bind(addr: SocketAddr) -> Result<(Self, ConnectionListener)> {
-        let socket = UdpSocket::bind(addr).await?;
+        let socket = S::bind(addr).await?;
         let (socket_handle, listener, _cmd_rx) = Self::with_socket(socket)?;
         Ok((socket_handle, listener))
     }
@@ -179,7 +201,7 @@ impl ReliableUdpSocket<UdpSocket> {
     /// 这允许在保持现有连接活动的同时更改本地端口或IP地址。
     pub async fn rebind(&self, new_local_addr: SocketAddr) -> Result<()> {
         // 1. Create and bind a new UDP socket.
-        let new_socket = Arc::new(UdpSocket::bind(new_local_addr).await?);
+        let new_socket = Arc::new(S::bind(new_local_addr).await?);
 
         // 2. Command the sender_task to swap to the new socket.
         self.send_tx
