@@ -27,34 +27,34 @@
 
 ```mermaid
 graph TD
-    subgraph User Space
-        U(User App) -- write() --> S(Stream Handle);
-        U -- read() <-- S;
+    subgraph "用户空间"
+        U(用户应用) -- "写入()" --> S(流句柄)
+        S -- "读取()" --> U
     end
 
-    subgraph "Tokio Tasks (MPSC-driven)"
-        subgraph Endpoint Task
+    subgraph "Tokio 任务 (MPSC驱动)"
+        subgraph "端点任务"
             direction LR
-            E_Logic[Protocol Logic]
+            E_Logic[协议逻辑]
         end
         
-        subgraph SocketActor Task
+        subgraph "SocketActor 任务"
             direction TB
-            SA_Recv[UDP Recv Loop] --> SA_Dispatch{Dispatch by CID};
+            SA_Recv[UDP 接收循环] --> SA_Dispatch{按 CID 分发}
         end
         
-        subgraph SenderTask
+        subgraph "SenderTask"
             direction TB
-            ST_Send[Batch Send Loop] --> UDP_Socket;
+            ST_Send[批量发送循环] --> UDP_Socket[物理 UDP 套接字]
         end
         
-        SA_Dispatch -- "mpsc::send(Frame)" --> E_Logic;
-        S -- "mpsc::send(data)" --> E_Logic;
-        E_Logic -- "mpsc::send(Frame)" --> ST_Send;
-        E_Logic -- "mpsc::send(data)" --> S;
+        SA_Dispatch -- "mpsc::发送(Frame)" --> E_Logic
+        S -- "mpsc::发送(data)" --> E_Logic
+        E_Logic -- "mpsc::发送(Frame)" --> ST_Send
+        E_Logic -- "mpsc::发送(data)" --> S
     end
     
-    UDP_Socket[Physical UDP Socket] --> SA_Recv;
+    UDP_Socket --> SA_Recv
 ```
 
 - **数据写入 (Write Path)**: `User App` -> `Stream::write()` -> `mpsc::send` -> `Endpoint`任务 -> `mpsc::send` -> `SenderTask` -> `UdpSocket`。

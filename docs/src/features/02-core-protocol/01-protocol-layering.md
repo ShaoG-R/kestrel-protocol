@@ -26,21 +26,23 @@
 
 ```mermaid
 graph TD
-    subgraph Endpoint [Endpoint Layer]
-        A[Connection Logic]
+    subgraph "Endpoint 层"
+        A[连接逻辑]
     end
 
-    subgraph ReliabilityLayer [Reliability Layer]
-        B[ARQ, SACK, RTO Logic]
+    subgraph "Reliability 层"
+        B[ARQ, SACK, RTO 逻辑]
     end
 
-    subgraph CongestionControl [Congestion Control Layer]
-        C[Congestion Algorithm (e.g., Vegas)]
+    subgraph "Congestion 控制层"
+        C["Congestion 算法 (例如, Vegas)"]
     end
 
-    A -- "Delegate reliability tasks" --> B
-    B -- "Notify network events (ACK, Loss)" --> C
-    C -- "Provide congestion window (cwnd)" --> B
+    A -- "委托 Reliability 任务" --> B
+    B -- "通知网络事件 (ACK, 丢失)" --> C
+    C -- "提供 Congestion 窗口 (cwnd)" --> B
+
+
 ```
 
 - **`Endpoint` -> `ReliabilityLayer`**: `Endpoint` 将所有需要可靠传输的数据块和收到的ACK信息全部委托给 `ReliabilityLayer` 处理。
