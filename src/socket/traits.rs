@@ -1,8 +1,8 @@
 //! Traits for abstracting over UDP socket implementations.
 use crate::error::Result;
 use async_trait::async_trait;
-use std::net::SocketAddr;
-use tokio::net::UdpSocket;
+use std::{fmt::Debug, net::SocketAddr};
+use tokio::net::UdpSocket as TokioUdpSocket;
 
 /// An asynchronous UDP socket interface.
 ///
@@ -13,29 +13,28 @@ use tokio::net::UdpSocket;
 ///
 /// 此trait允许对底层UDP套接字实现进行抽象，从而可以为测试或其他目的自定义套接字实现。
 #[async_trait]
-pub trait AsyncUdpSocket: Send + Sync + 'static {
-    /// Sends data on the socket to the given address.
+pub trait AsyncUdpSocket: Send + Sync + Debug + 'static {
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> Result<usize>;
-
-    /// Receives a single datagram on the socket.
     async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)>;
-
-    /// Returns the local address that this socket is bound to.
     fn local_addr(&self) -> Result<SocketAddr>;
 }
 
 #[async_trait]
-impl AsyncUdpSocket for UdpSocket {
+impl AsyncUdpSocket for TokioUdpSocket {
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> Result<usize> {
-        UdpSocket::send_to(self, buf, target).await.map_err(Into::into)
+        TokioUdpSocket::send_to(self, buf, target)
+            .await
+            .map_err(Into::into)
     }
 
     async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
-        UdpSocket::recv_from(self, buf).await.map_err(Into::into)
+        TokioUdpSocket::recv_from(self, buf)
+            .await
+            .map_err(Into::into)
     }
 
     fn local_addr(&self) -> Result<SocketAddr> {
-        UdpSocket::local_addr(self).map_err(Into::into)
+        TokioUdpSocket::local_addr(self).map_err(Into::into)
     }
 }
 
@@ -49,14 +48,12 @@ impl AsyncUdpSocket for UdpSocket {
 /// 该 trait 扩展了 `AsyncUdpSocket`，增加了通过绑定地址创建新套接字的能力。
 #[async_trait]
 pub trait BindableUdpSocket: AsyncUdpSocket + Sized {
-    /// Binds a new socket to the given address.
-    /// 将新套接字绑定到给定地址。
     async fn bind(addr: SocketAddr) -> Result<Self>;
 }
 
 #[async_trait]
-impl BindableUdpSocket for UdpSocket {
+impl BindableUdpSocket for TokioUdpSocket {
     async fn bind(addr: SocketAddr) -> Result<Self> {
-        UdpSocket::bind(addr).await.map_err(Into::into)
+        TokioUdpSocket::bind(addr).await.map_err(Into::into)
     }
 } 

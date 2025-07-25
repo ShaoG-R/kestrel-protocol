@@ -5,11 +5,11 @@ use crate::{
     core::stream::Stream,
     error::Result,
     packet::frame::Frame,
+    socket::traits::AsyncUdpSocket,
 };
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::oneshot;
 
-use super::traits::AsyncUdpSocket;
 
 /// A command for the central socket sender task.
 /// 用于中央套接字发送任务的命令。

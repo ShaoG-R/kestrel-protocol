@@ -17,19 +17,18 @@ use tracing::info;
 
 /// A listener for incoming reliable UDP connections.
 ///
-/// This is created by `ReliableUdpSocket::bind` and can be used to accept
-/// new incoming connections.
+/// This struct is created by the `ReliableUdpSocket::bind` method and can be used
+/// to accept new incoming connections.
 ///
 /// 用于传入可靠UDP连接的监听器。
 ///
-/// 这是由 `ReliableUdpSocket::bind` 创建的，可以用来接受新的传入连接。
-pub struct ConnectionListener {
-    /// A receiver for newly accepted connections.
-    /// 用于新接受连接的接收端。
+/// 此结构体由 `ReliableUdpSocket::bind` 方法创建，可用于接受新的传入连接。
+#[derive(Debug)]
+pub struct Listener {
     pub(crate) accept_rx: mpsc::Receiver<(Stream, SocketAddr)>,
 }
 
-impl ConnectionListener {
+impl Listener {
     /// Waits for a new incoming connection.
     ///
     /// This method will block until a new connection is established.
@@ -67,7 +66,7 @@ impl<S: BindableUdpSocket> ReliableUdpSocket<S> {
     /// 创建一个新的 `ReliableUdpSocket` 并将其绑定到给定的地址。
     ///
     /// 此函数会生成中央 `SocketActor` 任务，该任务管理所有状态和连接，并返回一个与其通信的句柄。
-    pub async fn bind(addr: SocketAddr) -> Result<(Self, ConnectionListener)> {
+    pub async fn bind(addr: SocketAddr) -> Result<(Self, Listener)> {
         let socket = Arc::new(S::bind(addr).await?);
 
         // Create channel for actor commands.
@@ -78,7 +77,7 @@ impl<S: BindableUdpSocket> ReliableUdpSocket<S> {
 
         // Create channel for accepting new connections.
         let (accept_tx, accept_rx) = mpsc::channel(128);
-        let listener = ConnectionListener { accept_rx };
+        let listener = Listener { accept_rx };
 
         // Spawn the sender task.
         let socket_clone = socket.clone();

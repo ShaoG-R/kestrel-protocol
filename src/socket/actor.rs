@@ -231,13 +231,18 @@ impl<S: BindableUdpSocket> SocketActor<S> {
             self.addr_to_cid.insert(remote_addr, local_cid);
 
             let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
-            if self.accept_tx.send((stream, remote_addr)).await.is_err() {
-                info!(
-                    "No active listener on accept(), dropping new connection from {}",
+            // Use `try_send` to avoid blocking the actor if the listener is slow or the
+            // channel is full. This is crucial for preventing deadlocks.
+            if self.accept_tx.try_send((stream, remote_addr)).is_err() {
+                warn!(
+                    "Listener channel full or closed, dropping new connection from {}",
                     remote_addr
                 );
+                // Clean up the state we just added for this failed connection attempt.
                 self.connections.remove(&local_cid);
                 self.addr_to_cid.remove(&remote_addr);
+                // The spawned endpoint task will eventually time out and die on its own
+                // because it will never receive a SYN-ACK confirmation from the user.
             }
         } else {
             debug!(

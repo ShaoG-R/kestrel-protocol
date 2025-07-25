@@ -227,21 +227,21 @@ async fn test_concurrent_connections_cid_isolation() {
                 // This is required by the protocol design.
                 writer.write_all(b"probe").await.unwrap();
 
-                // B. Read the client's identity.
+                // B. Read the client's identity and its message in one go.
                 let mut id_buf = vec![0; 7];
                 reader.read_exact(&mut id_buf).await.unwrap();
-
-                // C. Based on the identity, send the correct message and expect the correct ack.
+                
+                // C. Based on the identity, read the correct message and send the correct ack.
                 if &id_buf == b"ident_A" {
-                    writer.write_all(b"message for client A").await.unwrap();
-                    let mut ack_buf = vec![0; 5];
-                    reader.read_exact(&mut ack_buf).await.unwrap();
-                    assert_eq!(&ack_buf, b"ack_A");
+                    let mut msg_buf = vec![0; 12];
+                    reader.read_exact(&mut msg_buf).await.unwrap();
+                    assert_eq!(&msg_buf, b"from clientA");
+                    writer.write_all(b"server ack A").await.unwrap();
                 } else if &id_buf == b"ident_B" {
-                    writer.write_all(b"message for client B").await.unwrap();
-                    let mut ack_buf = vec![0; 5];
-                    reader.read_exact(&mut ack_buf).await.unwrap();
-                    assert_eq!(&ack_buf, b"ack_B");
+                    let mut msg_buf = vec![0; 12];
+                    reader.read_exact(&mut msg_buf).await.unwrap();
+                    assert_eq!(&msg_buf, b"from clientB");
+                    writer.write_all(b"server ack B").await.unwrap();
                 } else {
                     panic!("Unknown client identity received: {:?}", id_buf);
                 }
@@ -274,18 +274,16 @@ async fn test_concurrent_connections_cid_isolation() {
         reader.read_exact(&mut probe_buf).await.unwrap();
         assert_eq!(&probe_buf, b"probe");
 
-        // B. Send identity
+        // B. Send identity and a message straight after.
         writer.write_all(b"ident_A").await.unwrap();
+        writer.write_all(b"from clientA").await.unwrap();
         
-        // C. Verify received message and send acknowledgement
-        let msg_for_a = b"message for client A";
-        let mut buf = vec![0; msg_for_a.len()];
+        // C. Verify received server acknowledgement.
+        let server_ack = b"server ack A";
+        let mut buf = vec![0; server_ack.len()];
         reader.read_exact(&mut buf).await.expect("Read from A failed");
-        assert_eq!(&buf, msg_for_a, "Client A received wrong message");
-        tracing::info!("[Client A] Correctly received: {}", String::from_utf8_lossy(msg_for_a));
-        
-        // D. Send acknowledgement back to server
-        writer.write_all(b"ack_A").await.unwrap();
+        assert_eq!(&buf, server_ack, "Client A received wrong ack");
+        tracing::info!("[Client A] Correctly received acknowledgement.");
     });
 
     let client_b_handle = tokio::spawn(async move {
@@ -298,18 +296,16 @@ async fn test_concurrent_connections_cid_isolation() {
         reader.read_exact(&mut probe_buf).await.unwrap();
         assert_eq!(&probe_buf, b"probe");
 
-        // B. Send identity
+        // B. Send identity and a message straight after.
         writer.write_all(b"ident_B").await.unwrap();
+        writer.write_all(b"from clientB").await.unwrap();
         
-        // C. Verify received message and send acknowledgement
-        let msg_for_b = b"message for client B";
-        let mut buf = vec![0; msg_for_b.len()];
+        // C. Verify received server acknowledgement.
+        let server_ack = b"server ack B";
+        let mut buf = vec![0; server_ack.len()];
         reader.read_exact(&mut buf).await.expect("Read from B failed");
-        assert_eq!(&buf, msg_for_b, "Client B received wrong message");
-        tracing::info!("[Client B] Correctly received: {}", String::from_utf8_lossy(msg_for_b));
-        
-        // D. Send acknowledgement back to server
-        writer.write_all(b"ack_B").await.unwrap();
+        assert_eq!(&buf, server_ack, "Client B received wrong ack");
+        tracing::info!("[Client B] Correctly received acknowledgement.");
     });
 
     // Wait for all top-level tasks to complete
