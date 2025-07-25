@@ -4,6 +4,7 @@
 
 // Individual test modules
 mod concurrency;
-mod lifecycle;
-mod reliability; 
 mod handshake;
+mod lifecycle;
+mod reliability;
+mod state;
