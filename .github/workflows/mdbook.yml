@@ -25,7 +25,9 @@ jobs:
       - name: Cache Rust dependencies
         uses: swatinem/rust-cache@v2
       - name: Install mdbook
-        run: cargo install mdbook --locked --force
+        run: cargo install mdbook --locked
+      - name: Install mdbook-mermaid
+        run: cargo install mdbook-mermaid --locked
       - name: Build mdBook
         run: |
           cd docs
