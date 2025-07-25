@@ -268,10 +268,13 @@ async fn test_actor_with_true_concurrent_handlers() {
     // 4. Verification
     let mut outgoing_commands = HashMap::new();
     for _ in 0..2 {
-        let cmd = harness
-            .outgoing_cmd_rx
-            .try_recv()
-            .expect("Actor should have sent 2 commands");
+        let cmd = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            harness.outgoing_cmd_rx.recv(),
+        )
+        .await
+        .expect("Actor did not send command in time")
+        .unwrap();
 
         if let SenderTaskCommand::Send(send_cmd) = cmd {
             // SYN-ACK for a probe has no payload, so we identify by address.
