@@ -16,3 +16,8 @@ tracing = "0.1.41"
 futures = "0.3"
 tracing-subscriber  = { version = "0.3.19", features = ["env-filter"] }
 sha2 = "0.10.8"
+mdbook = "0.4.52"
+mdbook-mermaid = "0.15.0"
+
+[workspace]
+resolver = "2"
