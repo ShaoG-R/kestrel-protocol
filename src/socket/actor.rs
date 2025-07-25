@@ -162,6 +162,25 @@ impl<S: BindableUdpSocket> SocketActor<S> {
 
     /// Dispatches a received frame to the appropriate connection task.
     async fn dispatch_frame(&mut self, frame: Frame, remote_addr: SocketAddr) {
+        // If it's a SYN for a new connection, it takes precedence over all other routing.
+        if let Frame::Syn { .. } = &frame {
+            // If a connection already exists for this address, the new SYN indicates
+            // that the client has abandoned the old one and wants to start fresh.
+            // We honor this by tearing down the old state before creating the new one.
+            if let Some(&old_cid) = self.addr_to_cid.get(&remote_addr) {
+                info!(
+                    addr = %remote_addr,
+                    old_cid = old_cid,
+                    "Received new SYN from an address with a lingering connection. Replacing it."
+                );
+                self.remove_connection_by_cid(old_cid);
+            }
+
+            // Now, we can safely proceed with creating the new connection.
+            self.accept_new_connection(frame, remote_addr).await;
+            return;
+        }
+
         let cid = frame.destination_cid();
 
         // 1. Try to route to an established connection via its destination CID.
@@ -189,8 +208,16 @@ impl<S: BindableUdpSocket> SocketActor<S> {
             }
         }
 
-        // 3. If the packet could not be routed, it must be a SYN for a new connection.
-        if let Frame::Syn { header, .. } = &frame {
+        // 3. If we get here, it's an unroutable, non-SYN packet.
+        debug!(
+            "Ignoring non-SYN packet from unknown source {} with unroutable CID {}: {:?}",
+            remote_addr, cid, frame
+        );
+    }
+
+    /// Handles a new connection attempt based on a SYN frame.
+    async fn accept_new_connection(&mut self, frame: Frame, remote_addr: SocketAddr) {
+        if let Frame::Syn { header, .. } = frame {
             let config = Config::default();
             if header.protocol_version != config.protocol_version {
                 warn!(
@@ -220,7 +247,7 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                     self.send_tx.clone(),
                     self.command_tx.clone(),
                 );
-            
+
             tokio::spawn(async move {
                 info!(addr = %remote_addr, cid = %local_cid, "Spawning new endpoint task for inbound connection");
                 if let Err(e) = endpoint.run().await {
@@ -253,10 +280,7 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                 // because it will never receive a SYN-ACK confirmation from the user.
             }
         } else {
-            debug!(
-                "Ignoring non-SYN packet from unknown source {} with unroutable CID {}: {:?}",
-                remote_addr, cid, frame
-            );
+            unreachable!("accept_new_connection must be called with a SYN frame");
         }
     }
 

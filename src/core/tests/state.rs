@@ -5,6 +5,9 @@ use std::{net::SocketAddr, time::Duration};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::UdpSocket};
 use tracing::info;
 
+use crate::core::test_utils::init_tracing;
+
+
 /// Test that a server can handle a new connection from an address that was
 /// just used by a different connection. This validates that the `addr_to_cid`
 /// temporary mapping is correctly cleaned up.
@@ -13,6 +16,7 @@ use tracing::info;
 /// 这验证了 `addr_to_cid` 临时映射是否被正确清理。
 #[tokio::test(start_paused = true)]
 async fn test_address_reuse_after_connection_close() {
+    init_tracing();
     // 1. Setup a server listener by first grabbing a known available port.
     let temp_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server_addr: SocketAddr = temp_socket.local_addr().unwrap();
@@ -39,8 +43,14 @@ async fn test_address_reuse_after_connection_close() {
         // Accept the second connection.
         let (mut server_stream_b, _) = listener.accept().await.unwrap();
         info!("Accepted second connection.");
-        let mut buf = vec![0; 20];
         
+        // Per protocol design, the server must write something to trigger the
+        // SYN-ACK and complete the handshake. An empty write is sufficient.
+        server_stream_b.write_all(b"1").await.unwrap();
+        server_stream_b.flush().await.unwrap();
+        info!("Sent empty write to trigger SYN-ACK for connection B.");
+
+        let mut buf = vec![0; 20];
         let len = server_stream_b.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..len], b"hello from client B");
         info!("Second connection on server verified.");

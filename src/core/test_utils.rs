@@ -346,3 +346,16 @@ pub fn setup_server_harness() -> ServerTestHarness {
         server_cid,
     }
 } 
+
+use std::sync::Once;
+use tracing_subscriber::fmt;
+
+static TRACING_INIT: Once = Once::new();
+
+pub fn init_tracing() {
+    TRACING_INIT.call_once(|| {
+        fmt()
+            .with_env_filter("trace")
+            .init();
+    });
+}
