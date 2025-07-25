@@ -4,7 +4,7 @@ use super::{
     command::StreamCommand,
     frame_factory::{create_path_challenge_frame, create_path_response_frame},
     state::ConnectionState,
-    Endpoint,
+    ConnectionCleaner, Endpoint,
 };
 use crate::{
     error::{Error, Result},
@@ -17,6 +17,12 @@ use tracing::{debug, error, info, trace, warn};
 impl<S: AsyncUdpSocket> Endpoint<S> {
     /// Runs the endpoint's main event loop.
     pub async fn run(&mut self) -> Result<()> {
+        let _cleaner = ConnectionCleaner::<S> {
+            cid: self.local_cid,
+            command_tx: self.command_tx.clone(),
+            _marker: std::marker::PhantomData,
+        };
+
         if self.state == ConnectionState::Connecting {
             self.send_initial_syn().await?;
         }

@@ -9,7 +9,7 @@ use crate::{
     packet::frame::Frame,
 };
 use bytes::Bytes;
-use sha2::{Digest, Sha256};
+// use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
     net::SocketAddr,
@@ -96,15 +96,15 @@ impl TestNetHub {
 
                 if let Some((data, src_addr)) = packet {
                     // --- DEBUG LOG: Print raw bytes received by the server-side hub ---
-                    let mut hasher = Sha256::new();
-                    hasher.update(&data);
-                    let hash = hasher.finalize();
-                    println!(
-                        "[SERVER DEMUX] RECV FROM {} -> len: {}, hash: {:x}",
-                        src_addr,
-                        data.len(),
-                        hash
-                    );
+                    // let mut hasher = Sha256::new();
+                    // hasher.update(&data);
+                    // let hash = hasher.finalize();
+                    // println!(
+                    //     "[SERVER DEMUX] RECV FROM {} -> len: {}, hash: {:x}",
+                    //     src_addr,
+                    //     data.len(),
+                    //     hash
+                    // );
                     // --- END DEBUG LOG ---
 
                     let mut cursor = &data[..];
@@ -208,11 +208,11 @@ async fn test_core_multiple_clients_concurrently() {
             let msg = Bytes::from(payload);
 
             // --- DEBUG LOG: Print bytes being sent from the client side ---
-            let mut hasher = Sha256::new();
-            hasher.update(&msg);
-            let hash = hasher.finalize();
-            println!("[CLIENT {}] SENDING PAYLOAD -> len: {}, hash: {:x}", i, msg.len(), hash);
-            // --- END DEBUG LOG ---
+            // let mut hasher = Sha256::new();
+            // hasher.update(&msg);
+            // let hash = hasher.finalize();
+            // println!("[CLIENT {}] SENDING PAYLOAD -> len: {}, hash: {:x}", i, msg.len(), hash);
+            // --- END DEBUG LOG ---    
 
             tx_to_client_user
                 .send(StreamCommand::SendData(msg.clone()))

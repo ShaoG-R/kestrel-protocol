@@ -84,7 +84,10 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                 initial_data,
                 response_tx,
             } => {
-                let local_cid = rand::random();
+                let mut local_cid = rand::random();
+                while self.connections.contains_key(&local_cid) {
+                    local_cid = rand::random();
+                }
 
                 let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
@@ -150,6 +153,9 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                 }
                 self.addr_to_cid.insert(new_addr, cid);
             }
+            SocketActorCommand::RemoveConnection { cid } => {
+                self.remove_connection_by_cid(cid);
+            }
         }
         Ok(())
     }
@@ -164,8 +170,8 @@ impl<S: BindableUdpSocket> SocketActor<S> {
         if cid != 0 {
             if let Some(meta) = self.connections.get(&cid) {
                 if meta.sender.send((frame, remote_addr)).await.is_err() {
-                    debug!(addr = %remote_addr, cid = %cid, "Endpoint (looked up by CID) died. Removing connection.");
-                    self.connections.remove(&cid);
+                    debug!(addr = %remote_addr, cid = %cid, "Endpoint (CID lookup) died. Removing.");
+                    self.remove_connection_by_cid(cid);
                 }
                 return;
             }
@@ -176,9 +182,8 @@ impl<S: BindableUdpSocket> SocketActor<S> {
         if let Some(&existing_cid) = self.addr_to_cid.get(&remote_addr) {
             if let Some(meta) = self.connections.get(&existing_cid) {
                 if meta.sender.send((frame, remote_addr)).await.is_err() {
-                     debug!(addr = %remote_addr, cid = %existing_cid, "Endpoint (looked up by addr) died. Removing connection.");
-                     self.connections.remove(&existing_cid);
-                     self.addr_to_cid.remove(&remote_addr);
+                    debug!(addr = %remote_addr, cid = %existing_cid, "Endpoint (addr lookup) died. Removing.");
+                    self.remove_connection_by_cid(existing_cid);
                 }
                 return;
             }
@@ -199,7 +204,10 @@ impl<S: BindableUdpSocket> SocketActor<S> {
 
             info!(addr = %remote_addr, "Accepting new connection attempt.");
             let peer_cid = header.source_cid;
-            let local_cid = rand::random(); // This is OUR CID for the connection.
+            let mut local_cid = rand::random(); // This is OUR CID for the connection.
+            while self.connections.contains_key(&local_cid) {
+                local_cid = rand::random();
+            }
             let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
             let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
@@ -250,5 +258,26 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                 remote_addr, cid, frame
             );
         }
+    }
+
+    /// Removes a connection and its associated state from the actor.
+    ///
+    /// This is the single authoritative place for connection cleanup.
+    /// It removes the connection from the main CID map and also cleans up
+    /// the temporary address-to-CID mapping used during handshakes.
+    ///
+    /// 移除一个连接及其关联的状态。
+    ///
+    /// 这是连接清理的唯一权威位置。它会从主CID映射中移除连接，
+    /// 并清理握手期间使用的临时地址到CID的映射。
+    fn remove_connection_by_cid(&mut self, cid: u32) {
+        if self.connections.remove(&cid).is_none() {
+            return; // Already removed, nothing to do.
+        }
+
+        // Find and remove the corresponding address mapping.
+        self.addr_to_cid.retain(|_addr, c| *c != cid);
+
+        info!(cid = %cid, "Cleaned up connection state and address mapping.");
     }
 } 

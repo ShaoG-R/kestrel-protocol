@@ -61,4 +61,8 @@ pub enum SocketActorCommand {
     /// Internal command from an `Endpoint` task to update its address mapping.
     /// 来自 `Endpoint` 任务的内部命令，用于更新其地址映射。
     UpdateAddr { cid: u32, new_addr: SocketAddr },
+    /// Command from an endpoint to signal that it has terminated and should be removed.
+    ///
+    /// 来自端点的命令，表示它已经终止，应该被移除。
+    RemoveConnection { cid: u32 },
 } 

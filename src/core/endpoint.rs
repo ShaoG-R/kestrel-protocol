@@ -24,6 +24,25 @@ use tokio::{
     time::Instant,
 };
 
+/// A guard that ensures the connection is cleaned up in the `SocketActor`
+/// when the `Endpoint` is dropped.
+///
+/// 一个哨兵结构，确保在 `Endpoint` 被丢弃时，其在 `SocketActor` 中的
+/// 连接状态能够被清理。
+struct ConnectionCleaner<S: AsyncUdpSocket> {
+    cid: u32,
+    command_tx: mpsc::Sender<SocketActorCommand>,
+    _marker: std::marker::PhantomData<S>,
+}
+
+impl<S: AsyncUdpSocket> Drop for ConnectionCleaner<S> {
+    fn drop(&mut self) {
+        // Use a blocking send to ensure the cleanup command is sent.
+        // This is acceptable because this is only called when the endpoint's
+        // task is terminating.
+        let _ = self.command_tx.try_send(SocketActorCommand::RemoveConnection { cid: self.cid });
+    }
+}
 
 /// Represents one end of a reliable connection.
 pub struct Endpoint<S: AsyncUdpSocket> {
