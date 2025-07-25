@@ -21,30 +21,39 @@
 **已完成 Phase 1-6 的核心功能，并已进入下一阶段的健壮性与性能优化。**
 
 *   **完成度高的部分**:
-    *   包的序列化/反序列化 (Phase 1)
-    *   基于MPSC的无锁并发模型 (Phase 1, 3.2)
-    *   更安全的双向连接ID握手协议 (Security)
-    *   协议版本协商机制 (Versioning)
-    *   0-RTT连接建立与四次挥手关闭 (Phase 2)
-    *   动态RTO、超时重传、快速重传 (Phase 3)
-    *   基于SACK的高效确认机制 (Phase 4)
-    *   滑动窗口流量控制 (Phase 4)
-    *   基于延迟的拥塞控制 (Vegas) (Phase 5)
-    *   包聚合/粘连与快速应答 (Phase 5)
-    *   面向用户的流式API (`AsyncRead`/`AsyncWrite`) (Phase 6)
-    *   类似`TcpListener`的服务器端`accept()` API (API)
-    *   基于 `tracing` 的结构化日志记录 (Logging)
-    *   统一的可配置化 (`Config`结构体) (Configuration)
-    *   基于 `thiserror` 的标准化错误处理 (Error Handling)
-    *   **清晰的协议分层 (Code Quality):** 成功将协议栈解耦为 `Endpoint`, `ReliabilityLayer`, 和 `CongestionControl` Trait。
-    *   **关键性能优化 (Performance):**
-        *   **批处理优化:** 在 `Socket` 发送任务和 `Endpoint` 事件循环中实现了I/O批处理，显著减少了高吞吐量下的 `await` 次数和系统调用开销。
-        *   **减少内存拷贝:** 通过重构 `ReceiveBuffer` 和 `Stream` 的数据路径，消除了数据重组过程中的一次主要内存拷贝，向零拷贝目标迈进。
-    *   **流迁移 (Connection Migration) 与NAT穿透:** 完全实现了协议的连接迁移机制，以应对客户端因NAT重新绑定（NAT Rebinding）而导致的IP和端口变化，显著提升了连接在移动网络和复杂NAT环境下的稳定性。
-        *   **核心机制:** `ReliableUdpSocket` 不再仅依赖 `SocketAddr` 作为连接标识，而是采用 `ConnectionId -> Connection` 的主映射和 `SocketAddr -> ConnectionId` 的辅助映射，实现了双重解耦。
-        *   **被动迁移 (Passive Migration):** 当 `Endpoint` 从一个未知的新地址收到属于现有连接的数据包时，会自动触发路径验证流程，向新地址发送 `PATH_CHALLENGE`。
-        *   **主动迁移 (Active Migration):** 在 `Stream` 上暴露了 `migrate(new_remote_addr)` 异步API，允许应用程序主动发起连接迁移。
-        *   **安全验证:** 只有在收到正确的 `PATH_RESPONSE` 后，连接的远端地址才会被更新，可有效防止IP欺骗攻击。
+
+    *   **1. 基础与工具 (Foundations & Utilities):**
+        *   基于 `thiserror` 的标准化错误处理 (Error Handling)
+        *   统一的可配置化 (`Config` 结构体) (Configuration)
+        *   基于 `tracing` 的结构化日志记录 (Logging)
+        *   包的序列化/反序列化 (Phase 1)
+        
+    *   **2. 核心协议逻辑 (Core Protocol Logic):**
+        *   **清晰的协议分层 (Code Quality):** 成功将协议栈解耦为 `Endpoint`, `ReliabilityLayer`, 和 `CongestionControl` Trait。
+        *   协议版本协商机制 (Versioning)
+        *   更安全的双向连接ID握手协议 (Security)
+        *   0-RTT连接建立与四次挥手关闭 (Phase 2)
+        *   动态RTO、超时重传、快速重传 (Phase 3)
+        *   基于SACK的高效确认机制 (Phase 4)
+        *   滑动窗口流量控制 (Phase 4)
+        *   基于延迟的拥塞控制 (Vegas) (Phase 5)
+
+    *   **3. 并发与连接管理 (Concurrency & Connection Management):**
+        *   基于MPSC的无锁并发模型 (Phase 1, 3.2)
+        *   **流迁移 (Connection Migration) 与NAT穿透:** 完全实现了协议的连接迁移机制。
+            *   **核心机制:** `ReliableUdpSocket` 不再仅依赖 `SocketAddr` 作为连接标识，而是采用 `ConnectionId -> Connection` 的主映射和 `SocketAddr -> ConnectionId` 的辅助映射。
+            *   **被动迁移:** 当 `Endpoint` 从未知新地址收到现有连接的包时，自动触发路径验证。
+            *   **主动迁移:** 在 `Stream` 上暴露 `migrate(new_remote_addr)` API。
+            *   **安全验证:** 依靠 `PATH_CHALLENGE`/`PATH_RESPONSE` 确认新路径。
+
+    *   **4. 性能优化 (Performance Optimizations):**
+        *   包聚合/粘连与快速应答 (Phase 5)
+        *   **批处理优化:** 在 `Socket` 和 `Endpoint` 中实现I/O批处理。
+        *   **减少内存拷贝:** 通过重构 `ReceiveBuffer` 和 `Stream` 的数据路径，消除了一次主要的内存拷贝。
+        
+    *   **5. 用户接口 (User-Facing API):**
+        *   类似`TcpListener`的服务器端`accept()` API (API)
+        *   面向用户的流式API (`AsyncRead`/`AsyncWrite`) (Phase 6)
 
 *   **未完成或不完整的部分**:
     *   **测试覆盖不完整 (Testing):** 现有的单元和集成测试需要大幅扩展，特别是针对各种网络异常情况的模拟测试。
