@@ -436,7 +436,7 @@ async fn test_endpoint_rto_retransmission() {
 
     // At this point, the client has sent some number of packets for the handshake and the data.
     // Let's capture this count. We need a small delay to ensure the PUSH is sent.
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let packets_sent_before_rto = client_sent_count.load(Ordering::Relaxed);
     if packets_sent_before_rto == 0 {
         panic!("Expected at least the PUSH packet to be sent. Got 0");

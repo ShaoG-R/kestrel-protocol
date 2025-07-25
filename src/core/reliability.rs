@@ -86,6 +86,7 @@ impl ReliabilityLayer {
 
         if !frames_to_resend.is_empty() {
             self.congestion_control.on_packet_loss(now);
+            self.rto_estimator.backoff();
         }
 
         frames_to_resend

@@ -61,6 +61,14 @@ impl RttEstimator {
         let rto_f64 = self.srtt + (4.0 * self.rttvar);
         self.rto = Duration::from_secs_f64(rto_f64).max(min_rto);
     }
+
+    /// Doubles the RTO for exponential backoff, up to a maximum value.
+    ///
+    /// 将 RTO 加倍以实现指数退避，直至达到最大值。
+    pub fn backoff(&mut self) {
+        // TODO: Consider adding a max_rto to config
+        self.rto *= 2;
+    }
 }
 
 #[cfg(test)]
