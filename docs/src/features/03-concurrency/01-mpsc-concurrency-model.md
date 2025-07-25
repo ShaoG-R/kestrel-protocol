@@ -48,10 +48,10 @@ graph TD
             ST_Send[批量发送循环] --> UDP_Socket[物理 UDP 套接字]
         end
         
-        SA_Dispatch -- "mpsc::发送(Frame)" --> E_Logic
-        S -- "mpsc::发送(data)" --> E_Logic
-        E_Logic -- "mpsc::发送(Frame)" --> ST_Send
-        E_Logic -- "mpsc::发送(data)" --> S
+        SA_Dispatch -- "mpsc::send(Frame)" --> E_Logic
+        S -- "mpsc::send(data)" --> E_Logic
+        E_Logic -- "mpsc::send(Frame)" --> ST_Send
+        E_Logic -- "mpsc::send(data)" --> S
     end
     
     UDP_Socket --> SA_Recv
