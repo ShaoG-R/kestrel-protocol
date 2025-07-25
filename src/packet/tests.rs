@@ -4,6 +4,7 @@ use super::frame::Frame;
 use super::header::{LongHeader, ShortHeader};
 use super::sack::{self, SackRange};
 use bytes::{Bytes, BytesMut};
+use crate::packet::header;
 
 fn frame_roundtrip_test(frame: Frame) {
     let mut buf = BytesMut::new();
@@ -110,4 +111,49 @@ fn test_syn_ack_frame_roundtrip() {
         payload: Bytes::new(),
     };
     frame_roundtrip_test(frame);
+}
+
+#[test]
+fn test_frame_decode_no_header_pollution() {
+    // 1. Create a known header and payload.
+    let header = header::ShortHeader {
+        command: Command::Push,
+        connection_id: 123,
+        recv_window_size: 1024,
+        timestamp: 456,
+        sequence_number: 789,
+        recv_next_sequence: 10,
+    };
+    let payload = Bytes::from_static(b"this is the pure payload");
+
+    // 2. Create the original frame and encode it into a buffer.
+    let original_frame = Frame::Push {
+        header: header.clone(),
+        payload: payload.clone(),
+    };
+    let mut encoded_buffer = bytes::BytesMut::new();
+    original_frame.encode(&mut encoded_buffer);
+
+    // 3. Decode the buffer back into a frame.
+    let decoded_frame = Frame::decode(&encoded_buffer).expect("Decoding should succeed");
+
+    // 4. Assert that the decoded frame is correct and the payload is not polluted.
+    if let Frame::Push {
+        header: decoded_header,
+        payload: decoded_payload,
+    } = decoded_frame
+    {
+        assert_eq!(decoded_header, header, "Decoded header should match original");
+        assert_eq!(
+            decoded_payload, payload,
+            "Decoded payload should match original"
+        );
+        assert_eq!(
+            decoded_payload.len(),
+            payload.len(),
+            "Decoded payload length should be correct and not include the header"
+        );
+    } else {
+        panic!("Decoded frame is not a Push frame");
+    }
 } 
