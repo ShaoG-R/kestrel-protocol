@@ -40,6 +40,11 @@
     *   **关键性能优化 (Performance):**
         *   **批处理优化:** 在 `Socket` 发送任务和 `Endpoint` 事件循环中实现了I/O批处理，显著减少了高吞吐量下的 `await` 次数和系统调用开销。
         *   **减少内存拷贝:** 通过重构 `ReceiveBuffer` 和 `Stream` 的数据路径，消除了数据重组过程中的一次主要内存拷贝，向零拷贝目标迈进。
+    *   **流迁移 (Connection Migration) 与NAT穿透:** 完全实现了协议的连接迁移机制，以应对客户端因NAT重新绑定（NAT Rebinding）而导致的IP和端口变化，显著提升了连接在移动网络和复杂NAT环境下的稳定性。
+        *   **核心机制:** `ReliableUdpSocket` 不再仅依赖 `SocketAddr` 作为连接标识，而是采用 `ConnectionId -> Connection` 的主映射和 `SocketAddr -> ConnectionId` 的辅助映射，实现了双重解耦。
+        *   **被动迁移 (Passive Migration):** 当 `Endpoint` 从一个未知的新地址收到属于现有连接的数据包时，会自动触发路径验证流程，向新地址发送 `PATH_CHALLENGE`。
+        *   **主动迁移 (Active Migration):** 在 `Stream` 上暴露了 `migrate(new_remote_addr)` 异步API，允许应用程序主动发起连接迁移。
+        *   **安全验证:** 只有在收到正确的 `PATH_RESPONSE` 后，连接的远端地址才会被更新，可有效防止IP欺骗攻击。
 
 *   **未完成或不完整的部分**:
     *   **测试覆盖不完整 (Testing):** 现有的单元和集成测试需要大幅扩展，特别是针对各种网络异常情况的模拟测试。
@@ -67,15 +72,6 @@
         *   **核心指标导出:** 暴露关键性能指标（如：`srtt`, `rttvar`, `cwnd`, in-flight 包数量等），以便集成到监控系统（如 Prometheus）。
     4.  **拥塞控制算法扩展 (Congestion Control Algorithm Expansion):**
         *   实现并集成一个备选的拥塞控制算法（例如简化的 BBR），并允许用户通过 `Config` 进行选择。
-    5.  **连接迁移与NAT穿透增强 (Connection Migration & Enhanced NAT Traversal):**
-        *   **问题 (Problem):** 当前协议使用 `SocketAddr` (IP:Port) 作为连接的主要标识。当客户端因为NAT重新绑定（NAT Rebinding）而改变源端口时，连接会中断。
-        *   **解决方案 (Solution):** 引入连接迁移 (Connection Migration) 机制，以 `connection_id` 作为连接的稳定标识符。
-            *   **主分发器重构 (Demultiplexer Rework):** `ReliableUdpSocket` 的主任务需要维护一个 `ConnectionId -> Connection` 的映射表，取代现有的 `SocketAddr -> Connection` 映射。
-            *   **路径验证 (Path Validation):** 为防止IP欺骗攻击，当从一个新的 `SocketAddr` 收到一个现有连接的包时，必须进行路径验证。
-                1.  服务器向新地址发送一个包含随机质询数据的 `PATH_CHALLENGE` 包。
-                2.  客户端必须用一个包含该质询数据的 `PATH_RESPONSE` 包来回应。
-                3.  验证成功后，服务端才将对端的地址更新为新地址。
-            *   **新增协议指令 (New Protocol Commands):** 需要在协议中增加 `PATH_CHALLENGE` (e.g., `0x13`) 和 `PATH_RESPONSE` (e.g., `0x14`) 两个新指令。
 
 ---
 <br/>
@@ -179,29 +175,29 @@
 
 ### 3.1. 核心组件 (Core Components)
 
-*   `ReliableUdpSocket`: 对外的主要接口。它内部持有一个UDP套接字，并负责接收所有传入的数据包。它像一个路由器，根据远端 `SocketAddr` 将包分发给对应的 `Connection` 实例。
-*   `Connection`: 代表一个独立的、可靠的连接。这是实现协议核心逻辑的地方。**每个 `Connection` 实例及其所有状态都应由一个独立的Tokio任务 (`tokio::task`)拥有和管理。** `Connection` 内部需要实现完整的协议状态机、可靠性机制和拥塞控制算法。
-*   `SendBuffer` / `ReceiveBuffer`: `Connection` 内部用于管理待发送、待确认、乱序到达等数据包的缓冲区。
+*   `ReliableUdpSocket`: 对外的主要接口。它内部持有一个UDP套接字，并负责接收所有传入的数据包。它像一个路由器，根据远端 `SocketAddr` 将包分发给对应的 `Endpoint` 实例。
+*   `Endpoint`: 代表一个独立的、可靠的连接端点。这是实现协议核心逻辑的地方。**每个 `Endpoint` 实例及其所有状态都应由一个独立的Tokio任务 (`tokio::task`)拥有和管理。** `Endpoint` 内部需要实现完整的协议状态机、可靠性机制和拥塞控制算法。
+*   `SendBuffer` / `ReceiveBuffer`: `Endpoint` 内部用于管理待发送、待确认、乱序到达等数据包的缓冲区。
 
 ### 3.2. 无锁并发模型 (Lock-free Concurrency Model)
 
 1.  **主接收循环 (Main Receive Loop):** `ReliableUdpSocket` 在一个专用任务中循环调用 `socket.recv_from()`。
-2.  **包分发 (Packet Demultiplexing):** 收到包后，根据远端 `SocketAddr` 从一个 `DashMap<SocketAddr, mpsc::Sender<Frame>>` 中找到对应 `Connection` 的发送端。
-3.  **消息传递 (Message Passing):** 将数据包通过 `mpsc` channel 发送给对应的 `Connection` 任务。
-4.  **连接隔离 (Connection Isolation):** 每个 `Connection` 任务在一个循环中处理来自 `ReliableUdpSocket` 的入站包和来自用户API的出站数据。由于所有状态（如发送/接收缓冲区、RTO计时器、拥塞窗口等）都归此任务私有，因此完全不需要任何锁。
-5.  **用户API (`read`/`write`):** 用户调用 `connection.write(data)` 时，数据也是通过一个 `mpsc` channel 发送给 `Connection` 任务进行处理。`read` 则从一个出站 `mpsc` channel 中接收已排序好的数据。
+2.  **包分发 (Packet Demultiplexing):** 收到包后，根据远端 `SocketAddr` 从一个 `DashMap<SocketAddr, mpsc::Sender<Frame>>` 中找到对应 `Endpoint` 任务的发送端。
+3.  **消息传递 (Message Passing):** 将数据包通过 `mpsc` channel 发送给对应的 `Endpoint` 任务。
+4.  **连接隔离 (Connection Isolation):** 每个 `Endpoint` 任务在一个循环中处理来自 `ReliableUdpSocket` 的入站包和来自用户API的出站数据。由于所有状态（如发送/接收缓冲区、RTO计时器、拥塞窗口等）都归此任务私有，因此完全不需要任何锁。
+5.  **用户API (`read`/`write`):** 用户调用 `stream.write(data)` 时，数据也是通过一个 `mpsc` channel 发送给 `Endpoint` 任务进行处理。`read` 则从一个出站 `mpsc` channel 中接收已排序好的数据。
 
 ```mermaid
 graph TD
     subgraph AI-Implemented Library
-        subgraph Connection Task 1
+        subgraph Endpoint Task 1
             direction LR
             C1_State[Connection State]
             C1_Buf[Buffers]
             C1_Logic[Protocol Logic]
         end
 
-        subgraph Connection Task 2
+        subgraph Endpoint Task 2
             direction LR
             C2_State[Connection State]
             C2_Buf[Buffers]
@@ -212,8 +208,8 @@ graph TD
             A[UdpSocket] -->|recv_from| B{Packet Demultiplexer}
         end
 
-        B -->|mpsc::send to Conn 1| C1_Logic
-        B -->|mpsc::send to Conn 2| C2_Logic
+        B -->|mpsc::send to Endpoint 1| C1_Logic
+        B -->|mpsc::send to Endpoint 2| C2_Logic
     end
 
     UserApp[User Application] -->|write()| UserToConn1[mpsc::send] --> C1_Logic
@@ -222,7 +218,7 @@ graph TD
 
 ### 3.3. 用户接口：流式传输 (User-Facing API: Stream Interface)
 
-最终目标是提供一个抽象的、类似 `tokio::net::TcpStream` 的流式接口。用户不应感知到底层的包、ACK或重传逻辑。他们将通过 `Connection` 对象上的 `AsyncRead` 和 `AsyncWrite` trait 实现的方法进行连续字节流的读写。库的内部负责将字节流分割成 `PUSH` 包，并在接收端重新组装成有序的字节流。
+最终目标是提供一个抽象的、类似 `tokio::net::TcpStream` 的流式接口。用户不应感知到底层的包、ACK或重传逻辑。他们将通过 `Stream` 对象上的 `AsyncRead` 和 `AsyncWrite` trait 实现的方法进行连续字节流的读写。库的内部负责将字节流分割成 `PUSH` 包，并在接收端重新组装成有序的字节流。
 
 ### 3.4. 模块结构风格 (Module Structure Style)
 
@@ -248,12 +244,12 @@ src/
     1.  定义 `Long Header`、`Short Header` 和所有 `command` 类型。
     2.  实现包的序列化和反序列化逻辑。
     3.  创建 `ReliableUdpSocket`，实现基本的UDP包收发循环，并能根据包头（长/短）分发给不同的处理逻辑。
-    4.  实现 `Connection` 骨架和上述的无锁任务模型。
+    4.  实现 `Endpoint` 骨架和上述的无锁任务模型。
 
 *   **Phase 2: 连接生命周期**
     1.  实现0-RTT的快速连接建立逻辑 (`SYN`, `SYN-ACK`)。
     2.  实现四次挥手逻辑 (`FIN`)，能正确关闭连接并清理资源。
-    3.  为 `Connection` 实现完整的状态机。
+    3.  为 `Endpoint` 实现完整的状态机。
 
 *   **Phase 3: 基础可靠性 (RTO与快速重传)**
     1.  为 `PUSH` 包实现序列号和时间戳。
@@ -271,7 +267,7 @@ src/
     3.  实现包粘连（Packet Coalescing）和快速应答逻辑。
 
 *   **Phase 6: API与测试**
-    1.  为 `Connection` 提供类似 `tokio::io::AsyncRead` 和 `tokio::io::AsyncWrite` 的异步方法。
+    1.  为 `Endpoint` 提供类似 `tokio::io::AsyncRead` 和 `tokio::io::AsyncWrite` 的异步方法。
     2.  编写单元测试，覆盖协议逻辑的各个方面。
     3.  编写集成测试，模拟丢包、延迟、乱序等网络状况，验证协议的鲁棒性。
 
