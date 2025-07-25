@@ -233,4 +233,58 @@ async fn test_actor_concurrent_write_sends_to_correct_addresses() {
         Some(&client_b_addr),
         "Data for B was sent to the wrong address"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_actor_with_true_concurrent_handlers() {
+    // This test fully replicates the concurrency model of the failing integration test.
+    // 1. Setup
+    let mut harness = ActorTestHarness::new();
+    let client_a_addr: SocketAddr = "127.0.0.1:3001".parse().unwrap();
+    let client_b_addr: SocketAddr = "127.0.0.1:3002".parse().unwrap();
+
+    // 2. Action: Spawn client tasks to connect concurrently
+    harness.send_syn(client_a_addr, 300).await;
+    harness.send_syn(client_b_addr, 400).await;
+
+    // 3. Action: The main test task now acts as the server, accepting and spawning handlers.
+    let mut handlers = Vec::new();
+    for _ in 0..2 {
+        let (stream, _addr) = harness
+            .accept_rx
+            .recv()
+            .await
+            .expect("Failed to accept connection");
+        let handler = tokio::spawn(async move {
+            let (_, mut writer) = tokio::io::split(stream);
+            writer.write_all(b"probe").await.unwrap();
+        });
+        handlers.push(handler);
+    }
+    for handler in handlers {
+        handler.await.unwrap();
+    }
+
+    // 4. Verification
+    let mut outgoing_commands = HashMap::new();
+    for _ in 0..2 {
+        let cmd = harness
+            .outgoing_cmd_rx
+            .try_recv()
+            .expect("Actor should have sent 2 commands");
+
+        if let SenderTaskCommand::Send(send_cmd) = cmd {
+            // SYN-ACK for a probe has no payload, so we identify by address.
+            outgoing_commands.insert(send_cmd.remote_addr, send_cmd);
+        }
+    }
+
+    assert!(
+        outgoing_commands.contains_key(&client_a_addr),
+        "Did not send a command to client A"
+    );
+    assert!(
+        outgoing_commands.contains_key(&client_b_addr),
+        "Did not send a command to client B"
+    );
 } 
