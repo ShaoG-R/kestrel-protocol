@@ -162,7 +162,7 @@ src/
 └── packet.rs       # 内容为: pub mod command; pub mod header;
 ```
 
-## 5. 其他要求 (Miscellaneous)
+## 4. 其他要求 (Miscellaneous)
 
 *   **加密 (Cryptography):** 根据明确要求，**本项目不包含加密层**。所有数据均以明文形式传输。这简化了协议实现、提升了性能，但牺牲了数据机密性和完整性。
 *   **错误处理:** 使用 `thiserror` crate 定义详细、有意义的错误类型。
