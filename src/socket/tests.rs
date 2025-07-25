@@ -11,7 +11,10 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use tokio::sync::{mpsc, Mutex};
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{mpsc, Mutex},
+};
 
 /// A mock `UdpSocket` for testing the `SocketActor`.
 /// This version uses tokio::sync::Mutex to be Send-safe across .await points.
@@ -19,7 +22,6 @@ use tokio::sync::{mpsc, Mutex};
 struct MockSocket {
     local_addr: SocketAddr,
     packet_rx: Arc<Mutex<mpsc::Receiver<(Vec<u8>, SocketAddr)>>>,
-    _packet_tx: mpsc::Sender<SenderTaskCommand<Self>>,
 }
 
 #[async_trait]
@@ -37,7 +39,9 @@ impl AsyncUdpSocket for MockSocket {
     }
 
     async fn send_to(&self, _buf: &[u8], _target: SocketAddr) -> Result<usize> {
-        unimplemented!("Actor should not call send_to directly, but send commands to SenderTask")
+        // The actor should not send directly, but via the SenderTask.
+        // This method being called would indicate a design flaw.
+        unimplemented!("Actor should not call send_to directly")
     }
 
     fn local_addr(&self) -> Result<SocketAddr> {
@@ -52,11 +56,11 @@ impl BindableUdpSocket for MockSocket {
     }
 }
 
-/// Test harness for the `SocketActor`.
+/// A comprehensive test harness for the `SocketActor`.
 struct ActorTestHarness {
     accept_rx: mpsc::Receiver<(Stream, SocketAddr)>,
     incoming_packet_tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
-    _outgoing_cmd_rx: mpsc::Receiver<SenderTaskCommand<MockSocket>>,
+    outgoing_cmd_rx: mpsc::Receiver<SenderTaskCommand<MockSocket>>,
     actor_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -70,7 +74,6 @@ impl ActorTestHarness {
         let mock_socket = Arc::new(MockSocket {
             local_addr: "127.0.0.1:9999".parse().unwrap(),
             packet_rx: Arc::new(Mutex::new(incoming_packet_rx)),
-            _packet_tx: send_tx.clone(),
         });
 
         let mut actor = SocketActor {
@@ -90,13 +93,13 @@ impl ActorTestHarness {
         Self {
             accept_rx,
             incoming_packet_tx,
-            _outgoing_cmd_rx: outgoing_cmd_rx,
+            outgoing_cmd_rx,
             actor_handle,
         }
     }
 
     async fn send_syn(&self, from_addr: SocketAddr, source_cid: u32) {
-        let syn_packet = Frame::Syn {
+        let syn_frame = Frame::Syn {
             header: LongHeader {
                 command: Command::Syn,
                 protocol_version: Config::default().protocol_version,
@@ -106,7 +109,7 @@ impl ActorTestHarness {
             payload: Bytes::new(),
         };
         let mut buffer = Vec::new();
-        Frame::from(syn_packet).encode(&mut buffer);
+        syn_frame.encode(&mut buffer);
         self.incoming_packet_tx
             .send((buffer, from_addr))
             .await
@@ -121,40 +124,54 @@ impl Drop for ActorTestHarness {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_actor_concurrent_syn_handling_does_not_block() {
+async fn test_actor_sends_to_correct_address_after_accept() {
     // 1. Setup
     let mut harness = ActorTestHarness::new();
-    let client_a_addr: SocketAddr = "127.0.0.1:1001".parse().unwrap();
-    let client_b_addr: SocketAddr = "127.0.0.1:1002".parse().unwrap();
+    let client_addr: SocketAddr = "127.0.0.1:1001".parse().unwrap();
 
-    // 2. Action: Simulate two SYN packets arriving back-to-back.
-    harness.send_syn(client_a_addr, 100).await;
-    harness.send_syn(client_b_addr, 200).await;
+    // 2. Action: Client sends SYN
+    harness.send_syn(client_addr, 123).await;
 
-    // 3. Verification:
-    // The actor should accept both connections and send two streams to the listener
-    // without blocking, even if the listener doesn't immediately `accept()`.
-    // The use of `try_send` in the actor is critical here.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await; // Give actor time to process
+    // 3. Verification (Part 1): Server accepts the connection
+    let (stream, accepted_addr) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), harness.accept_rx.recv())
+            .await
+            .expect("Actor failed to accept connection in time")
+            .unwrap();
+    assert_eq!(
+        accepted_addr, client_addr,
+        "Actor accepted connection from wrong address"
+    );
 
-    let mut accepted_addrs = std::collections::HashSet::new();
-    // Use `try_recv` to drain the channel without blocking the test.
-    while let Ok((_, addr)) = harness.accept_rx.try_recv() {
-        accepted_addrs.insert(addr);
+    // 4. Action: The "user" (our test) writes data to the newly accepted stream.
+    // This forces the server-side Endpoint to send a SYN-ACK.
+    let (_, mut writer) = tokio::io::split(stream);
+    writer
+        .write_all(b"hello from server")
+        .await
+        .expect("Writing to stream failed");
+
+    // 5. Verification (Part 2): The Actor must send a `SendCommand` to the SenderTask
+    // with the `remote_addr` correctly set to the client's address.
+    let sender_command =
+        tokio::time::timeout(std::time::Duration::from_secs(1), harness.outgoing_cmd_rx.recv())
+            .await
+            .expect("Actor did not dispatch a command to the SenderTask")
+            .unwrap();
+
+    match sender_command {
+        SenderTaskCommand::Send(send_command) => {
+            assert_eq!(
+                send_command.remote_addr, client_addr,
+                "CRITICAL: Actor dispatched SendCommand with the wrong remote address!"
+            );
+
+            // Optional: check if the first frame is indeed a SYN-ACK
+            assert!(
+                matches!(send_command.frames.get(0), Some(Frame::SynAck { .. })),
+                "Expected the first frame to be a SYN-ACK"
+            );
+        }
+        _ => panic!("Expected SenderTaskCommand::Send, but got something else"),
     }
-
-    // Verify that we accepted connections from both clients.
-    let mut expected_addrs = std::collections::HashSet::new();
-    expected_addrs.insert(client_a_addr);
-    expected_addrs.insert(client_b_addr);
-
-    assert_eq!(
-        accepted_addrs.len(),
-        2,
-        "Actor should have processed both SYN packets"
-    );
-    assert_eq!(
-        accepted_addrs, expected_addrs,
-        "The actor did not correctly accept both concurrent connections."
-    );
 } 
