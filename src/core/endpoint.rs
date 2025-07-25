@@ -22,7 +22,7 @@ use crate::{
 use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, oneshot},
     time::{Instant, sleep_until},
 };
 use tracing::info;
@@ -34,6 +34,10 @@ use frame_factory::*;
 pub enum StreamCommand {
     SendData(Bytes),
     Close,
+    Migrate {
+        new_addr: SocketAddr,
+        notifier: oneshot::Sender<Result<()>>,
+    },
 }
 
 /// Represents one end of a reliable connection.
@@ -220,6 +224,7 @@ impl Endpoint {
             self.state = ConnectionState::ValidatingPath {
                 new_addr: src_addr,
                 challenge_data,
+                notifier: None, // No notifier for this case, as it's a passive migration
             };
             let challenge_frame = create_path_challenge_frame(
                 self.peer_cid,
@@ -312,7 +317,7 @@ impl Endpoint {
                 self.send_frame_to(response_frame, src_addr).await?;
             }
             Frame::PathResponse { header: _, challenge_data } => {
-                if let ConnectionState::ValidatingPath { new_addr, challenge_data: expected_challenge } = self.state {
+                if let ConnectionState::ValidatingPath { new_addr, challenge_data: expected_challenge, notifier } = self.state.clone() {
                     if src_addr == new_addr && challenge_data == expected_challenge {
                         // Path validation successful!
                         info!(cid = self.local_cid, old_addr = %self.remote_addr, new_addr = %new_addr, "Path validation successful, migrating connection.");
@@ -320,6 +325,11 @@ impl Endpoint {
                         self.remote_addr = new_addr;
                         self.state = ConnectionState::Established;
 
+                        // Notify the caller of migrate() if there is one
+                        if let Some(notifier) = notifier {
+                            let _ = notifier.send(Ok(()));
+                        }
+                        
                         // Notify ReliableUdpSocket to update the addr_to_cid map.
                         let _ = self
                             .socket_command_tx
@@ -356,6 +366,28 @@ impl Endpoint {
                 // Immediately attempt to send a FIN packet.
                 self.packetize_and_send().await?;
             }
+            StreamCommand::Migrate { new_addr, notifier } => {
+                if self.state != ConnectionState::Established {
+                    let _ = notifier.send(Err(Error::NotConnected));
+                    return Ok(());
+                }
+
+                info!(cid = self.local_cid, new_addr = %new_addr, "Actively migrating to new address.");
+                let challenge_data = rand::random();
+                self.state = ConnectionState::ValidatingPath {
+                    new_addr,
+                    challenge_data,
+                    notifier: Some(notifier),
+                };
+
+                let challenge_frame = create_path_challenge_frame(
+                    self.peer_cid,
+                    self.reliability.next_sequence_number(),
+                    self.start_time,
+                    challenge_data,
+                );
+                self.send_frame_to(challenge_frame, new_addr).await?;
+            }
         }
         Ok(())
     }
@@ -366,9 +398,21 @@ impl Endpoint {
             self.send_frames(frames_to_resend).await?;
         }
 
+        // Check for path validation timeout
+        if let ConnectionState::ValidatingPath { notifier, .. } = &mut self.state {
+            if now.saturating_duration_since(self.last_recv_time) > self.config.idle_timeout {
+                info!(cid = self.local_cid, "Path validation timed out.");
+                if let Some(notifier) = notifier.take() {
+                    let _ = notifier.send(Err(Error::PathValidationTimeout));
+                }
+                self.state = ConnectionState::Established; // Revert to established
+            }
+        }
+
         if now.saturating_duration_since(self.last_recv_time) > self.config.idle_timeout {
             info!(cid = self.local_cid, "Connection timed out");
             self.state = ConnectionState::Closed;
+            return Err(Error::ConnectionTimeout);
         }
         Ok(())
     }

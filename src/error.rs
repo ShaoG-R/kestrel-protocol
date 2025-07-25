@@ -27,10 +27,20 @@ pub enum Error {
     #[error("Connection is closed or closing")]
     ConnectionAborted,
 
-    /// The connection timed out.
-    /// 连接超时。
+    /// The connection timed out due to inactivity.
+    /// 连接因不活动而超时。
     #[error("Connection timed out")]
-    Timeout,
+    ConnectionTimeout,
+
+    /// The path validation process timed out.
+    /// 路径验证过程超时。
+    #[error("Path validation timed out")]
+    PathValidationTimeout,
+
+    /// The operation could not be completed because the connection is not in an established state.
+    /// 由于连接未处于建立状态，操作无法完成。
+    #[error("Connection not established")]
+    NotConnected,
 
     /// An internal channel for communication between tasks was closed unexpectedly.
     /// 用于任务间通信的内部通道意外关闭。
@@ -54,10 +64,12 @@ impl From<Error> for std::io::Error {
             Error::Io(e) => e,
             Error::ConnectionClosed => ErrorKind::ConnectionReset.into(),
             Error::ConnectionAborted => ErrorKind::ConnectionAborted.into(),
-            Error::Timeout => ErrorKind::TimedOut.into(),
+            Error::ConnectionTimeout => ErrorKind::TimedOut.into(),
+            Error::PathValidationTimeout => ErrorKind::TimedOut.into(),
             Error::InvalidPacket => ErrorKind::InvalidData.into(),
             Error::ChannelClosed => ErrorKind::BrokenPipe.into(),
             Error::MessageTooLarge => ErrorKind::InvalidInput.into(),
+            Error::NotConnected => ErrorKind::NotConnected.into(),
         }
     }
 }

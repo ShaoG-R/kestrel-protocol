@@ -10,12 +10,14 @@
 //! 为可靠连接提供熟悉的基于流的接口。
 
 use crate::core::endpoint::StreamCommand;
+use crate::error::Result;
 use bytes::{Buf, Bytes};
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// A reliable, ordered, stream-oriented connection.
 ///
@@ -47,6 +49,30 @@ impl Stream {
     /// Endpoint worker task has terminated.
     pub fn is_closed(&self) -> bool {
         self.tx_to_endpoint.is_closed()
+    }
+
+    /// Actively migrates the connection to a new remote address.
+    ///
+    /// This function will initiate the path validation process and return once
+    /// the migration is successfully completed or has failed.
+    ///
+    /// 主动将连接迁移到一个新的远程地址。
+    ///
+    /// 此函数将启动路径验证过程，并在迁移成功完成或失败后返回。
+    pub async fn migrate(&self, new_remote_addr: SocketAddr) -> Result<()> {
+        let (notifier_tx, notifier_rx) = oneshot::channel();
+        let cmd = StreamCommand::Migrate {
+            new_addr: new_remote_addr,
+            notifier: notifier_tx,
+        };
+
+        if self.tx_to_endpoint.send(cmd).await.is_err() {
+            return Err(crate::error::Error::ChannelClosed);
+        }
+
+        notifier_rx
+            .await
+            .map_err(|_| crate::error::Error::ChannelClosed)?
     }
 }
 
