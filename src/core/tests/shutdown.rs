@@ -184,8 +184,16 @@ async fn test_shutdown_when_validating_path() {
     // 4. The endpoint should abort immediately, not wait for the migration timeout.
     // The migration notifier should receive an error indicating the connection was closed.
     let migration_result = timeout(Duration::from_millis(100), rx).await;
+
+    // We expect the endpoint to close promptly, cancelling the migration.
+    // This means the timeout should NOT be hit, and the inner result from the
+    // oneshot channel should be an error because the sender was dropped.
     assert!(
-        migration_result.is_err(),
-        "Migration should not succeed; it should be cancelled by the close."
+        migration_result.is_ok(),
+        "Timeout should not be hit; the endpoint should close immediately."
+    );
+    assert!(
+        migration_result.unwrap().is_err(),
+        "Migration should be cancelled by the close, causing a channel receive error."
     );
 } 
