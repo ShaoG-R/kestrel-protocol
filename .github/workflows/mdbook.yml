@@ -23,7 +23,7 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Install mdbook
-        run: cargo install mdbook --locked --force
+        run: cargo install mdbook --locked
       - name: Build mdBook
         run: |
           cd docs
