@@ -24,7 +24,6 @@
     - [滑动窗口流量控制](./features/02-core-protocol/07-flow-control.md)
     - [基于延迟的拥塞控制 (Vegas)](./features/02-core-protocol/08-congestion-control-vegas.md)
     - [拥塞控制之慢启动](./features/02-core-protocol/09-slow-start.md)
-    - [数据流到数据包转换](./features/02-core-protocol/10-stream-to-packet.md)
 - [并发与连接管理](./features/03-concurrency/README.md)
     - [基于MPSC的无锁并发模型](./features/03-concurrency/01-mpsc-concurrency-model.md)
     - [流迁移与NAT穿透](./features/03-concurrency/02-connection-migration.md)
@@ -38,4 +37,5 @@
 # 开发文档
 
 - [开发文档](./dev-docs/README.md)
-    - [连接关闭机制](./dev-docs/01-connection-shutdown.md)
+    - [数据流到数据包转换](./dev-docs/01-stream-to-packet.md)
+    - [连接关闭机制](./dev-docs/02-connection-shutdown.md)
