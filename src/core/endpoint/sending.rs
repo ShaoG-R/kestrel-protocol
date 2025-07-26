@@ -14,9 +14,14 @@ use tokio::time::Instant;
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
     pub(super) async fn packetize_and_send(&mut self) -> Result<()> {
-        let mut frames_to_send = self
-            .reliability
-            .packetize_stream_data(self.peer_cid, Instant::now(), self.start_time);
+        let now = Instant::now();
+        // Packetize any buffered data.
+        let mut frames = self.reliability.packetize_stream_data(
+            self.peer_cid,
+            self.peer_recv_window,
+            now,
+            self.start_time,
+        );
 
         if self.state == super::state::ConnectionState::Closing
             && !self.reliability.has_fin_in_flight()
@@ -28,11 +33,11 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             );
             self.reliability
                 .add_fin_to_in_flight(fin_frame.clone(), Instant::now());
-            frames_to_send.push(fin_frame);
+            frames.push(fin_frame);
         }
 
-        if !frames_to_send.is_empty() {
-            self.send_frames(frames_to_send).await?;
+        if !frames.is_empty() {
+            self.send_frames(frames).await?;
         }
         Ok(())
     }

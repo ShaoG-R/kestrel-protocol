@@ -9,12 +9,16 @@
 //! 该层负责序列化、确认、重传（RTO）、SACK处理和重排序。
 //! 它提供了一个发送和接收可靠数据块的接口。
 
+pub mod packetizer;
 pub mod recv_buffer;
 pub mod rtt;
 pub mod send_buffer;
 
 use self::{
-    recv_buffer::ReceiveBuffer, rtt::RttEstimator, send_buffer::SendBuffer,
+    packetizer::{packetize, PacketizerContext},
+    recv_buffer::ReceiveBuffer,
+    rtt::RttEstimator,
+    send_buffer::SendBuffer,
 };
 use crate::{
     congestion::CongestionControl,
@@ -118,59 +122,51 @@ impl ReliabilityLayer {
     pub fn next_rto_deadline(&self) -> Option<Instant> {
         self.send_buffer.next_rto_deadline(self.rto_estimator.rto())
     }
-    
+
     /// Takes data from the stream buffer and packetizes it.
     pub fn packetize_stream_data(
         &mut self,
         peer_cid: u32,
+        peer_recv_window: u32,
         now: Instant,
         start_time: Instant,
     ) -> Vec<Frame> {
-        let mut frames = Vec::new();
-        // Calculate the sending permit before the loop to ensure atomicity for this call.
-        let permit = self
-            .congestion_control
-            .congestion_window()
-            .saturating_sub(self.send_buffer.in_flight_count() as u32);
+        let (recv_next_sequence, local_window_size) = {
+            let info = self.get_ack_info();
+            (info.1, info.2)
+        };
+        let context = PacketizerContext {
+            peer_cid,
+            timestamp: now.duration_since(start_time).as_millis() as u32,
+            congestion_window: self.congestion_control.congestion_window(),
+            in_flight_count: self.send_buffer.in_flight_count(),
+            peer_recv_window,
+            max_payload_size: self.config.max_payload_size,
+            ack_info: (recv_next_sequence, local_window_size),
+        };
 
-        for _ in 0..permit {
-            if self.is_send_buffer_empty() {
-                break;
-            }
-            // We re-check can_send_more inside the loop to respect the peer_recv_window,
-            // which is less likely to change mid-function but is still good practice.
-            if !self.can_send_more(self.recv_buffer.window_size() as u32) {
-                break;
-            }
+        let frames = packetize(
+            &context,
+            &mut self.send_buffer,
+            &mut self.sequence_number_counter,
+        );
 
-            let Some(chunk) = self.send_buffer.create_chunk(self.config.max_payload_size) else {
-                break;
-            };
-
-            let (_, next_ack, window) = self.get_ack_info();
-            let frame = Frame::new_push(
-                peer_cid,
-                self.next_sequence_number(),
-                next_ack,
-                window,
-                now.duration_since(start_time).as_millis() as u32,
-                chunk,
-            );
-            frames.push(frame.clone());
-            self.send_buffer.add_in_flight(frame, now);
+        for frame in &frames {
+            self.send_buffer.add_in_flight(frame.clone(), now);
         }
+
         frames
     }
-    
+
     /// Determines if more packets can be sent.
     pub fn can_send_more(&self, peer_recv_window: u32) -> bool {
         let in_flight = self.send_buffer.in_flight_count() as u32;
         let cwnd = self.congestion_control.congestion_window();
         in_flight < cwnd && in_flight < peer_recv_window
     }
-    
+
     // --- Passthrough methods to recv_buffer ---
-    
+
     pub fn receive_push(&mut self, sequence_number: u32, payload: Bytes) {
         self.recv_buffer.receive(sequence_number, payload);
         self.ack_pending = true;
@@ -188,7 +184,7 @@ impl ReliabilityLayer {
     pub fn reassemble(&mut self) -> Option<Vec<Bytes>> {
         self.recv_buffer.reassemble()
     }
-    
+
     pub fn get_ack_info(&self) -> (Vec<SackRange>, u32, u16) {
         (
             self.recv_buffer.get_sack_ranges(),
@@ -228,7 +224,7 @@ impl ReliabilityLayer {
     pub fn is_in_flight_empty(&self) -> bool {
         self.send_buffer.is_in_flight_empty()
     }
-    
+
     pub fn has_fin_in_flight(&self) -> bool {
         self.send_buffer.has_fin_in_flight()
     }
@@ -236,9 +232,9 @@ impl ReliabilityLayer {
     pub fn add_fin_to_in_flight(&mut self, fin_frame: Frame, now: Instant) {
         self.send_buffer.add_in_flight(fin_frame, now);
     }
-    
+
     // --- Internal helpers ---
-    
+
     pub fn next_sequence_number(&mut self) -> u32 {
         let seq = self.sequence_number_counter;
         self.sequence_number_counter += 1;

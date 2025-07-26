@@ -14,12 +14,12 @@ sequenceDiagram
     participant Stream as stream.rs
     participant Endpoint as endpoint/logic.rs
     participant ReliabilityLayer as reliability.rs
+    participant Packetizer as reliability/packetizer.rs
     participant SocketActor as socket/actor.rs
 
     UserApp->>+Stream: write(data)
     Note over Stream: 1. 接收写入
 
-    %% Corrected Line: Added '+' to activate Endpoint
     Stream->>+Endpoint: StreamCommand::SendData(Bytes)
     Note over Stream: 通过MPSC通道发送命令
 
@@ -30,7 +30,11 @@ sequenceDiagram
 
     Note over Endpoint: 3. 在事件循环中打包
     Endpoint->>+ReliabilityLayer: reliability.packetize_stream_data()
-    Note over ReliabilityLayer: 从SendBuffer取出数据<br/>分割成指定大小的chunk<br/>创建PUSH Frame
+    Note over ReliabilityLayer: 3a. 收集打包上下文(Context)
+    ReliabilityLayer->>+Packetizer: packetizer::packetize(context, &mut send_buffer, ...)
+    Note over Packetizer: 3b. 执行纯粹的打包逻辑
+    Packetizer-->>-ReliabilityLayer: Vec<Frame>
+    Note over ReliabilityLayer: 3c. 将打包好的帧<br>加入在途队列
     ReliabilityLayer-->>-Endpoint: Vec<Frame>
 
     Note over Endpoint: 4. 发送打包好的帧
@@ -63,17 +67,21 @@ sequenceDiagram
     2.  `ReliabilityLayer` 进一步将数据写入其内部的 `SendBuffer`。
     3.  至此，用户数据被高效地追加到了连接的发送缓冲区中，等待被打包。
 
-#### 3. 在事件循环中打包 (`src/core/reliability.rs`)
+#### 3. 在事件循环中打包 (`src/core/reliability.rs` & `src/core/reliability/packetizer.rs`)
 
--   **入口**: 在 `Endpoint` 的 `run` 方法中，每次事件处理（如接收到网络包或用户命令）结束后，都会尝试发送数据。
--   **实现**: `Endpoint` 调用 `self.packetize_and_send()`，该方法内部会调用 `self.reliability.packetize_stream_data()`。
--   **动作**: 这是从**流到包**转换的核心步骤。`packetize_stream_data` 函数：
-    1.  **检查发送许可**: 首先根据拥塞控制窗口（`cwnd`）和对方的接收窗口，计算出当前可以发送多少个数据包。
-    2.  **循环打包**: 在发送许可范围内进行循环。
-    3.  **分割数据**: 在每次循环中，从 `SendBuffer` 中取出不超过 `config.max_payload_size` 的数据块（`chunk`）。
-    4.  **创建帧**: 使用 `Frame::new_push()` 安全构造函数，将 `chunk` 包装成一个 `PUSH` 帧。此构造函数会自动填充所有头部信息（连接ID、序列号、时间戳、`payload_length`等）。
-    5.  **收集帧**: 将创建好的帧添加到一个 `Vec<Frame>` 中。
-    6.  **返回结果**: 函数返回一个包含一个或多个 `PUSH` 帧的向量。
+为了实现关注点分离和更好的可测试性，核心的打包逻辑被抽象到了一个无状态的 **`Packetizer`** 模块中。
+
+-   **入口**: 在 `Endpoint` 的 `run` 方法中，每次事件处理结束后，都会调用 `self.reliability.packetize_stream_data()`。
+-   **实现**: `packetize_stream_data` 函数现在扮演一个**协调者**的角色。
+-   **动作**:
+    1.  **收集上下文**: `ReliabilityLayer` 从其拥有的各个组件（拥塞控制器、接收缓冲区等）收集打包所需的所有只读信息（如 `cwnd`, `peer_recv_window` 等），并创建一个 `PacketizerContext` 实例。
+    2.  **委托打包**: `ReliabilityLayer` 调用位于 `packetizer.rs` 中的 `packetizer::packetize()` 函数，将 `PacketizerContext` 和对 `SendBuffer` 的可变引用传递给它。
+    3.  **执行打包 (`packetizer.rs`)**: `packetize` 函数执行纯粹的打包逻辑：
+        *   根据上下文中的 `cwnd` 和 `peer_recv_window` 计算发送许可。
+        *   在许可范围内，从 `SendBuffer` 中循环取出数据块（`chunk`）。
+        *   使用 `Frame::new_push()` 将 `chunk` 创建为 `PUSH` 帧。
+    4.  **返回结果**: `packetize` 函数返回一个包含一个或多个 `PUSH` 帧的向量给 `ReliabilityLayer`。
+    5.  **更新在途状态**: `ReliabilityLayer` 接收到这些帧后，负责将它们添加到 `SendBuffer` 的在途（in-flight）队列中，然后将帧向量返回给 `Endpoint`。
 
 #### 4. 发送打包好的帧 (`src/core/endpoint/logic.rs`)
 
