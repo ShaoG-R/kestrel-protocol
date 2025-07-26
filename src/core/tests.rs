@@ -6,6 +6,7 @@
 mod concurrency;
 mod handshake;
 mod lifecycle;
-mod reliability;
-mod shutdown;
-mod state;
+pub mod reliability;
+pub mod shutdown;
+pub mod state;
+pub mod retransmission;

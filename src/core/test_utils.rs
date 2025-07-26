@@ -305,6 +305,48 @@ pub fn setup_client_server_with_filter(
     )
 }
 
+/// Creates a fully connected pair of client and server `Stream`s using a mock
+/// socket, with the ability to inject a packet filter to simulate network issues.
+///
+/// This is a high-level test utility that returns ready-to-use `Stream` objects,
+/// perfect for integration tests that need to verify `AsyncRead`/`AsyncWrite` behavior.
+pub async fn new_stream_pair_with_filter<F>(
+    client_config: Config,
+    server_config: Config,
+    // The filter is applied to packets sent by the CLIENT.
+    client_packet_filter: F,
+) -> (
+    crate::core::stream::Stream,
+    crate::core::stream::Stream,
+) where
+    F: Fn(&Frame) -> bool + Send + Sync + 'static,
+{
+    use crate::core::stream::Stream;
+
+    let client_tx_filter = Arc::new(client_packet_filter);
+    // The server never drops packets in this setup.
+    let server_tx_filter = Arc::new(|_: &Frame| -> bool { true });
+
+    let (client_harness, server_harness, _, _) = setup_client_server_with_filter(
+        client_config,
+        server_config,
+        client_tx_filter,
+        server_tx_filter,
+    );
+
+    let client_stream = Stream::new(
+        client_harness.tx_to_endpoint_user,
+        client_harness.rx_from_endpoint_user,
+    );
+
+    let server_stream = Stream::new(
+        server_harness.tx_to_endpoint_user,
+        server_harness.rx_from_endpoint_user,
+    );
+
+    (client_stream, server_stream)
+}
+
 /// Sets up a server-side `Endpoint` for isolated testing.
 ///
 /// This does NOT spawn the relay tasks, allowing the test to act as the network

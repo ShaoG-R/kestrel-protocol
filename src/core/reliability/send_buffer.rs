@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::debug;
+use tracing::trace;
 
 /// A packet that has been sent but not yet acknowledged (in-flight).
 #[derive(Debug, Clone)]
@@ -148,6 +149,10 @@ impl SendBuffer {
         // The trigger for fast retransmission is an ACK for a packet with a higher
         // sequence number than a packet that is still in flight.
         if let Some(&highest_acked_in_this_ack) = acked_in_sack.iter().max() {
+            trace!(
+                highest_acked = highest_acked_in_this_ack,
+                "Checking for fast retransmission against in-flight packets."
+            );
             // Iterate through in-flight packets that were sent *before* the highest SACKed packet.
             for (&seq, _packet) in self.in_flight.range(..highest_acked_in_this_ack) {
                 keys_to_modify.push(seq);
@@ -156,7 +161,16 @@ impl SendBuffer {
 
         for seq in keys_to_modify {
             if let Some(packet) = self.in_flight.get_mut(&seq) {
+                let old_count = packet.fast_retx_count;
                 packet.fast_retx_count += 1;
+                trace!(
+                    seq,
+                    old_count,
+                    new_count = packet.fast_retx_count,
+                    threshold = fast_retx_threshold,
+                    "Packet skipped by SACK, incrementing fast retransmission count."
+                );
+
                 if packet.fast_retx_count >= fast_retx_threshold {
                     // Avoid re-adding if another SACK already triggered it.
                     if !frames_to_fast_retx
