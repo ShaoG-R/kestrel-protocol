@@ -1,5 +1,6 @@
 //! Tests for 1-RTT and 0-RTT connection handshakes.
 
+use crate::core::test_utils::init_tracing;
 use crate::{
     config::Config,
     core::{endpoint::StreamCommand, test_utils::setup_server_harness},
@@ -11,6 +12,7 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn test_1rtt_handshake_with_server_data() {
+    init_tracing();
     // This test simulates a 1-RTT handshake where the server application
     // sends data immediately upon accepting a connection, which is coalesced
     // with the SYN-ACK frame.
@@ -97,6 +99,7 @@ async fn test_1rtt_handshake_with_server_data() {
 
 #[tokio::test]
 async fn test_0rtt_handshake_with_client_data() {
+    init_tracing();
     // This test simulates a 0-RTT handshake where the client sends data
     // immediately with its initial SYN packet.
 
@@ -136,23 +139,7 @@ async fn test_0rtt_handshake_with_client_data() {
         .await
         .unwrap();
 
-    // 4. We should receive an immediate standalone ACK for the 0-RTT PUSH frame.
-    let standalone_ack_cmd = tokio::time::timeout(
-        Duration::from_millis(50),
-        harness.rx_from_endpoint_network.recv(),
-    )
-    .await
-    .expect("Server should send a standalone ACK for the PUSH frame")
-    .unwrap();
-
-    if let SenderTaskCommand::Send(cmd) = standalone_ack_cmd {
-        assert_eq!(cmd.frames.len(), 1, "Expected a single ACK frame");
-        assert!(matches!(&cmd.frames[0], Frame::Ack { .. }));
-    } else {
-        panic!("Expected a Send command for the standalone ACK");
-    }
-
-    // 5. The 0-RTT data should be available for the server app to read.
+    // 4. The 0-RTT data should be immediately available for the server app to read.
     let received_data = tokio::time::timeout(
         Duration::from_millis(50),
         harness.rx_from_endpoint_user.recv(),
@@ -163,14 +150,14 @@ async fn test_0rtt_handshake_with_client_data() {
     assert_eq!(received_data.len(), 1);
     assert_eq!(received_data[0], "hello 0-rtt");
 
-    // 6. The server app can now write a response, which triggers the SYN-ACK.
+    // 5. The server app can now write a response, which triggers the SYN-ACK.
     harness
         .tx_to_endpoint_user
         .send(StreamCommand::SendData(Bytes::from_static(b"ack 0-rtt")))
         .await
         .unwrap();
 
-    // 7. Verify the server sends a SYN-ACK and the response data.
+    // 6. Verify the server sends a SYN-ACK and the response data.
     let response_cmd = tokio::time::timeout(
         Duration::from_millis(50),
         harness.rx_from_endpoint_network.recv(),

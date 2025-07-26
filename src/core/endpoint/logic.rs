@@ -186,8 +186,12 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             Frame::Push { header, payload } => {
                 self.reliability
                     .receive_push(header.sequence_number, payload);
-                // Always send an ACK for a PUSH frame to ensure timely delivery.
-                self.send_standalone_ack().await?;
+                // Only send an immediate standalone ACK if the connection is already established.
+                // For 0-RTT PUSH frames received during the `SynReceived` state, the ACK
+                // will be piggybacked onto the eventual SYN-ACK.
+                if self.state != ConnectionState::SynReceived {
+                    self.send_standalone_ack().await?;
+                }
             }
             Frame::Ack { header, payload } => {
                 self.peer_recv_window = header.recv_window_size as u32;

@@ -30,11 +30,8 @@ sequenceDiagram
     ServerApp->>ServerStack: stream.read()
     ServerApp-->>ServerApp: 获得 initial_data
 
-    Note right of ServerStack: 服务端已收到0-RTT数据, <br/>并立即为PUSH发送一个独立的ACK
-    ServerStack-->>ClientStack: [ACK]
-
     ServerApp->>ServerStack: stream.write(response_data)
-    Note right of ServerStack: 应用层写入触发 SYN-ACK
+    Note right of ServerStack: 应用层写入触发 SYN-ACK。<br/>对0-RTT数据的确认会<br/>捎带在后续的数据包中。
     ServerStack->>ClientStack: 发送 UDP 包 [SYN-ACK, PUSH(response_data)]
 
     ClientStack-->>ClientApp: 连接建立, 可读/写
@@ -48,8 +45,8 @@ sequenceDiagram
         *   关键地，`SocketActor`会**立即**将`SYN`帧之后的所有`PUSH`帧转发给这个新创建的`Endpoint`。
     3.  **数据立即可用**: `Endpoint`在启动后，其接收队列中已经有了0-RTT数据。这些数据被正常处理并放入接收缓冲区，因此服务器应用几乎可以立刻通过`stream.read()`读到这份数据，真正实现0-RTT。
     4.  **服务端响应**:
-        *   `Endpoint`在收到`PUSH`帧后，会立即回复一个独立的`ACK`帧以快速确认。
-        *   当服务器应用调用`stream.write()`发送响应数据时，`Endpoint`才会将`SYN-ACK`帧和包含响应数据的`PUSH`帧聚合在一起发送给客户端。
+        *   为了网络效率，服务器在收到0-RTT的`PUSH`帧后，并**不会**立即回复一个独立的`ACK`。
+        *   当服务器应用调用`stream.write()`发送响应数据时，`Endpoint`才会将`SYN-ACK`帧和包含响应数据的`PUSH`帧聚合在一起发送给客户端。对0-RTT数据的确认信息（更新的期望收包序号`recv_next_sequence`）会**捎带**在这些出站数据包的头部中，从而避免了额外的ACK网络开销。
 
 - **1-RTT (客户端无初始数据)**:
     - 流程简化：客户端只发送一个单独的`SYN`帧。服务器收到后，创建`Endpoint`并返回`Stream`。当服务器应用调用`stream.write()`时，会发送`SYN-ACK`（可能聚合了数据），完成握手。
