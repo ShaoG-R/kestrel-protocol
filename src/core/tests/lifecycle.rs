@@ -93,16 +93,18 @@ async fn test_connection_migration() {
     }
 
     // 2. Simulate a PUSH packet arriving from a new address. This should trigger path validation.
+    let payload = Bytes::from_static(b"data from new address");
     let push_from_new_addr = Frame::Push {
         header: ShortHeader {
             command: Command::Push,
             connection_id: 2, // The server's CID
+            payload_length: payload.len() as u16,
             sequence_number: 10,
             recv_window_size: 1024,
             timestamp: 0,
             recv_next_sequence: 0,
         },
-        payload: Bytes::from_static(b"data from new address"),
+        payload,
     };
     harness
         .tx_to_endpoint_network

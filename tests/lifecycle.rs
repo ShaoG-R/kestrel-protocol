@@ -240,23 +240,27 @@ async fn test_concurrent_connections_cid_isolation() {
                     String::from_utf8_lossy(&id_buf)
                 );
 
-                // C. Based on the identity, read the correct message and send the correct ack.
+                // C. Based on the identity, read the rest of the message until the client
+                // sends a FIN (indicated by read_to_end finishing).
                 let ident_str = String::from_utf8(id_buf).unwrap();
-                if ident_str == "ident_A" {
-                    let mut msg_buf = vec![0; 12]; // "from clientA"
-                    reader.read_exact(&mut msg_buf).await.unwrap();
-                    assert_eq!(&msg_buf, b"from clientA");
-                    writer.write_all(b"server ack A").await.unwrap();
-                } else if ident_str == "ident_B" {
-                    let mut msg_buf = vec![0; 12]; // "from clientB"
-                    reader.read_exact(&mut msg_buf).await.unwrap();
-                    assert_eq!(&msg_buf, b"from clientB");
-                    writer.write_all(b"server ack B").await.unwrap();
+                let (expected_msg, response_msg) = if ident_str == "ident_A" {
+                    (b"from clientA".to_vec(), b"server ack A")
                 } else {
-                    panic!("Unknown client identity received: {:?}", ident_str);
-                }
+                    (b"from clientB".to_vec(), b"server ack B")
+                };
+
+                let mut msg_buf = Vec::new();
+                reader
+                    .read_to_end(&mut msg_buf)
+                    .await
+                    .expect("Failed to read client message");
+                assert_eq!(msg_buf, expected_msg);
+
+
+                // D. Now that we've received everything, send the final ack.
+                writer.write_all(response_msg).await.unwrap();
                 
-                // D. Gracefully shutdown the connection from the server side.
+                // E. Gracefully shutdown the connection from the server side.
                 writer
                     .shutdown()
                     .await
@@ -311,17 +315,20 @@ async fn test_concurrent_connections_cid_isolation() {
             writer.write_all(msg.as_bytes()).await.unwrap();
             tracing::info!("[Client {}] Sent identity and message.", id);
 
-            // C. Wait for the server's final, unique acknowledgment.
+            // C. Shutdown our writer to send a FIN signal.
+            // This tells the server we are done sending data.
+            writer.shutdown().await.unwrap();
+            tracing::info!("[Client {}] Writer shut down.", id);
+
+            // D. Wait for the server's final, unique acknowledgment.
             let expected_ack = format!("server ack {}", id);
-            let mut ack_buf = vec![0; expected_ack.len()];
-            reader.read_exact(&mut ack_buf).await.unwrap();
+            let mut ack_buf = Vec::new();
+            reader
+                .read_to_end(&mut ack_buf)
+                .await
+                .expect("Failed to read server ack");
             assert_eq!(ack_buf, expected_ack.as_bytes());
             tracing::info!("[Client {}] Received correct final ack.", id);
-
-            // D. Gracefully shutdown the connection from the client side.
-            // This is crucial for the test to terminate cleanly.
-            writer.shutdown().await.unwrap();
-            tracing::info!("[Client {}] Shutdown complete.", id);
         });
         client_handles.push(client_handle);
     }

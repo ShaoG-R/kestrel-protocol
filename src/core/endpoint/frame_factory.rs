@@ -21,6 +21,7 @@ pub(super) fn create_syn_frame(config: &Config, local_cid: u32, initial_payload:
     let syn_header = LongHeader {
         command: Command::Syn,
         protocol_version: config.protocol_version,
+        payload_length: initial_payload.len() as u16,
         destination_cid: 0, // Server's CID is unknown
         source_cid: local_cid,
     };
@@ -40,6 +41,7 @@ pub(super) fn create_syn_ack_frame(
     let syn_ack_header = LongHeader {
         command: Command::SynAck,
         protocol_version: config.protocol_version,
+        payload_length: payload.len() as u16,
         destination_cid: peer_cid,
         source_cid: local_cid,
     };
@@ -63,6 +65,7 @@ pub(super) fn create_ack_frame(
     let ack_header = ShortHeader {
         command: Command::Ack,
         connection_id: peer_cid,
+        payload_length: ack_payload.len() as u16,
         recv_window_size: window_size,
         timestamp: Instant::now().duration_since(start_time).as_millis() as u32,
         sequence_number: 0, // ACK frames do not have a sequence number
@@ -84,6 +87,7 @@ pub(super) fn create_fin_frame(
     let fin_header = ShortHeader {
         command: Command::Fin,
         connection_id: peer_cid,
+        payload_length: 0,
         recv_window_size: 0, // No more data will be received
         timestamp: Instant::now().duration_since(start_time).as_millis() as u32,
         sequence_number,
@@ -102,6 +106,7 @@ pub(crate) fn create_path_challenge_frame(
     let header = ShortHeader {
         command: Command::PathChallenge,
         connection_id: peer_cid,
+        payload_length: 8, // The payload is the 8-byte challenge data
         recv_window_size: 0, // Not relevant
         timestamp: Instant::now().duration_since(start_time).as_millis() as u32,
         sequence_number,
@@ -123,6 +128,7 @@ pub(crate) fn create_path_response_frame(
     let header = ShortHeader {
         command: Command::PathResponse,
         connection_id: peer_cid,
+        payload_length: 8, // The payload is the 8-byte challenge data
         recv_window_size: 0, // Not relevant
         timestamp: Instant::now().duration_since(start_time).as_millis() as u32,
         sequence_number,
@@ -151,6 +157,7 @@ mod tests {
         let frame = create_syn_frame(&config, 123, Bytes::from_static(b"hello"));
         match frame {
             Frame::Syn { header, payload } => {
+                assert_eq!(header.payload_length, 5);
                 assert_eq!(header.source_cid, 123);
                 assert_eq!(payload, "hello");
             }
@@ -163,6 +170,7 @@ mod tests {
         let frame = create_fin_frame(456, 10, Instant::now());
         match frame {
             Frame::Fin { header } => {
+                assert_eq!(header.payload_length, 0);
                 assert_eq!(header.connection_id, 456);
                 assert_eq!(header.sequence_number, 10);
             }
@@ -181,7 +189,8 @@ mod tests {
 
         let frame = create_ack_frame(789, &mut reliability, Instant::now());
         match frame {
-            Frame::Ack { header, .. } => {
+            Frame::Ack { header, payload } => {
+                assert_eq!(header.payload_length as usize, payload.len());
                 assert_eq!(header.connection_id, 789);
                 assert_eq!(header.recv_next_sequence, 1);
             }

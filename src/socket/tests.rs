@@ -103,14 +103,16 @@ impl ActorTestHarness {
     }
 
     async fn send_syn(&self, from_addr: SocketAddr, source_cid: u32) {
+        let payload = Bytes::new();
         let syn_frame = Frame::Syn {
             header: LongHeader {
                 command: Command::Syn,
                 protocol_version: Config::default().protocol_version,
+                payload_length: payload.len() as u16,
                 destination_cid: 0,
                 source_cid,
             },
-            payload: Bytes::new(),
+            payload,
         };
         let mut buffer = Vec::new();
         syn_frame.encode(&mut buffer);

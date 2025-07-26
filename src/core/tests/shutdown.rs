@@ -103,6 +103,7 @@ async fn test_shutdown_when_syn_received() {
         header: LongHeader {
             protocol_version: 0,
             command: Command::Syn,
+            payload_length: 0,
             source_cid: harness.server_cid, // client's idea of our CID
             destination_cid: 1,             // client's CID
         },

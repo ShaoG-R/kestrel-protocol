@@ -68,11 +68,13 @@ impl Frame {
         let command = command::Command::from_u8(cursor[0])?;
 
         if command.is_long_header() {
-            // Because Long-Header packets (SYN, SYN-ACK) have payloads that consume the
-            // rest of the datagram, they MUST be the only frame in the datagram.
             let header = LongHeader::decode(cursor)?;
-            let payload = Bytes::copy_from_slice(*cursor);
-            cursor.advance(cursor.len());
+            let payload_len = header.payload_length as usize;
+            if cursor.len() < payload_len {
+                return None; // Not enough data for the payload
+            }
+            let payload = Bytes::copy_from_slice(&cursor[..payload_len]);
+            cursor.advance(payload_len);
             return match header.command {
                 command::Command::Syn => Some(Frame::Syn { header, payload }),
                 command::Command::SynAck => Some(Frame::SynAck { header, payload }),
@@ -82,19 +84,25 @@ impl Frame {
 
         // Short header frames can be coalesced.
         let header = ShortHeader::decode(cursor)?;
+        let payload_len = header.payload_length as usize;
+
+        if payload_len > 0 && cursor.len() < payload_len {
+            return None; // Not enough data for payload
+        }
+
         match header.command {
-            // Frames with variable-length payloads MUST be the last frame in a datagram.
+            // Frames with variable-length payloads
             command::Command::Push => {
-                let payload = Bytes::copy_from_slice(*cursor);
-                cursor.advance(cursor.len());
+                let payload = Bytes::copy_from_slice(&cursor[..payload_len]);
+                cursor.advance(payload_len);
                 Some(Frame::Push { header, payload })
             }
             command::Command::Ack => {
-                let payload = Bytes::copy_from_slice(*cursor);
-                cursor.advance(cursor.len());
+                let payload = Bytes::copy_from_slice(&cursor[..payload_len]);
+                cursor.advance(payload_len);
                 Some(Frame::Ack { header, payload })
             }
-            // Frames with fixed-length or no payload can be followed by others.
+            // Frames with fixed-length or no payload
             command::Command::Ping => Some(Frame::Ping { header }),
             command::Command::Fin => Some(Frame::Fin { header }),
             command::Command::PathChallenge => {
@@ -128,31 +136,38 @@ impl Frame {
     pub fn encode<B: BufMut>(&self, buf: &mut B) {
         match self {
             Frame::Push { header, payload } => {
+                debug_assert_eq!(header.payload_length as usize, payload.len());
                 header.encode(buf);
                 buf.put_slice(payload);
             }
             Frame::Ack { header, payload } => {
+                debug_assert_eq!(header.payload_length as usize, payload.len());
                 header.encode(buf);
                 buf.put_slice(payload);
             }
             Frame::Ping { header } => {
+                debug_assert_eq!(header.payload_length, 0);
                 header.encode(buf);
             }
             Frame::Syn { header, payload } => {
+                debug_assert_eq!(header.payload_length as usize, payload.len());
                 header.encode(buf);
                 buf.put_slice(payload);
             }
             Frame::SynAck { header, payload } => {
+                debug_assert_eq!(header.payload_length as usize, payload.len());
                 header.encode(buf);
                 buf.put_slice(payload);
             }
             Frame::Fin { header } => {
+                debug_assert_eq!(header.payload_length, 0);
                 header.encode(buf);
             }
             Frame::PathChallenge {
                 header,
                 challenge_data,
             } => {
+                debug_assert_eq!(header.payload_length, 8);
                 header.encode(buf);
                 buf.put_slice(&challenge_data.to_be_bytes());
             }
@@ -160,6 +175,7 @@ impl Frame {
                 header,
                 challenge_data,
             } => {
+                debug_assert_eq!(header.payload_length, 8);
                 header.encode(buf);
                 buf.put_slice(&challenge_data.to_be_bytes());
             }

@@ -23,6 +23,7 @@ async fn test_cid_handshake() {
         header: LongHeader {
             command: Command::Syn,
             protocol_version: 0,
+            payload_length: 0,
             destination_cid: server_cid, // The client might know the server's CID. Let's use it.
             source_cid: client_cid,
         },

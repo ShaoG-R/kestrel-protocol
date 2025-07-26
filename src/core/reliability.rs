@@ -151,6 +151,7 @@ impl ReliabilityLayer {
             let push_header = ShortHeader {
                 command: crate::packet::command::Command::Push,
                 connection_id: peer_cid,
+                payload_length: chunk.len() as u16,
                 recv_window_size: window,
                 recv_next_sequence: next_ack,
                 timestamp: now.duration_since(start_time).as_millis() as u32,
