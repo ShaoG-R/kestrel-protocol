@@ -2,7 +2,9 @@
 
 use super::{
     command::StreamCommand,
-    frame_factory::{create_path_challenge_frame, create_path_response_frame},
+    frame_factory::{
+        create_path_challenge_frame, create_path_response_frame, create_syn_ack_frame,
+    },
     state::ConnectionState,
     ConnectionCleaner, Endpoint,
 };
@@ -12,7 +14,8 @@ use crate::{
     socket::{AsyncUdpSocket, SocketActorCommand},
 };
 use tokio::time::{sleep_until, Instant};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{info, trace};
+use bytes::Bytes;
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
     /// Runs the endpoint's main event loop.
@@ -108,6 +111,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     }
 
     async fn handle_frame(&mut self, frame: Frame, src_addr: std::net::SocketAddr) -> Result<()> {
+        trace!(local_cid = self.local_cid, ?frame, "Processing incoming frame");
         self.last_recv_time = Instant::now();
 
         // --- Path Migration Logic ---
@@ -145,55 +149,14 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     }
                 }
             }
-            Frame::SynAck { header, payload } => {
+            Frame::SynAck { header, payload: _ } => {
                 if self.state == ConnectionState::Connecting {
                     self.state = ConnectionState::Established;
                     self.peer_cid = header.source_cid;
                     info!(cid = self.local_cid, "Connection established (client-side)");
-                    if !payload.is_empty() {
-                        debug!(
-                            cid = self.local_cid,
-                            payload_len = payload.len(),
-                            "SYN-ACK contains payload, processing."
-                        );
-                        // On SYN-ACK, we receive a single payload, but the reassembly
-                        // and stream channel expect a Vec. Wrap it.
-                        self.reliability.receive_push(0, payload);
-                        if let Some(data_vec) = self.reliability.reassemble() {
-                            debug!(
-                                cid = self.local_cid,
-                                count = data_vec.len(),
-                                "Reassembled initial data from SYN-ACK."
-                            );
-                            if let Some(tx) = self.tx_to_stream.as_ref() {
-                                if tx.send(data_vec).await.is_err() {
-                                    // User's stream handle has been dropped. We can no longer send.
-                                    error!(
-                                        cid = self.local_cid,
-                                        "Failed to send initial data to stream: receiver dropped."
-                                    );
-                                    self.tx_to_stream = None;
-                                } else {
-                                    debug!(
-                                        cid = self.local_cid,
-                                        "Successfully sent initial data to stream."
-                                    );
-                                }
-                            } else {
-                                warn!(
-                                    cid = self.local_cid,
-                                    "Cannot send initial data: stream tx is None."
-                                );
-                            }
-                        } else {
-                            warn!(
-                                cid = self.local_cid,
-                                "Failed to reassemble initial data from SYN-ACK."
-                            );
-                        }
-                    }
 
-                    // Acknowledge the SYN-ACK, potentially with piggybacked data.
+                    // Acknowledge the SYN-ACK, potentially with piggybacked data if the
+                    // user has already called write().
                     if !self.reliability.is_send_buffer_empty() {
                         self.packetize_and_send().await?;
                     } else {
@@ -298,13 +261,40 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     async fn handle_stream_command(&mut self, cmd: StreamCommand) -> Result<()> {
         match cmd {
             StreamCommand::SendData(data) => {
-                self.reliability.write_to_stream(&data);
                 // If this is the first data sent on a server-side connection,
-                // it triggers the SYN-ACK and establishes the connection.
+                // it triggers the SYN-ACK and establishes the connection. This is our 0-RTT path.
                 if self.state == ConnectionState::SynReceived {
+                    info!(cid = self.local_cid, "Connection accepted by user, preparing 0-RTT SYN-ACK with data.");
                     self.state = ConnectionState::Established;
-                    info!(cid = self.local_cid, "Connection accepted by user, sending SYN-ACK.");
-                    self.send_syn_ack().await?;
+
+                    // 1. Queue the user's data into the reliability layer's stream buffer.
+                    self.reliability.write_to_stream(&data);
+
+                    // 2. Create the payload-less SYN-ACK frame.
+                    let syn_ack_frame = create_syn_ack_frame(
+                        &self.config,
+                        self.peer_cid,
+                        self.local_cid,
+                        Bytes::new(),
+                    );
+
+                    // 3. Packetize the stream data into PUSH frames. This will correctly
+                    //    assign sequence numbers starting from 0.
+                    let now = Instant::now();
+                    let mut frames_to_send = self.reliability.packetize_stream_data(
+                        self.peer_cid,
+                        self.peer_recv_window,
+                        now,
+                        self.start_time,
+                    );
+
+                    // 4. Prepend the SYN-ACK frame to coalesce it with the PUSH frames.
+                    frames_to_send.insert(0, syn_ack_frame);
+
+                    // 5. Send them all in one go.
+                    self.send_frames(frames_to_send).await?;
+                } else {
+                    self.reliability.write_to_stream(&data);
                 }
             }
             StreamCommand::Close => {

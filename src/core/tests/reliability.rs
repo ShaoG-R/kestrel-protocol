@@ -166,6 +166,50 @@ async fn test_endpoint_rto_retransmission() {
 }
 
 #[tokio::test]
+async fn test_server_0rtt_sends_data_correctly() {
+    let (mut client, server) = setup_client_server_pair();
+
+    // 1. Server immediately sends two batches of data.
+    // The first one triggers the SYN-ACK + PUSH (0-RTT) path.
+    // The second one should be a normal PUSH with the correct next sequence number.
+    let server_data1 = Bytes::from_static(b"server-0rtt");
+    let server_data2 = Bytes::from_static(b"server-next");
+    server
+        .tx_to_endpoint_user
+        .send(StreamCommand::SendData(server_data1.clone()))
+        .await
+        .unwrap();
+    server
+        .tx_to_endpoint_user
+        .send(StreamCommand::SendData(server_data2.clone()))
+        .await
+        .unwrap();
+
+    // 2. Client receives the data.
+    // We expect to receive both chunks, concatenated.
+    let mut client_recv_data = Vec::new();
+    let expected_len = server_data1.len() + server_data2.len();
+    while client_recv_data.len() < expected_len {
+        let chunks = tokio::time::timeout(
+            Duration::from_millis(200),
+            client.rx_from_endpoint_user.recv(),
+        )
+        .await
+        .expect("Client should receive server's 0-RTT and subsequent data")
+        .unwrap();
+        for chunk in chunks {
+            client_recv_data.extend_from_slice(&chunk);
+        }
+    }
+
+    // 3. Verify the data is correct.
+    let mut expected_data = Vec::new();
+    expected_data.extend_from_slice(&server_data1);
+    expected_data.extend_from_slice(&server_data2);
+    assert_eq!(client_recv_data, expected_data);
+}
+
+#[tokio::test]
 async fn test_endpoint_fast_retransmission() {
     // Filter to drop the PUSH packet with sequence number 1, just once.
     let packet_to_drop_seq = 1;

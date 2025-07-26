@@ -11,6 +11,7 @@ use crate::{
 };
 use std::net::SocketAddr;
 use tokio::time::Instant;
+use bytes::Bytes;
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
     pub(super) async fn packetize_and_send(&mut self) -> Result<()> {
@@ -48,9 +49,14 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         self.send_frames(vec![frame]).await
     }
 
+    /// Sends a SYN-ACK frame without a payload.
+    ///
+    /// This is used during the handshake. Any initial data from the server
+    /// should be sent in a separate `PUSH` frame, which can be coalesced
+    /// with this `SYN-ACK` into a single UDP packet.
     pub(super) async fn send_syn_ack(&mut self) -> Result<()> {
-        let payload = self.reliability.take_stream_buffer();
-        let frame = create_syn_ack_frame(&self.config, self.peer_cid, self.local_cid, payload);
+        let frame =
+            create_syn_ack_frame(&self.config, self.peer_cid, self.local_cid, Bytes::new());
         self.send_frames(vec![frame]).await
     }
 

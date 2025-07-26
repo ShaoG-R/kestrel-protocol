@@ -105,5 +105,19 @@ async fn test_rto_recovery_on_single_packet_loss() {
     assert_eq!(&client_buf, server_response);
     info!("[Client] Successfully received server response.");
 
+    // 8. Gracefully shut down the connections.
+    // This is crucial to prevent the test from failing due to timeouts,
+    // as it ensures the underlying Endpoint tasks complete their cleanup
+    // before the test function exits and drops the socket actors.
+    info!("[Test] Shutting down client stream...");
+    client_stream.shutdown().await.unwrap();
+    info!("[Test] Shutting down server stream...");
+    server_stream.shutdown().await.unwrap();
+
+    // A small delay to allow background tasks to fully terminate.
+    // This might not be strictly necessary if shutdown is fully synchronous,
+    // but can help prevent flaky tests in CI environments.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
     info!("--- RTO Recovery Test Passed ---");
 }

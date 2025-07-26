@@ -211,12 +211,19 @@ async fn test_actor_concurrent_write_sends_to_correct_addresses() {
         .unwrap();
 
         if let SenderTaskCommand::Send(send_cmd) = cmd {
-            // We use the payload to identify which command is which
+            // We use the payload to identify which command is which.
+            // The actual data is now in the PUSH frame, not the SYN-ACK.
             let payload = send_cmd
                 .frames
                 .iter()
                 .find_map(|f| match f {
-                    Frame::SynAck { payload, .. } => Some(payload.clone()),
+                    Frame::Push { payload, .. } => {
+                        if !payload.is_empty() {
+                            Some(payload.clone())
+                        } else {
+                            None
+                        }
+                    }
                     _ => None,
                 })
                 .unwrap();
