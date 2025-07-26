@@ -1,3 +1,3 @@
-# Development Guides
+# 开发文档
 
-This section contains deep-dive documents explaining the design and implementation details of core protocol mechanisms. They are intended for developers working on the protocol itself. 
+本章节包含一系列深入的技术文档，旨在阐释协议核心机制的设计理念与实现细节。这些文档主要面向参与协议本身开发的工程师。 

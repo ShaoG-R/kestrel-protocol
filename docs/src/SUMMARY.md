@@ -37,5 +37,5 @@
 
 # 开发文档
 
-- [开发文档介绍](./dev-docs/README.md)
+- [开发文档](./dev-docs/README.md)
     - [连接关闭机制](./dev-docs/01-connection-shutdown.md)
