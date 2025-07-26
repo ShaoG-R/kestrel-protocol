@@ -132,6 +132,7 @@ impl ReliabilityLayer {
         peer_recv_window: u32,
         now: Instant,
         start_time: Instant,
+        prepend_frame: Option<Frame>,
     ) -> Vec<Frame> {
         let (recv_next_sequence, local_window_size) = {
             let info = self.get_ack_info();
@@ -151,10 +152,15 @@ impl ReliabilityLayer {
             &context,
             &mut self.send_buffer,
             &mut self.sequence_number_counter,
+            prepend_frame,
         );
 
         for frame in &frames {
-            self.send_buffer.add_in_flight(frame.clone(), now);
+            // 只添加 Push 帧到发送缓冲区
+            if let Frame::Push { .. } = frame {
+                self.send_buffer.add_in_flight(frame.clone(), now);
+            }
+
         }
 
         frames
@@ -215,7 +221,7 @@ impl ReliabilityLayer {
 
     // --- Passthrough methods to send_buffer ---
 
-    pub fn write_to_stream(&mut self, buf: &[u8]) -> usize {
+    pub fn write_to_stream(&mut self, buf: Bytes) -> usize {
         self.send_buffer.write_to_stream(buf)
     }
 
@@ -223,7 +229,7 @@ impl ReliabilityLayer {
         self.send_buffer.is_stream_buffer_empty()
     }
 
-    pub fn take_stream_buffer(&mut self) -> Bytes {
+    pub fn take_stream_buffer(&mut self) -> impl Iterator<Item = Bytes> {
         self.send_buffer.take_stream_buffer()
     }
 
@@ -235,8 +241,8 @@ impl ReliabilityLayer {
         self.send_buffer.has_fin_in_flight()
     }
 
-    pub fn add_fin_to_in_flight(&mut self, fin_frame: Frame, now: Instant) {
-        self.send_buffer.add_in_flight(fin_frame, now);
+    pub fn track_frame_in_flight(&mut self, frame: Frame, now: Instant) {
+        self.send_buffer.add_in_flight(frame, now);
     }
 
     // --- Internal helpers ---

@@ -35,7 +35,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         let mut reliability = ReliabilityLayer::new(config.clone(), congestion_control);
         if let Some(data) = initial_data {
             // Immediately write the 0-RTT data to the stream buffer.
-            reliability.write_to_stream(&data);
+            reliability.write_to_stream(data);
         }
         let now = Instant::now();
 

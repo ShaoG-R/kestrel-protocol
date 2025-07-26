@@ -21,7 +21,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             self.peer_recv_window,
             now,
             self.start_time,
+            None,
         );
+
 
         if self.state == super::state::ConnectionState::Closing
             && !self.reliability.has_fin_in_flight()
@@ -32,7 +34,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 self.start_time,
             );
             self.reliability
-                .add_fin_to_in_flight(fin_frame.clone(), Instant::now());
+                .track_frame_in_flight(fin_frame.clone(), now);
             frames.push(fin_frame);
         }
 
@@ -46,19 +48,17 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         // Phase 1: Create the payload-less SYN frame.
         let syn_frame = create_syn_frame(&self.config, self.local_cid);
 
-        // Phase 2: Packetize any 0-RTT data into PUSH frames.
+        // Phase 2: Packetize any 0-RTT data into PUSH frames, prepending the SYN.
         let now = Instant::now();
-        let mut frames_to_send = self.reliability.packetize_stream_data(
+        let frames_to_send = self.reliability.packetize_stream_data(
             self.peer_cid,
             self.peer_recv_window,
             now,
             self.start_time,
+            Some(syn_frame),
         );
 
-        // Phase 3: Prepend the SYN frame to coalesce it with the PUSH frames.
-        frames_to_send.insert(0, syn_frame);
-
-        // Phase 4: Send them all in one go.
+        // Phase 3: Send them all in one go.
         self.send_frames(frames_to_send).await
     }
 

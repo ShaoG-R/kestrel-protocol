@@ -287,7 +287,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     self.state = ConnectionState::Established;
 
                     // 1. Queue the user's data into the reliability layer's stream buffer.
-                    self.reliability.write_to_stream(&data);
+                    self.reliability.write_to_stream(data);
 
                     // 2. Create the payload-less SYN-ACK frame.
                     let syn_ack_frame =
@@ -296,20 +296,21 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     // 3. Packetize the stream data into PUSH frames. This will correctly
                     //    assign sequence numbers starting from 0.
                     let now = Instant::now();
-                    let mut frames_to_send = self.reliability.packetize_stream_data(
+                    let frames_to_send = self.reliability.packetize_stream_data(
                         self.peer_cid,
                         self.peer_recv_window,
                         now,
                         self.start_time,
+                        Some(syn_ack_frame),
                     );
 
                     // 4. Prepend the SYN-ACK frame to coalesce it with the PUSH frames.
-                    frames_to_send.insert(0, syn_ack_frame);
+                    // frames_to_send.insert(0, syn_ack_frame);
 
                     // 5. Send them all in one go.
                     self.send_frames(frames_to_send).await?;
                 } else {
-                    self.reliability.write_to_stream(&data);
+                    self.reliability.write_to_stream(data);
                 }
             }
             StreamCommand::Close => {

@@ -30,8 +30,13 @@ pub(crate) fn packetize(
     context: &PacketizerContext,
     send_buffer: &mut SendBuffer,
     sequence_number_counter: &mut u32,
+    prepend_frame: Option<Frame>,
 ) -> Vec<Frame> {
-    let mut frames = Vec::new();
+    let mut frames = if let Some(frame) = prepend_frame {
+        vec![frame]
+    } else {
+        Vec::new()
+    };
 
     // Calculate the sending permit based on congestion and flow control windows.
     let cwnd_permit = context
@@ -71,11 +76,12 @@ pub(crate) fn packetize(
 mod tests {
     use super::*;
     use crate::{core::reliability::send_buffer::SendBuffer, packet::frame::Frame};
+    use bytes::Bytes;
 
     #[test]
     fn test_packetize_simple() {
         let mut send_buffer = SendBuffer::new(1024);
-        send_buffer.write_to_stream(b"hello world"); // 11 bytes
+        send_buffer.write_to_stream(Bytes::from_static(b"hello world")); // 11 bytes
 
         let context = PacketizerContext {
             peer_cid: 1,
@@ -88,7 +94,7 @@ mod tests {
         };
 
         let mut seq_counter = 0;
-        let frames = packetize(&context, &mut send_buffer, &mut seq_counter);
+        let frames = packetize(&context, &mut send_buffer, &mut seq_counter, None);
 
         // With a permit of 10 and max_payload_size of 5, the 11-byte buffer
         // should be packetized into three frames.
@@ -121,7 +127,7 @@ mod tests {
     #[test]
     fn test_packetize_respects_cwnd() {
         let mut send_buffer = SendBuffer::new(1024);
-        send_buffer.write_to_stream(b"one two three four five");
+        send_buffer.write_to_stream(Bytes::from_static(b"one two three four five"));
 
         let context = PacketizerContext {
             peer_cid: 1,
@@ -134,7 +140,7 @@ mod tests {
         };
 
         let mut seq_counter = 0;
-        let frames = packetize(&context, &mut send_buffer, &mut seq_counter);
+        let frames = packetize(&context, &mut send_buffer, &mut seq_counter, None);
 
         // Permit is 2, so only two frames should be created
         assert_eq!(frames.len(), 2);
@@ -145,7 +151,7 @@ mod tests {
     #[test]
     fn test_packetize_respects_flow_control() {
         let mut send_buffer = SendBuffer::new(1024);
-        send_buffer.write_to_stream(b"one two three four five");
+        send_buffer.write_to_stream(Bytes::from_static(b"one two three four five"));
 
         let context = PacketizerContext {
             peer_cid: 1,
@@ -158,7 +164,7 @@ mod tests {
         };
 
         let mut seq_counter = 0;
-        let frames = packetize(&context, &mut send_buffer, &mut seq_counter);
+        let frames = packetize(&context, &mut send_buffer, &mut seq_counter, None);
 
         // Permit is 3, so only three frames should be created
         assert_eq!(frames.len(), 3);
@@ -179,8 +185,44 @@ mod tests {
             ack_info: (0, 1024),
         };
         let mut seq_counter = 0;
-        let frames = packetize(&context, &mut send_buffer, &mut seq_counter);
+        let frames = packetize(&context, &mut send_buffer, &mut seq_counter, None);
         assert!(frames.is_empty());
         assert_eq!(seq_counter, 0);
+    }
+
+    #[test]
+    fn test_packetize_prepend_frame() {
+        let mut send_buffer = SendBuffer::new(1024);
+        send_buffer.write_to_stream(Bytes::from_static(b"hello world")); // 11 bytes
+
+        let context = PacketizerContext {
+            peer_cid: 1,
+            timestamp: 123,
+            congestion_window: 10,
+            in_flight_count: 0,
+            peer_recv_window: 10,
+            max_payload_size: 5,
+            ack_info: (0, 1024),
+        };
+
+        let mut seq_counter = 0;
+        let frames = packetize(
+            &context,
+            &mut send_buffer,
+            &mut seq_counter,
+            Some(Frame::new_fin(1, 99, 0, 1024, 123)),
+        );
+        assert_eq!(frames.len(), 4); // FIN + 3 PUSH
+        assert_eq!(seq_counter, 3);
+        if let Frame::Fin { .. } = &frames[0] {
+            // Correct
+        } else {
+            panic!("Expected a FIN frame at the start");
+        }
+        if let Frame::Push { header, .. } = &frames[1] {
+            assert_eq!(header.sequence_number, 0);
+        } else {
+            panic!("Expected a PUSH frame");
+        }
     }
 } 
