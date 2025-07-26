@@ -7,11 +7,6 @@
 - [项目现状分析报告](./project-guidance/01-status-report.md)
 - [AI开发指南](./project-guidance/02-ai-dev-guide.md)
 
-# 开发文档
-
-- [开发文档介绍](./dev-docs/README.md)
-- [连接关闭机制](./dev-docs/01-connection-shutdown.md)
-
 # Features
 
 - [基础与工具](./features/01-foundations/README.md)
@@ -38,4 +33,9 @@
     - [批处理与内存优化](./features/04-performance/02-batching-and-memory.md)
 - [用户接口](./features/05-api/README.md)
     - [Listener & Stream API](./features/05-api/01-user-api.md)
-    
+
+
+# 开发文档
+
+- [开发文档介绍](./dev-docs/README.md)
+    - [连接关闭机制](./dev-docs/01-connection-shutdown.md)
