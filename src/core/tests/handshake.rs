@@ -2,7 +2,7 @@
 
 use crate::{
     core::{endpoint::StreamCommand, test_utils::setup_server_harness},
-    packet::{command::Command, frame::Frame, header::LongHeader},
+    packet::frame::Frame,
     socket::SenderTaskCommand,
 };
 use bytes::Bytes;
@@ -19,16 +19,7 @@ async fn test_cid_handshake() {
 
     // 2. Simulate the client sending a SYN packet.
     // This is normally done by the SocketActor, but we do it manually here.
-    let syn_frame = Frame::Syn {
-        header: LongHeader {
-            command: Command::Syn,
-            protocol_version: 0,
-            payload_length: 0,
-            destination_cid: server_cid, // The client might know the server's CID. Let's use it.
-            source_cid: client_cid,
-        },
-        payload: Bytes::new(), // No 0-RTT data for this test.
-    };
+    let syn_frame = Frame::new_syn(0, client_cid, server_cid, Bytes::new());
 
     // Before the endpoint receives the SYN, we need to update its peer_cid,
     // which is normally done by the SocketActor upon receiving the first SYN.

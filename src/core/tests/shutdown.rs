@@ -3,7 +3,7 @@
 use crate::core::test_utils::{setup_client_server_pair, setup_server_harness, MockUdpSocket};
 use crate::{
     core::endpoint::StreamCommand,
-    packet::{frame::Frame, header::LongHeader, command::Command},
+    packet::frame::Frame,
 };
 use bytes::Bytes;
 use std::{net::SocketAddr, time::Duration};
@@ -99,16 +99,12 @@ async fn test_shutdown_when_syn_received() {
     let mut harness = setup_server_harness();
 
     // 1. Manually send a SYN to the server to put it in `SynReceived` state.
-    let syn_frame = Frame::Syn {
-        header: LongHeader {
-            protocol_version: 0,
-            command: Command::Syn,
-            payload_length: 0,
-            source_cid: harness.server_cid, // client's idea of our CID
-            destination_cid: 1,             // client's CID
-        },
-        payload: Bytes::new(),
-    };
+    let syn_frame = Frame::new_syn(
+        0,
+        1, // client's CID
+        harness.server_cid,
+        Bytes::new(),
+    );
     harness
         .tx_to_endpoint_network
         .send((syn_frame, harness.client_addr))

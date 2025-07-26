@@ -5,7 +5,7 @@ use crate::{
         endpoint::StreamCommand,
         test_utils::{setup_client_server_pair, setup_server_harness},
     },
-    packet::{command::Command, frame::Frame, header::ShortHeader},
+    packet::frame::Frame,
     socket::SenderTaskCommand,
 };
 use bytes::Bytes;
@@ -94,18 +94,7 @@ async fn test_connection_migration() {
 
     // 2. Simulate a PUSH packet arriving from a new address. This should trigger path validation.
     let payload = Bytes::from_static(b"data from new address");
-    let push_from_new_addr = Frame::Push {
-        header: ShortHeader {
-            command: Command::Push,
-            connection_id: 2, // The server's CID
-            payload_length: payload.len() as u16,
-            sequence_number: 10,
-            recv_window_size: 1024,
-            timestamp: 0,
-            recv_next_sequence: 0,
-        },
-        payload,
-    };
+    let push_from_new_addr = Frame::new_push(2, 10, 0, 1024, 0, payload);
     harness
         .tx_to_endpoint_network
         .send((push_from_new_addr, new_addr))
@@ -145,12 +134,8 @@ async fn test_connection_migration() {
     assert!(matches!(ack_cmd.frames[0], Frame::Ack { .. }));
 
     // 4. Simulate the client sending a PATH_RESPONSE back.
-    let response_frame = crate::core::endpoint::frame_factory::create_path_response_frame(
-        2,   // Server's CID
-        999, // Sequence number is not critical for this test
-        tokio::time::Instant::now(), // Timestamp also not critical
-        challenge_data,
-    );
+    let response_frame =
+        Frame::new_path_response(2, 999, 0, challenge_data); // Timestamps aren't critical here
     harness
         .tx_to_endpoint_network
         .send((response_frame, new_addr))

@@ -6,7 +6,7 @@ use crate::{
     config::Config,
     core::stream::Stream,
     error::{Error, Result},
-    packet::{command::Command, frame::Frame, header::LongHeader},
+    packet::frame::Frame,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -103,17 +103,12 @@ impl ActorTestHarness {
     }
 
     async fn send_syn(&self, from_addr: SocketAddr, source_cid: u32) {
-        let payload = Bytes::new();
-        let syn_frame = Frame::Syn {
-            header: LongHeader {
-                command: Command::Syn,
-                protocol_version: Config::default().protocol_version,
-                payload_length: payload.len() as u16,
-                destination_cid: 0,
-                source_cid,
-            },
-            payload,
-        };
+        let syn_frame = Frame::new_syn(
+            Config::default().protocol_version,
+            source_cid,
+            0, // destination_cid is unknown for initial SYN
+            Bytes::new(),
+        );
         let mut buffer = Vec::new();
         syn_frame.encode(&mut buffer);
         self.incoming_packet_tx

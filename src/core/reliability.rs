@@ -19,7 +19,7 @@ use self::{
 use crate::{
     congestion::CongestionControl,
     config::Config,
-    packet::{frame::Frame, header::ShortHeader, sack::SackRange},
+    packet::{frame::Frame, sack::SackRange},
 };
 use bytes::Bytes;
 use tokio::time::Instant;
@@ -148,20 +148,14 @@ impl ReliabilityLayer {
             };
 
             let (_, next_ack, window) = self.get_ack_info();
-            let push_header = ShortHeader {
-                command: crate::packet::command::Command::Push,
-                connection_id: peer_cid,
-                payload_length: chunk.len() as u16,
-                recv_window_size: window,
-                recv_next_sequence: next_ack,
-                timestamp: now.duration_since(start_time).as_millis() as u32,
-                sequence_number: self.next_sequence_number(),
-            };
-
-            let frame = Frame::Push {
-                header: push_header,
-                payload: chunk,
-            };
+            let frame = Frame::new_push(
+                peer_cid,
+                self.next_sequence_number(),
+                next_ack,
+                window,
+                now.duration_since(start_time).as_millis() as u32,
+                chunk,
+            );
             frames.push(frame.clone());
             self.send_buffer.add_in_flight(frame, now);
         }

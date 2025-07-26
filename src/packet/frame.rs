@@ -3,7 +3,8 @@
 
 use super::command;
 use super::header::{LongHeader, ShortHeader};
-use bytes::{Buf, BufMut, Bytes};
+use crate::packet::sack::{self, SackRange};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 /// A complete protocol frame that can be sent or received.
 /// 一个可以被发送或接收的完整协议帧。
@@ -54,6 +55,183 @@ pub enum Frame {
 }
 
 impl Frame {
+    // --- Smart Constructors ---
+    // These constructors ensure that the payload_length in the header is always correct.
+    // 这些构造函数确保头部中的 `payload_length` 始终是正确的。
+
+    /// Creates a new PUSH frame.
+    /// 创建一个新的 PUSH 帧。
+    pub fn new_push(
+        peer_cid: u32,
+        sequence_number: u32,
+        recv_next_sequence: u32,
+        recv_window_size: u16,
+        timestamp: u32,
+        payload: Bytes,
+    ) -> Self {
+        let header = ShortHeader {
+            command: command::Command::Push,
+            connection_id: peer_cid,
+            payload_length: payload.len() as u16,
+            recv_window_size,
+            timestamp,
+            sequence_number,
+            recv_next_sequence,
+        };
+        Frame::Push { header, payload }
+    }
+
+    /// Creates a new ACK frame.
+    /// 创建一个新的 ACK 帧。
+    pub fn new_ack(
+        peer_cid: u32,
+        recv_next_sequence: u32,
+        recv_window_size: u16,
+        sack_ranges: &[SackRange],
+        timestamp: u32,
+    ) -> Self {
+        let mut payload = BytesMut::with_capacity(sack_ranges.len() * 8);
+        sack::encode_sack_ranges(sack_ranges, &mut payload);
+        let payload = payload.freeze();
+
+        let header = ShortHeader {
+            command: command::Command::Ack,
+            connection_id: peer_cid,
+            payload_length: payload.len() as u16,
+            recv_window_size,
+            timestamp,
+            sequence_number: 0, // Per our design, ACKs don't have their own sequence number
+            recv_next_sequence,
+        };
+        Frame::Ack { header, payload }
+    }
+
+    /// Creates a new PING frame.
+    /// 创建一个新的 PING 帧。
+    pub fn new_ping(
+        peer_cid: u32,
+        sequence_number: u32,
+        recv_next_sequence: u32,
+        recv_window_size: u16,
+        timestamp: u32,
+    ) -> Self {
+        let header = ShortHeader {
+            command: command::Command::Ping,
+            connection_id: peer_cid,
+            payload_length: 0,
+            recv_window_size,
+            timestamp,
+            sequence_number,
+            recv_next_sequence,
+        };
+        Frame::Ping { header }
+    }
+
+    /// Creates a new FIN frame.
+    /// 创建一个新的 FIN 帧。
+    pub fn new_fin(
+        peer_cid: u32,
+        sequence_number: u32,
+        timestamp: u32,
+        recv_next_sequence: u32,
+        recv_window_size: u16,
+    ) -> Self {
+        let header = ShortHeader {
+            command: command::Command::Fin,
+            connection_id: peer_cid,
+            payload_length: 0,
+            recv_window_size,
+            timestamp,
+            sequence_number,
+            recv_next_sequence,
+        };
+        Frame::Fin { header }
+    }
+
+    /// Creates a new SYN frame.
+    /// 创建一个新的 SYN 帧。
+    pub fn new_syn(
+        protocol_version: u8,
+        source_cid: u32,
+        destination_cid: u32,
+        payload: Bytes,
+    ) -> Self {
+        let header = LongHeader {
+            command: command::Command::Syn,
+            protocol_version,
+            payload_length: payload.len() as u16,
+            destination_cid,
+            source_cid,
+        };
+        Frame::Syn { header, payload }
+    }
+
+    /// Creates a new SYN-ACK frame.
+    /// 创建一个新的 SYN-ACK 帧。
+    pub fn new_syn_ack(
+        protocol_version: u8,
+        source_cid: u32,
+        destination_cid: u32,
+        payload: Bytes,
+    ) -> Self {
+        let header = LongHeader {
+            command: command::Command::SynAck,
+            protocol_version,
+            payload_length: payload.len() as u16,
+            destination_cid,
+            source_cid,
+        };
+        Frame::SynAck { header, payload }
+    }
+
+    /// Creates a new PathChallenge frame.
+    /// 创建一个新的 PathChallenge 帧。
+    pub fn new_path_challenge(
+        peer_cid: u32,
+        sequence_number: u32,
+        timestamp: u32,
+        challenge_data: u64,
+    ) -> Self {
+        let header = ShortHeader {
+            command: command::Command::PathChallenge,
+            connection_id: peer_cid,
+            payload_length: 8,
+            recv_window_size: 0, // Not relevant for this frame type
+            timestamp,
+            sequence_number,
+            recv_next_sequence: 0, // Not relevant for this frame type
+        };
+        Frame::PathChallenge {
+            header,
+            challenge_data,
+        }
+    }
+
+    /// Creates a new PathResponse frame.
+    /// 创建一个新的 PathResponse 帧。
+    pub fn new_path_response(
+        peer_cid: u32,
+        sequence_number: u32,
+        timestamp: u32,
+        challenge_data: u64,
+    ) -> Self {
+        let header = ShortHeader {
+            command: command::Command::PathResponse,
+            connection_id: peer_cid,
+            payload_length: 8,
+            recv_window_size: 0, // Not relevant for this frame type
+            timestamp,
+            sequence_number,
+            recv_next_sequence: 0, // Not relevant for this frame type
+        };
+        Frame::PathResponse {
+            header,
+            challenge_data,
+        }
+    }
+
+    // --- End of Smart Constructors ---
+
     /// Decodes a single frame from the front of a buffer cursor.
     /// The cursor is advanced past the decoded frame.
     ///

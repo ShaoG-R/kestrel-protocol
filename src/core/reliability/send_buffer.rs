@@ -200,23 +200,11 @@ impl SendBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::header::ShortHeader;
     use std::time::Duration;
 
     fn create_push_frame(seq: u32) -> Frame {
         let payload = Bytes::from(format!("packet-{}", seq));
-        Frame::Push {
-            header: ShortHeader {
-                command: crate::packet::command::Command::Push,
-                connection_id: 1,
-                payload_length: payload.len() as u16,
-                recv_window_size: 10,
-                timestamp: 0,
-                sequence_number: seq,
-                recv_next_sequence: 0,
-            },
-            payload,
-        }
+        Frame::new_push(1, seq, 0, 10, 0, payload)
     }
 
     fn create_test_send_buffer() -> SendBuffer {
