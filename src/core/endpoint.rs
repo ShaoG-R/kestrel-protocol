@@ -63,6 +63,9 @@ pub struct Endpoint<S: AsyncUdpSocket> {
     command_tx: mpsc::Sender<SocketActorCommand>,
     rx_from_stream: mpsc::Receiver<StreamCommand>,
     tx_to_stream: Option<mpsc::Sender<Vec<Bytes>>>,
+    /// Set to true when a FIN is received, indicating we should close the
+    /// user stream once the receive buffer is drained.
+    fin_pending_eof: bool,
 }
 
 impl<S: AsyncUdpSocket> Endpoint<S> {

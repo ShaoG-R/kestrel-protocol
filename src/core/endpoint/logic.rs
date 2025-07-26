@@ -77,7 +77,13 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             trace!(cid = self.local_cid, "Event handled, performing follow-up actions.");
 
             // 5. Reassemble data and send to the user stream
-            if let Some(data_vec) = self.reliability.reassemble() {
+            let (data_to_send, fin_seen) = self.reliability.reassemble();
+            if fin_seen {
+                // The FIN has been reached in the byte stream. No more data will arrive.
+                // We can now set the flag to schedule the EOF signal for the user stream.
+                self.fin_pending_eof = true;
+            }
+            if let Some(data_vec) = data_to_send {
                 if !data_vec.is_empty() {
                     trace!(
                         cid = self.local_cid,
@@ -101,7 +107,18 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 self.packetize_and_send().await?;
             }
 
-            // 7. Check if we need to close the connection
+            // 7. Check if we need to send a deferred EOF.
+            // This happens after a FIN has been received and all data that came before
+            // the FIN has been passed to the user's stream.
+            if self.fin_pending_eof && self.reliability.is_recv_buffer_empty() {
+                if let Some(tx) = self.tx_to_stream.take() {
+                    trace!(cid = self.local_cid, "All data drained after FIN, closing user stream (sending EOF).");
+                    drop(tx); // This closes the channel, signaling EOF.
+                    self.fin_pending_eof = false; // Reset the flag.
+                }
+            }
+
+            // 8. Check if we need to close the connection
             if self.should_close() {
                 break;
             }
@@ -182,24 +199,20 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 }
             }
             Frame::Fin { header, .. } => {
+                // The reliability layer will now handle the FIN and its sequence number.
+                // The reassembly process will later tell us when this FIN is "seen".
                 self.reliability.receive_fin(header.sequence_number);
                 self.send_standalone_ack().await?;
-                // The other side has closed their writing end. We can no longer receive
-                // any more data. We signal this to the user stream by dropping the sender.
-                // This will cause `stream.read()` to return `Ok(0)`.
-                self.tx_to_stream.take();
 
-                // Transition state based on the current state.
+                // State transition still happens immediately. The EOF signal to the user
+                // is what gets deferred.
                 match self.state {
                     ConnectionState::Established => {
                         self.state = ConnectionState::FinWait;
                     }
                     ConnectionState::Closing => {
-                        // This is the simultaneous close case. We've sent a FIN, and we've just
-                        // received one.
                         self.state = ConnectionState::ClosingWait;
                     }
-                    // If in other states (like FinWait or already ClosingWait), do nothing.
                     _ => {}
                 }
             }
@@ -373,23 +386,28 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     fn shutdown(&mut self) {
         match self.state {
             // Standard active close from Established.
-            ConnectionState::Established => {
+            ConnectionState::Established | ConnectionState::FinWait => {
                 self.state = ConnectionState::Closing;
             }
-            // If the user closes after we've already received a FIN,
-            // it means we're ready to fully close.
-            ConnectionState::FinWait => {
-                self.state = ConnectionState::ClosingWait;
+            // If the user closes a connecting stream that already has data buffered,
+            // we must proceed to a full graceful close to ensure the data is sent.
+            ConnectionState::Connecting if !self.reliability.is_send_buffer_empty() => {
+                info!(cid = self.local_cid, "Close requested on connecting stream with pending data; proceeding to graceful shutdown.");
+                self.state = ConnectionState::Closing;
             }
-            // If user closes during handshake or path validation, just abort.
-            ConnectionState::Connecting
-            | ConnectionState::SynReceived
-            | ConnectionState::ValidatingPath { .. } => {
-                info!(cid = self.local_cid, state = ?self.state, "Connection closed by user during non-established state, aborting.");
+            // If already closing, do nothing.
+            _ if self.state == ConnectionState::Closing
+                || self.state == ConnectionState::ClosingWait
+                || self.state == ConnectionState::Closed => {}
+            // For any other non-established state, abort immediately.
+            _ => {
+                info!(
+                    cid = self.local_cid,
+                    state = ?self.state,
+                    "Connection closed by user during non-established state, aborting."
+                );
                 self.state = ConnectionState::Closed;
             }
-            // If already closing or closed, do nothing.
-            ConnectionState::Closing | ConnectionState::ClosingWait | ConnectionState::Closed => {}
         }
     }
 } 

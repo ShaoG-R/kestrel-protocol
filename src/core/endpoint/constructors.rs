@@ -54,6 +54,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             command_tx,
             rx_from_stream,
             tx_to_stream: Some(tx_to_stream),
+            fin_pending_eof: false,
         };
 
         (endpoint, tx_to_endpoint, rx_from_endpoint)
@@ -91,6 +92,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             command_tx,
             rx_from_stream,
             tx_to_stream: Some(tx_to_stream),
+            fin_pending_eof: false,
         };
 
         (endpoint, tx_to_endpoint, rx_from_endpoint)

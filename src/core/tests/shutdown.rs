@@ -329,4 +329,53 @@ async fn test_shutdown_from_fin_wait() {
 
     // Give a moment for tasks to fully terminate.
     tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn test_data_is_fully_read_before_shutdown_eof() {
+    crate::core::test_utils::init_tracing();
+    // This test targets the race condition where a PUSH and FIN arrive in the
+    // same batch. The receiver must process the PUSH data fully before the
+    // user stream receives the EOF signal from the FIN.
+    let (client, mut server) = setup_client_server_pair();
+
+    // 1. Establish connection (can be done implicitly by sending data)
+    let test_data = Bytes::from("important data that must not be lost");
+    
+    // 2. Client sends data and immediately requests to close the stream.
+    // This makes it highly likely that the resulting PUSH and FIN frames
+    // will be processed by the server endpoint in the same event loop tick.
+    client
+        .tx_to_endpoint_user
+        .send(StreamCommand::SendData(test_data.clone()))
+        .await
+        .unwrap();
+    client
+        .tx_to_endpoint_user
+        .send(StreamCommand::Close)
+        .await
+        .unwrap();
+
+    // 3. Server must receive the data first.
+    let server_recv_data =
+        timeout(Duration::from_secs(1), server.rx_from_endpoint_user.recv())
+            .await
+            .expect("Server should receive the data packet before timeout")
+            .expect("Server's stream should not be closed yet")
+            .into_iter()
+            .flatten()
+            .collect::<Bytes>();
+
+    assert_eq!(server_recv_data, test_data, "The received data did not match what was sent.");
+
+    // 4. After the data is read, the *next* read should signal EOF.
+    // Our deferred EOF logic ensures the user channel is closed only after
+    // the receive buffer is drained.
+    let server_recv_eof =
+        timeout(Duration::from_secs(1), server.rx_from_endpoint_user.recv())
+            .await
+            .expect("Server should not time out waiting for EOF")
+            .is_none();
+    
+    assert!(server_recv_eof, "Server stream should now be closed (EOF)");
 } 

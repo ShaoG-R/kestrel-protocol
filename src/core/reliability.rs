@@ -168,21 +168,25 @@ impl ReliabilityLayer {
     // --- Passthrough methods to recv_buffer ---
 
     pub fn receive_push(&mut self, sequence_number: u32, payload: Bytes) {
-        self.recv_buffer.receive(sequence_number, payload);
+        self.recv_buffer.receive_push(sequence_number, payload);
         self.ack_pending = true;
         self.ack_eliciting_packets_since_last_ack += 1;
     }
 
     pub fn receive_fin(&mut self, sequence_number: u32) {
-        // A FIN packet is like a PUSH with no data. It still occupies a sequence number
-        // and must be acknowledged.
-        self.recv_buffer.receive(sequence_number, Bytes::new());
+        // A FIN packet is like a PUSH with no data, but is handled specially now.
+        // It still occupies a sequence number and must be acknowledged.
+        self.recv_buffer.receive_fin(sequence_number);
         self.ack_pending = true;
         self.ack_eliciting_packets_since_last_ack += 1;
     }
 
-    pub fn reassemble(&mut self) -> Option<Vec<Bytes>> {
+    pub fn reassemble(&mut self) -> (Option<Vec<Bytes>>, bool) {
         self.recv_buffer.reassemble()
+    }
+
+    pub fn is_recv_buffer_empty(&self) -> bool {
+        self.recv_buffer.is_empty()
     }
 
     pub fn get_ack_info(&self) -> (Vec<SackRange>, u32, u16) {
