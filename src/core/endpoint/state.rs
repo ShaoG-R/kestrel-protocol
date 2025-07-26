@@ -27,11 +27,18 @@ pub enum ConnectionState {
         challenge_data: u64,
         notifier: Option<oneshot::Sender<Result<()>>>,
     },
-    /// The local side has initiated a close. It is waiting for all in-flight
-    /// data to be acknowledged before sending a FIN.
-    /// 端点已启动关闭过程并发送了FIN。
+    /// The local side has sent a FIN and is waiting for all in-flight data (including
+    /// the FIN) to be acknowledged. The user can no longer write to the stream, but
+    /// can still receive data until a FIN is received from the peer.
+    /// 端点已发送FIN，并正在等待所有在途数据（包括FIN）被确认。用户不能再写入流，
+    /// 但在收到对等方的FIN之前仍然可以接收数据。
     Closing,
-    
+
+    /// Both sides have sent a FIN, and the endpoint is waiting for the final
+    /// ACK from the peer for its own FIN.
+    /// 双方都已发送FIN，端点正在等待对等方对其自身FIN的最终ACK。
+    ClosingWait,
+
     /// The endpoint has received a FIN from the peer.
     /// It can no longer receive data, but can still send.
     /// 端点已从对等方收到FIN。它不能再接收数据，但仍然可以发送。
@@ -58,6 +65,7 @@ impl Clone for ConnectionState {
                 notifier: None, // Notifier cannot be cloned
             },
             Self::Closing => Self::Closing,
+            Self::ClosingWait => Self::ClosingWait,
             Self::FinWait => Self::FinWait,
             Self::Closed => Self::Closed,
         }
@@ -83,6 +91,7 @@ impl PartialEq for ConnectionState {
                 },
             ) => l_addr == r_addr && l_data == r_data,
             (Self::Closing, Self::Closing) => true,
+            (Self::ClosingWait, Self::ClosingWait) => true,
             (Self::FinWait, Self::FinWait) => true,
             (Self::Closed, Self::Closed) => true,
             _ => false,

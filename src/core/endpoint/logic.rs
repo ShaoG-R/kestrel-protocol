@@ -227,9 +227,18 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 // This will cause `stream.read()` to return `Ok(0)`.
                 self.tx_to_stream.take();
 
-                // Transition to FinWait to allow sending any remaining data before closing.
-                if self.state == ConnectionState::Established {
-                    self.state = ConnectionState::FinWait;
+                // Transition state based on the current state.
+                match self.state {
+                    ConnectionState::Established => {
+                        self.state = ConnectionState::FinWait;
+                    }
+                    ConnectionState::Closing => {
+                        // This is the simultaneous close case. We've sent a FIN, and we've just
+                        // received one.
+                        self.state = ConnectionState::ClosingWait;
+                    }
+                    // If in other states (like FinWait or already ClosingWait), do nothing.
+                    _ => {}
                 }
             }
             Frame::PathChallenge {
@@ -360,21 +369,32 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     }
 
     fn should_close(&mut self) -> bool {
-        if self.state == ConnectionState::Closing && self.reliability.is_in_flight_empty() {
-            info!(cid = self.local_cid, "All data ACKed, closing now.");
+        // Condition 1: We are in a closing state AND all in-flight data is ACKed.
+        // This is the primary condition to transition into the `Closed` state.
+        if (self.state == ConnectionState::Closing
+            || self.state == ConnectionState::ClosingWait)
+            && self.reliability.is_in_flight_empty()
+        {
+            info!(cid = self.local_cid, "All data ACKed, entering Closed state.");
             self.state = ConnectionState::Closed;
         }
-        // Endpoint should terminate if the connection is fully closed, or if it's
-        // in FinWait and the user stream has also been dropped.
+
+        // The endpoint's run loop should terminate ONLY when the state is definitively `Closed`.
+        // The previous logic for `FinWait` was causing premature termination. The endpoint
+        // should wait in `FinWait` for the user to actively close the stream.
         self.state == ConnectionState::Closed
-            || (self.state == ConnectionState::FinWait && self.tx_to_stream.is_none())
     }
 
     fn shutdown(&mut self) {
         match self.state {
-            // Standard active close from Established or after peer has closed (FinWait)
-            ConnectionState::Established | ConnectionState::FinWait => {
+            // Standard active close from Established.
+            ConnectionState::Established => {
                 self.state = ConnectionState::Closing;
+            }
+            // If the user closes after we've already received a FIN,
+            // it means we're ready to fully close.
+            ConnectionState::FinWait => {
+                self.state = ConnectionState::ClosingWait;
             }
             // If user closes during handshake or path validation, just abort.
             ConnectionState::Connecting
@@ -384,7 +404,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 self.state = ConnectionState::Closed;
             }
             // If already closing or closed, do nothing.
-            ConnectionState::Closing | ConnectionState::Closed => {}
+            ConnectionState::Closing | ConnectionState::ClosingWait | ConnectionState::Closed => {}
         }
     }
 } 

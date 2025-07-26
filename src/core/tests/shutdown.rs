@@ -196,4 +196,140 @@ async fn test_shutdown_when_validating_path() {
         migration_result.unwrap().is_err(),
         "Migration should be cancelled by the close, causing a channel receive error."
     );
+}
+
+#[tokio::test]
+async fn test_simultaneous_close() {
+    // Both client and server initiate shutdown at the same time.
+    // They should both go through Closing -> ClosingWait -> Closed.
+    let (mut client, mut server) = setup_client_server_pair();
+
+    // 1. Establish connection
+    client
+        .tx_to_endpoint_user
+        .send(StreamCommand::SendData(Bytes::from("ping")))
+        .await
+        .unwrap();
+    server
+        .tx_to_endpoint_user
+        .send(StreamCommand::SendData(Bytes::from("pong")))
+        .await
+        .unwrap();
+
+    let client_recv = timeout(
+        Duration::from_secs(1),
+        client.rx_from_endpoint_user.recv(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(client_recv[0], "pong");
+    let server_recv = timeout(
+        Duration::from_secs(1),
+        server.rx_from_endpoint_user.recv(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(server_recv[0], "ping");
+
+    // 2. Both initiate shutdown
+    let (client_close_res, server_close_res) = tokio::join!(
+        client.tx_to_endpoint_user.send(StreamCommand::Close),
+        server.tx_to_endpoint_user.send(StreamCommand::Close)
+    );
+    client_close_res.unwrap();
+    server_close_res.unwrap();
+
+    // 3. Verify both streams are closed cleanly (EOF)
+    let client_read_result =
+        timeout(Duration::from_secs(1), client.rx_from_endpoint_user.recv()).await;
+    let server_read_result =
+        timeout(Duration::from_secs(1), server.rx_from_endpoint_user.recv()).await;
+
+    assert!(client_read_result.is_ok(), "Client should not time out");
+    assert!(
+        client_read_result.unwrap().is_none(),
+        "Client stream should receive EOF"
+    );
+
+    assert!(server_read_result.is_ok(), "Server should not time out");
+    assert!(
+        server_read_result.unwrap().is_none(),
+        "Server stream should receive EOF"
+    );
+}
+
+#[tokio::test]
+async fn test_shutdown_from_fin_wait() {
+    crate::core::test_utils::init_tracing();
+    // Client closes, server enters FinWait, then server closes.
+    let (mut client, mut server) = setup_client_server_pair();
+
+    // 1. Establish connection
+    client
+        .tx_to_endpoint_user
+        .send(StreamCommand::SendData(Bytes::from("ping")))
+        .await
+        .unwrap();
+    server
+        .tx_to_endpoint_user
+        .send(StreamCommand::SendData(Bytes::from("pong")))
+        .await
+        .unwrap();
+    let client_recv = timeout(
+        Duration::from_secs(1),
+        client.rx_from_endpoint_user.recv(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(client_recv[0], "pong");
+    let server_recv = timeout(
+        Duration::from_secs(1),
+        server.rx_from_endpoint_user.recv(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(server_recv[0], "ping");
+
+    // 2. Client initiates shutdown
+    client
+        .tx_to_endpoint_user
+        .send(StreamCommand::Close)
+        .await
+        .unwrap();
+
+    // 3. Server should receive EOF, indicating it has entered FinWait.
+    let server_read_result =
+        timeout(Duration::from_secs(1), server.rx_from_endpoint_user.recv()).await;
+    assert!(
+        server_read_result.is_ok(),
+        "Server should receive close notification"
+    );
+    assert!(
+        server_read_result.unwrap().is_none(),
+        "Server stream should receive EOF"
+    );
+
+    // 4. Server is now in FinWait. Now it decides to close too.
+    server
+        .tx_to_endpoint_user
+        .send(StreamCommand::Close)
+        .await
+        .unwrap();
+
+    // 5. Client, which was in Closing, should now receive the server's FIN,
+    // transition to ClosingWait, and then fully close. Its receiver will yield None.
+    let client_read_result =
+        timeout(Duration::from_secs(1), client.rx_from_endpoint_user.recv()).await;
+    assert!(client_read_result.is_ok(), "Client should not time out");
+    assert!(
+        client_read_result.unwrap().is_none(),
+        "Client stream was already closing, and should now be fully terminated."
+    );
+
+    // Give a moment for tasks to fully terminate.
+    tokio::time::sleep(Duration::from_millis(50)).await;
 } 
