@@ -63,7 +63,23 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                 // 2. Handle incoming UDP packets
                 Ok((len, remote_addr)) = self.socket.recv_from(&mut recv_buf) => {
                     debug!(len, addr = %remote_addr, "Received UDP datagram");
-                    let mut cursor = &recv_buf[..len];
+
+                    // Immediately copy the received data into an owned buffer. This is the
+                    // definitive fix for the race condition. By creating an owned copy,
+                    // we ensure that the buffer being processed by this task cannot be
+                    // overwritten by a subsequent `recv_from` call in the `select!` loop
+                    // when this task `await`s. The `Frame`s decoded below will hold
+                    // slices pointing to `datagram_buf`, which is safe.
+                    //
+                    // 立即将接收到的数据复制到一个拥有的缓冲区中。这是对竞争条件的最终修复。
+                    // 通过创建拥有的副本，我们确保此任务正在处理的缓冲区不会在 `select!`
+                    // 循环中被后续的 `recv_from` 调用覆盖，当此任务 `await` 时。
+                    // 下面解码的 `Frame` 将持有指向 `datagram_buf` 的切片，这是安全的。
+                    let datagram_buf = recv_buf[..len].to_vec();
+
+                    // Decode all frames from the datagram first before dispatching any.
+                    let mut frames = Vec::new();
+                    let mut cursor = &datagram_buf[..];
                     while !cursor.is_empty() {
                         let frame = match Frame::decode(&mut cursor) {
                             Some(frame) => frame,
@@ -72,6 +88,11 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                                 break; // Stop processing this datagram
                             }
                         };
+                        frames.push(frame);
+                    }
+
+                    // Now that all frames are safely decoded, dispatch them.
+                    for frame in frames {
                         self.dispatch_frame(frame, remote_addr).await;
                     }
                 }
