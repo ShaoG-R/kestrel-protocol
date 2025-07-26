@@ -7,6 +7,11 @@
 - [项目现状分析报告](./project-guidance/01-status-report.md)
 - [AI开发指南](./project-guidance/02-ai-dev-guide.md)
 
+# 开发文档
+
+- [开发文档介绍](./dev-docs/README.md)
+- [连接关闭机制](./dev-docs/01-connection-shutdown.md)
+
 # Features
 
 - [基础与工具](./features/01-foundations/README.md)

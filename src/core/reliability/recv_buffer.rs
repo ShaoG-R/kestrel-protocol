@@ -6,7 +6,21 @@
 use crate::packet::sack::SackRange;
 use bytes::Bytes;
 use std::collections::{btree_map::Entry, BTreeMap};
-use tracing::trace;
+
+/// Represents the content of a received packet in the buffer.
+///
+/// 代表接收缓冲区中已接收数据包的内容。
+#[derive(Debug, Clone)]
+pub enum PacketOrFin {
+    /// A regular data packet.
+    ///
+    /// 普通数据包。
+    Push(Bytes),
+    /// A signal indicating the end of the stream.
+    ///
+    /// 表示流结束的信号。
+    Fin,
+}
 
 /// Manages incoming data.
 #[derive(Debug)]
@@ -14,9 +28,11 @@ pub struct ReceiveBuffer {
     /// The next sequence number we expect to receive for contiguous data.
     next_sequence: u32,
     /// Stores out-of-order packets.
-    received: BTreeMap<u32, Bytes>,
+    received: BTreeMap<u32, PacketOrFin>,
     /// The maximum number of packets to buffer.
     capacity: usize,
+    /// Becomes true once a FIN has been processed by `reassemble`.
+    fin_reached: bool,
 }
 
 impl Default for ReceiveBuffer {
@@ -25,6 +41,7 @@ impl Default for ReceiveBuffer {
             next_sequence: 0,
             received: BTreeMap::new(),
             capacity: 256, // In packets
+            fin_reached: false,
         }
     }
 }
@@ -36,6 +53,7 @@ impl ReceiveBuffer {
             next_sequence: 0,
             received: BTreeMap::new(),
             capacity: capacity_packets,
+            fin_reached: false,
         }
     }
 
@@ -53,54 +71,92 @@ impl ReceiveBuffer {
         self.next_sequence
     }
 
-    /// Receives a packet payload for a given sequence number.
+    /// Checks if there are any buffered, out-of-order packets.
+    pub fn is_empty(&self) -> bool {
+        self.received.is_empty()
+    }
+
+    /// Receives a data packet payload for a given sequence number.
     ///
     /// 为给定的序列号接收一个数据包有效载荷。
-    ///
-    pub fn receive(&mut self, sequence_number: u32, payload: Bytes) {
-        // We only care about packets that are at or after the next expected sequence.
-        // Duplicates of already processed packets are ignored.
+    pub fn receive_push(&mut self, sequence_number: u32, payload: Bytes) {
+        if self.fin_reached {
+            return;
+        }
         if sequence_number >= self.next_sequence {
             if let Entry::Vacant(entry) = self.received.entry(sequence_number) {
-                entry.insert(payload);
-                if sequence_number > self.next_sequence {
-                    trace!(
-                        seq = sequence_number,
-                        next_expected = self.next_sequence,
-                        "Buffered out-of-order packet"
-                    );
-                }
+                entry.insert(PacketOrFin::Push(payload));
             }
         }
     }
 
-    /// Tries to reassemble contiguous packets into a `Vec` of `Bytes` objects.
+    /// Receives a FIN signal for a given sequence number.
     ///
-    /// This avoids an extra copy by returning the original `Bytes` payloads directly.
-    ///
-    /// 尝试将连续的数据包重组成一个 `Bytes` 对象的向量。
-    ///
-    /// 通过直接返回原始的 `Bytes` 有效载荷来避免额外的拷贝。
-    pub fn reassemble(&mut self) -> Option<Vec<Bytes>> {
-        let mut reassembled_data = Vec::new();
-        while let Some(payload) = self.try_pop_next_contiguous() {
-            reassembled_data.push(payload);
+    /// 为给定的序列号接收一个FIN信号。
+    pub fn receive_fin(&mut self, sequence_number: u32) {
+        if self.fin_reached {
+            return;
         }
-
-        if reassembled_data.is_empty() {
-            None
-        } else {
-            Some(reassembled_data)
+        if sequence_number >= self.next_sequence {
+            if let Entry::Vacant(entry) = self.received.entry(sequence_number) {
+                entry.insert(PacketOrFin::Fin);
+            }
         }
     }
 
+    /// Tries to reassemble contiguous packets.
+    ///
+    /// Returns a tuple containing:
+    /// 1. An `Option<Vec<Bytes>>` with the reassembled data payloads. `None` if no
+    ///    contiguous data was available.
+    /// 2. A `bool` that is `true` if a `FIN` packet was encountered during reassembly.
+    ///
+    /// 尝试重组连续的数据包。
+    ///
+    /// 返回一个元组，包含：
+    /// 1. `Option<Vec<Bytes>>`，其中包含重组后的数据有效载荷。如果没有连续数据可用，则为`None`。
+    /// 2. `bool`，如果在重组过程中遇到`FIN`数据包，则为`true`。
+    pub fn reassemble(&mut self) -> (Option<Vec<Bytes>>, bool) {
+        if self.fin_reached {
+            // Once the FIN is processed, no more data can be reassembled.
+            return (None, false);
+        }
+
+        let mut reassembled_data = Vec::new();
+        let mut fin_seen = false;
+
+        while let Some(packet) = self.try_pop_next_contiguous() {
+            match packet {
+                PacketOrFin::Push(payload) => {
+                    reassembled_data.push(payload);
+                }
+                PacketOrFin::Fin => {
+                    fin_seen = true;
+                    self.fin_reached = true;
+                    // Stop reassembly after encountering a FIN. Any subsequent packets
+                    // are considered extraneous and should be discarded.
+                    self.received.clear();
+                    break;
+                }
+            }
+        }
+
+        let data_option = if reassembled_data.is_empty() {
+            None
+        } else {
+            Some(reassembled_data)
+        };
+
+        (data_option, fin_seen)
+    }
+
     /// Checks for and removes the next contiguous packet from the buffer.
-    fn try_pop_next_contiguous(&mut self) -> Option<Bytes> {
+    fn try_pop_next_contiguous(&mut self) -> Option<PacketOrFin> {
         if let Some((&seq, _)) = self.received.first_key_value() {
             if seq == self.next_sequence {
                 // The next expected packet is here. Pop it.
                 self.next_sequence += 1;
-                return self.received.pop_first().map(|(_, payload)| payload);
+                return self.received.pop_first().map(|(_, packet)| packet);
             }
         }
         None
@@ -159,13 +215,15 @@ mod tests {
     fn test_receive_in_order_and_reassemble() {
         let mut buffer = create_test_recv_buffer();
 
-        buffer.receive(0, Bytes::from("hello"));
-        buffer.receive(1, Bytes::from(" world"));
+        buffer.receive_push(0, Bytes::from("hello"));
+        buffer.receive_push(1, Bytes::from(" world"));
 
-        let data_vec = buffer.reassemble().unwrap();
+        let (data_vec_opt, fin_seen) = buffer.reassemble();
+        let data_vec = data_vec_opt.unwrap();
         let data: Bytes = data_vec.into_iter().flat_map(|b| b).collect();
         assert_eq!(data, "hello world");
-        assert!(buffer.reassemble().is_none());
+        assert!(!fin_seen);
+        assert!(buffer.reassemble().0.is_none());
         assert_eq!(buffer.next_sequence(), 2);
     }
 
@@ -173,39 +231,68 @@ mod tests {
     fn test_receive_out_of_order_and_reassemble() {
         let mut buffer = create_test_recv_buffer();
 
-        buffer.receive(1, Bytes::from("world"));
-        assert!(buffer.reassemble().is_none());
+        buffer.receive_push(1, Bytes::from("world"));
+        let (data, fin_seen) = buffer.reassemble();
+        assert!(data.is_none());
+        assert!(!fin_seen);
         assert_eq!(buffer.next_sequence(), 0);
 
-        buffer.receive(0, Bytes::from("hello "));
-        let data_vec = buffer.reassemble().unwrap();
+        buffer.receive_push(0, Bytes::from("hello "));
+        let (data_vec_opt, fin_seen) = buffer.reassemble();
+        let data_vec = data_vec_opt.unwrap();
         let data: Bytes = data_vec.into_iter().flat_map(|b| b).collect();
         assert_eq!(data, "hello world");
+        assert!(!fin_seen);
         assert_eq!(buffer.next_sequence(), 2);
+    }
+
+    #[test]
+    fn test_receive_with_fin() {
+        let mut buffer = create_test_recv_buffer();
+
+        buffer.receive_push(0, Bytes::from("data"));
+        buffer.receive_fin(1);
+        buffer.receive_push(2, Bytes::from("more")); // Should be ignored after FIN
+
+        let (data_vec_opt, fin_seen) = buffer.reassemble();
+        assert!(fin_seen);
+        let data: Bytes = data_vec_opt.unwrap().into_iter().flatten().collect();
+        assert_eq!(data, "data");
+        assert_eq!(buffer.next_sequence(), 2);
+
+        // After the FIN is processed, the buffer should be empty of re-orderable packets
+        // up to the FIN, and further reassembly should yield nothing.
+        let (data_vec_opt_2, fin_seen_2) = buffer.reassemble();
+        assert!(!fin_seen_2);
+        assert!(data_vec_opt_2.is_none());
     }
 
     #[test]
     fn test_receive_duplicate_and_old_packets() {
         let mut buffer = create_test_recv_buffer();
 
-        buffer.receive(0, Bytes::from("one"));
-        buffer.receive(1, Bytes::from("two"));
-        let data_vec = buffer.reassemble().unwrap();
+        buffer.receive_push(0, Bytes::from("one"));
+        buffer.receive_push(1, Bytes::from("two"));
+        let (data_vec_opt, _) = buffer.reassemble();
+        let data_vec = data_vec_opt.unwrap();
         let data: Bytes = data_vec.into_iter().flat_map(|b| b).collect();
         assert_eq!(data, "onetwo");
         assert_eq!(buffer.next_sequence(), 2);
 
         // Receive an old packet (already processed)
-        buffer.receive(0, Bytes::from("ignored"));
+        buffer.receive_push(0, Bytes::from("ignored"));
         assert!(buffer.received.is_empty());
-        assert!(buffer.reassemble().is_none());
+        assert!(buffer.reassemble().0.is_none());
 
         // Receive a future packet, then a duplicate of it
-        buffer.receive(3, Bytes::from("three"));
+        buffer.receive_push(3, Bytes::from("three"));
         assert_eq!(buffer.received.len(), 1);
-        buffer.receive(3, Bytes::from("ignored duplicate"));
+        buffer.receive_push(3, Bytes::from("ignored duplicate"));
         assert_eq!(buffer.received.len(), 1);
-        assert_eq!(buffer.received.get(&3).unwrap(), "three");
+        assert!(matches!(
+            buffer.received.get(&3).unwrap(),
+            PacketOrFin::Push(b) if b == "three"
+        ));
     }
 
     #[test]
@@ -214,11 +301,11 @@ mod tests {
         assert!(buffer.get_sack_ranges().is_empty());
 
         // Receive discontinuous packets
-        buffer.receive(0, Bytes::new());
-        buffer.receive(1, Bytes::new());
-        buffer.receive(3, Bytes::new());
-        buffer.receive(4, Bytes::new());
-        buffer.receive(6, Bytes::new());
+        buffer.receive_push(0, Bytes::new());
+        buffer.receive_push(1, Bytes::new());
+        buffer.receive_push(3, Bytes::new());
+        buffer.receive_push(4, Bytes::new());
+        buffer.receive_push(6, Bytes::new());
 
         // Reassemble contiguous part
         let _ = buffer.reassemble();
@@ -240,7 +327,7 @@ mod tests {
         let mut buffer = create_test_recv_buffer();
         let received_seqs = [0, 1, 5, 6, 7, 10, 12, 13, 15];
         for &seq in &received_seqs {
-            buffer.receive(seq, Bytes::new());
+            buffer.receive_push(seq, Bytes::new());
         }
 
         let _ = buffer.reassemble();
