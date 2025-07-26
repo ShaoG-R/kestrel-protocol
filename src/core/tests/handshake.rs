@@ -52,11 +52,13 @@ async fn test_cid_handshake() {
     .expect("Server should send a SYN-ACK")
     .unwrap();
 
-    // 4. Verify the SYN-ACK contents.
+    // 4. Verify the SYN-ACK and PUSH frame contents.
     if let SenderTaskCommand::Send(cmd) = syn_ack_cmd {
         assert_eq!(cmd.remote_addr, client_addr);
-        assert_eq!(cmd.frames.len(), 1);
+        // We now expect two frames due to coalescing: SYN-ACK and PUSH.
+        assert_eq!(cmd.frames.len(), 2);
 
+        // Verify the first frame is the SYN-ACK.
         if let Frame::SynAck { header, .. } = &cmd.frames[0] {
             // The server's response must be directed to the client's CID.
             assert_eq!(
@@ -69,7 +71,12 @@ async fn test_cid_handshake() {
                 "SYN-ACK source_cid should be the server's own CID"
             );
         } else {
-            panic!("Expected a SYN-ACK frame, but got {:?}", cmd.frames[0]);
+            panic!("Expected the first frame to be a SYN-ACK, but got {:?}", cmd.frames[0]);
+        }
+
+        // Verify the second frame is the PUSH.
+        if !matches!(&cmd.frames[1], Frame::Push { .. }) {
+            panic!("Expected the second frame to be a PUSH, but got {:?}", cmd.frames[1]);
         }
     } else {
         panic!("Expected a Send command, but got {:?}", syn_ack_cmd);

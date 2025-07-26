@@ -285,7 +285,8 @@ async fn test_actor_with_true_concurrent_handlers() {
         .unwrap();
 
         if let SenderTaskCommand::Send(send_cmd) = cmd {
-            // SYN-ACK for a probe has no payload, so we identify by address.
+            // SYN-ACK for a probe has no payload, and the PUSH frame might also be empty initially.
+            // So, we identify by address.
             outgoing_commands.insert(send_cmd.remote_addr, send_cmd);
         }
     }

@@ -21,9 +21,8 @@ pub(super) fn create_syn_ack_frame(
     config: &Config,
     peer_cid: u32,
     local_cid: u32,
-    payload: Bytes,
 ) -> Frame {
-    Frame::new_syn_ack(config.protocol_version, local_cid, peer_cid, payload)
+    Frame::new_syn_ack(config.protocol_version, local_cid, peer_cid)
 }
 
 /// Creates a standalone ACK frame.

@@ -15,7 +15,6 @@ use crate::{
 };
 use tokio::time::{sleep_until, Instant};
 use tracing::{info, trace};
-use bytes::Bytes;
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
     /// Runs the endpoint's main event loop.
@@ -149,7 +148,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     }
                 }
             }
-            Frame::SynAck { header, payload: _ } => {
+            Frame::SynAck { header } => {
                 if self.state == ConnectionState::Connecting {
                     self.state = ConnectionState::Established;
                     self.peer_cid = header.source_cid;
@@ -271,12 +270,8 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     self.reliability.write_to_stream(&data);
 
                     // 2. Create the payload-less SYN-ACK frame.
-                    let syn_ack_frame = create_syn_ack_frame(
-                        &self.config,
-                        self.peer_cid,
-                        self.local_cid,
-                        Bytes::new(),
-                    );
+                    let syn_ack_frame =
+                        create_syn_ack_frame(&self.config, self.peer_cid, self.local_cid);
 
                     // 3. Packetize the stream data into PUSH frames. This will correctly
                     //    assign sequence numbers starting from 0.
