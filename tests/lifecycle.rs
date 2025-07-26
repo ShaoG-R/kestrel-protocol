@@ -226,25 +226,43 @@ async fn test_concurrent_connections_cid_isolation() {
                 // A. DEADLOCK BREAKER: Trigger SYN-ACK by writing a probe.
                 // This is required by the protocol design.
                 writer.write_all(b"probe").await.unwrap();
+                tracing::info!("[Server Handler for {}] Sent probe.", remote_addr);
 
-                // B. Read the client's identity and its message in one go.
-                let mut id_buf = vec![0; 7];
-                reader.read_exact(&mut id_buf).await.unwrap();
-                
+                // B. Read the client's identity and its message.
+                let mut id_buf = vec![0; 7]; // e.g., "ident_A"
+                reader
+                    .read_exact(&mut id_buf)
+                    .await
+                    .expect("Failed to read client identity");
+                tracing::info!(
+                    "[Server Handler for {}] Read identity: {}",
+                    remote_addr,
+                    String::from_utf8_lossy(&id_buf)
+                );
+
                 // C. Based on the identity, read the correct message and send the correct ack.
-                if &id_buf == b"ident_A" {
-                    let mut msg_buf = vec![0; 12];
+                let ident_str = String::from_utf8(id_buf).unwrap();
+                if ident_str == "ident_A" {
+                    let mut msg_buf = vec![0; 12]; // "from clientA"
                     reader.read_exact(&mut msg_buf).await.unwrap();
                     assert_eq!(&msg_buf, b"from clientA");
                     writer.write_all(b"server ack A").await.unwrap();
-                } else if &id_buf == b"ident_B" {
-                    let mut msg_buf = vec![0; 12];
+                } else if ident_str == "ident_B" {
+                    let mut msg_buf = vec![0; 12]; // "from clientB"
                     reader.read_exact(&mut msg_buf).await.unwrap();
                     assert_eq!(&msg_buf, b"from clientB");
                     writer.write_all(b"server ack B").await.unwrap();
                 } else {
-                    panic!("Unknown client identity received: {:?}", id_buf);
+                    panic!("Unknown client identity received: {:?}", ident_str);
                 }
+                
+                // D. Gracefully shutdown the connection from the server side.
+                writer
+                    .shutdown()
+                    .await
+                    .expect("Server handler failed to shutdown");
+
+                tracing::info!("[Server Handler for {}] Finished.", remote_addr);
             });
             handlers.push(handler);
         }
@@ -258,60 +276,61 @@ async fn test_concurrent_connections_cid_isolation() {
 
     // 3. Setup and connect two clients concurrently
     let client_a_addr = "127.0.0.1:9993".parse().unwrap();
-    let (client_a_socket, _) = ReliableUdpSocket::<tokio::net::UdpSocket>::bind(client_a_addr).await.unwrap();
-
+    let (client_a_socket, _) =
+        ReliableUdpSocket::<tokio::net::UdpSocket>::bind(client_a_addr)
+            .await
+            .unwrap();
     let client_b_addr = "127.0.0.1:9992".parse().unwrap();
-    let (client_b_socket, _) = ReliableUdpSocket::<tokio::net::UdpSocket>::bind(client_b_addr).await.unwrap();
+    let (client_b_socket, _) =
+        ReliableUdpSocket::<tokio::net::UdpSocket>::bind(client_b_addr)
+            .await
+            .unwrap();
 
-    let client_a_handle = tokio::spawn(async move {
-        tracing::info!("[Client A] Connecting to server...");
-        let stream = client_a_socket.connect(server_addr).await.unwrap();
-        let (mut reader, mut writer) = tokio::io::split(stream);
-        
-        // A. DEADLOCK BREAKER: First, read the server's probe message.
-        // This will unblock once the server sends the SYN-ACK.
-        let mut probe_buf = vec![0; 5];
-        reader.read_exact(&mut probe_buf).await.unwrap();
-        assert_eq!(&probe_buf, b"probe");
+    let clients = [client_a_socket, client_b_socket];
+    let client_ids = ['A', 'B'];
 
-        // B. Send identity and a message straight after.
-        writer.write_all(b"ident_A").await.unwrap();
-        writer.write_all(b"from clientA").await.unwrap();
-        
-        // C. Verify received server acknowledgement.
-        let server_ack = b"server ack A";
-        let mut buf = vec![0; server_ack.len()];
-        reader.read_exact(&mut buf).await.expect("Read from A failed");
-        assert_eq!(&buf, server_ack, "Client A received wrong ack");
-        tracing::info!("[Client A] Correctly received acknowledgement.");
-    });
+    let mut client_handles = Vec::new();
+    for i in 0..2 {
+        let client_socket = clients[i].clone();
+        let id = client_ids[i];
+        let client_handle = tokio::spawn(async move {
+            tracing::info!("[Client {}] Connecting to server...", id);
+            let stream = client_socket.connect(server_addr).await.unwrap();
+            let (mut reader, mut writer) = tokio::io::split(stream);
+            
+            // A. Read the server's initial "probe" required for handshake.
+            let mut probe_buf = vec![0; 5];
+            reader.read_exact(&mut probe_buf).await.unwrap();
+            assert_eq!(&probe_buf, b"probe");
+            tracing::info!("[Client {}] Probe received.", id);
 
-    let client_b_handle = tokio::spawn(async move {
-        tracing::info!("[Client B] Connecting to server...");
-        let stream = client_b_socket.connect(server_addr).await.unwrap();
-        let (mut reader, mut writer) = tokio::io::split(stream);
+            // B. Send identity and unique message.
+            let ident = format!("ident_{}", id);
+            let msg = format!("from client{}", id);
+            writer.write_all(ident.as_bytes()).await.unwrap();
+            writer.write_all(msg.as_bytes()).await.unwrap();
+            tracing::info!("[Client {}] Sent identity and message.", id);
 
-        // A. DEADLOCK BREAKER: First, read the server's probe message.
-        let mut probe_buf = vec![0; 5];
-        reader.read_exact(&mut probe_buf).await.unwrap();
-        assert_eq!(&probe_buf, b"probe");
+            // C. Wait for the server's final, unique acknowledgment.
+            let expected_ack = format!("server ack {}", id);
+            let mut ack_buf = vec![0; expected_ack.len()];
+            reader.read_exact(&mut ack_buf).await.unwrap();
+            assert_eq!(ack_buf, expected_ack.as_bytes());
+            tracing::info!("[Client {}] Received correct final ack.", id);
 
-        // B. Send identity and a message straight after.
-        writer.write_all(b"ident_B").await.unwrap();
-        writer.write_all(b"from clientB").await.unwrap();
-        
-        // C. Verify received server acknowledgement.
-        let server_ack = b"server ack B";
-        let mut buf = vec![0; server_ack.len()];
-        reader.read_exact(&mut buf).await.expect("Read from B failed");
-        assert_eq!(&buf, server_ack, "Client B received wrong ack");
-        tracing::info!("[Client B] Correctly received acknowledgement.");
-    });
+            // D. Gracefully shutdown the connection from the client side.
+            // This is crucial for the test to terminate cleanly.
+            writer.shutdown().await.unwrap();
+            tracing::info!("[Client {}] Shutdown complete.", id);
+        });
+        client_handles.push(client_handle);
+    }
 
     // Wait for all top-level tasks to complete
     server_handle.await.unwrap();
-    client_a_handle.await.unwrap();
-    client_b_handle.await.unwrap();
+    for client_handle in client_handles {
+        client_handle.await.unwrap();
+    }
     
     tracing::info!("[Test] CID isolation test passed.");
 } 

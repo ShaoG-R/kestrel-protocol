@@ -58,6 +58,15 @@ pub struct ReliableUdpSocket<S: BindableUdpSocket> {
     _marker: PhantomData<S>,
 }
 
+impl<S: BindableUdpSocket> Clone for ReliableUdpSocket<S> {
+    fn clone(&self) -> Self {
+        Self {
+            command_tx: self.command_tx.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl<S: BindableUdpSocket> ReliableUdpSocket<S> {
     /// Creates a new `ReliableUdpSocket` and binds it to the given address.
     ///
