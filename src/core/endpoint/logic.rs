@@ -156,6 +156,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 // This is now primarily handled by the Socket creating the Endpoint.
                 // If we receive another SYN, it might be a retransmission from the client
                 // because it hasn't received our SYN-ACK yet.
+                //
+                // 这里处理的是客户端的SYN，如果客户端的SYN被丢弃了，那么这个SYN是用来触发SYN-ACK的
+                // 如果客户端的SYN没有被丢弃，那么这个SYN是用来触发0-RTT的
                 if self.state == ConnectionState::SynReceived {
                     info!(cid = self.local_cid, "Received duplicate SYN, ignoring.");
                     // If we have already been triggered to send a SYN-ACK (i.e., data is in the

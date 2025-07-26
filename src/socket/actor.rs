@@ -92,8 +92,16 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                     }
 
                     // Now that all frames are safely decoded, dispatch them.
-                    for frame in frames {
-                        self.dispatch_frame(frame, remote_addr).await;
+                    if !frames.is_empty() {
+                        // Check if the first frame indicates a new connection attempt.
+                        if let Frame::Syn { .. } = &frames[0] {
+                            self.handle_new_connection(frames, remote_addr).await;
+                        } else {
+                            // Otherwise, dispatch frames individually to existing connections.
+                            for frame in frames {
+                                self.dispatch_frame(frame, remote_addr).await;
+                            }
+                        }
                     }
                 }
                 // 3. Handle periodic cleanup of draining CIDs
@@ -192,27 +200,8 @@ impl<S: BindableUdpSocket> SocketActor<S> {
         Ok(())
     }
 
-    /// Dispatches a received frame to the appropriate connection task.
+    /// Dispatches a received frame to an appropriate (and existing) connection task.
     async fn dispatch_frame(&mut self, frame: Frame, remote_addr: SocketAddr) {
-        // If it's a SYN for a new connection, it takes precedence over all other routing.
-        if let Frame::Syn { .. } = &frame {
-            // If a connection already exists for this address, the new SYN indicates
-            // that the client has abandoned the old one and wants to start fresh.
-            // We honor this by tearing down the old state before creating the new one.
-            if let Some(&old_cid) = self.addr_to_cid.get(&remote_addr) {
-                info!(
-                    addr = %remote_addr,
-                    old_cid = old_cid,
-                    "Received new SYN from an address with a lingering connection. Replacing it."
-                );
-                self.remove_connection_by_cid(old_cid);
-            }
-
-            // Now, we can safely proceed with creating the new connection.
-            self.accept_new_connection(frame, remote_addr).await;
-            return;
-        }
-
         let cid = frame.destination_cid();
 
         // 1. Try to route to an established connection via its destination CID.
@@ -255,9 +244,31 @@ impl<S: BindableUdpSocket> SocketActor<S> {
         }
     }
 
-    /// Handles a new connection attempt based on a SYN frame.
-    async fn accept_new_connection(&mut self, frame: Frame, remote_addr: SocketAddr) {
-        if let Frame::Syn { header, .. } = frame {
+    /// Handles a new connection attempt, which may include 0-RTT data frames.
+    async fn handle_new_connection(
+        &mut self,
+        mut frames: Vec<Frame>,
+        remote_addr: SocketAddr,
+    ) {
+        // The first frame must be a SYN.
+        if frames.is_empty() {
+            return;
+        }
+        let first_frame = frames.remove(0);
+
+        if let Frame::Syn { header } = first_frame {
+            // If a connection already exists for this address, the new SYN indicates
+            // that the client has abandoned the old one and wants to start fresh.
+            // We honor this by tearing down the old state before creating the new one.
+            if let Some(&old_cid) = self.addr_to_cid.get(&remote_addr) {
+                info!(
+                    addr = %remote_addr,
+                    old_cid = old_cid,
+                    "Received new SYN from an address with a lingering connection. Replacing it."
+                );
+                self.remove_connection_by_cid(old_cid);
+            }
+
             let config = self.config.as_ref();
             if header.protocol_version != config.protocol_version {
                 warn!(
@@ -290,6 +301,18 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                     self.command_tx.clone(),
                 );
 
+            // Before spawning the endpoint, send any 0-RTT PUSH frames to it.
+            // This ensures the frames are in its queue before it even starts running.
+            for frame in frames {
+                if let Frame::Push { .. } = &frame {
+                    if tx_to_endpoint.try_send((frame, remote_addr)).is_err() {
+                        warn!(addr = %remote_addr, "Failed to send 0-RTT frame to new endpoint, channel might be full. Dropping frame.");
+                    }
+                } else {
+                    warn!(addr = %remote_addr, "Received non-PUSH frame immediately after SYN in a 0-RTT packet. Ignoring: {:?}", frame);
+                }
+            }
+
             tokio::spawn(async move {
                 info!(addr = %remote_addr, cid = %local_cid, "Spawning new endpoint task for inbound connection");
                 if let Err(e) = endpoint.run().await {
@@ -301,7 +324,7 @@ impl<S: BindableUdpSocket> SocketActor<S> {
             self.connections.insert(
                 local_cid,
                 ConnectionMeta {
-                    sender: tx_to_endpoint.clone(),
+                    sender: tx_to_endpoint,
                 },
             );
             // Add to addr->cid map to find this connection for retransmitted SYNs.
@@ -322,7 +345,7 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                 // because it will never receive a SYN-ACK confirmation from the user.
             }
         } else {
-            unreachable!("accept_new_connection must be called with a SYN frame");
+            warn!("handle_new_connection called with a non-SYN frame as the first frame");
         }
     }
 

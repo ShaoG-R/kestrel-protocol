@@ -107,7 +107,6 @@ impl ActorTestHarness {
             Config::default().protocol_version,
             source_cid,
             0, // destination_cid is unknown for initial SYN
-            Bytes::new(),
         );
         let mut buffer = Vec::new();
         syn_frame.encode(&mut buffer);

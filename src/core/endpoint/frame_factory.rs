@@ -2,7 +2,6 @@
 //!
 //! 包含用于创建不同类型帧的工厂函数。
 
-use bytes::Bytes;
 use tokio::time::Instant;
 
 use crate::{
@@ -12,8 +11,8 @@ use crate::{
 };
 
 /// Creates a SYN frame.
-pub(super) fn create_syn_frame(config: &Config, local_cid: u32, initial_payload: Bytes) -> Frame {
-    Frame::new_syn(config.protocol_version, local_cid, 0, initial_payload)
+pub(super) fn create_syn_frame(config: &Config, local_cid: u32) -> Frame {
+    Frame::new_syn(config.protocol_version, local_cid, 0)
 }
 
 /// Creates a SYN-ACK frame.
@@ -81,6 +80,7 @@ pub(crate) fn create_path_response_frame(
 mod tests {
     use super::*;
     use crate::congestion::vegas::Vegas;
+    use bytes::Bytes;
 
     fn create_test_reliability_layer() -> ReliabilityLayer {
         let config = Config::default();
@@ -91,12 +91,10 @@ mod tests {
     #[test]
     fn test_create_syn_frame() {
         let config = Config::default();
-        let frame = create_syn_frame(&config, 123, Bytes::from_static(b"hello"));
+        let frame = create_syn_frame(&config, 123);
         match frame {
-            Frame::Syn { header, payload } => {
+            Frame::Syn { header } => {
                 assert_eq!(header.source_cid, 123);
-                assert_eq!(payload, "hello");
-                assert_eq!(header.payload_length, payload.len() as u16);
             }
             _ => panic!("Incorrect frame type"),
         }

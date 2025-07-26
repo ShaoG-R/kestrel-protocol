@@ -192,6 +192,7 @@ pub fn setup_client_server_pair() -> (EndpointHarness, EndpointHarness) {
         server_config,
         client_tx_filter,
         server_tx_filter,
+        None,
     );
     (client_harness, server_harness)
 }
@@ -202,6 +203,7 @@ pub fn setup_client_server_with_filter(
     server_config: Config,
     client_tx_filter: Arc<dyn Fn(&Frame) -> bool + Send + Sync>,
     server_tx_filter: Arc<dyn Fn(&Frame) -> bool + Send + Sync>,
+    initial_data: Option<Bytes>,
 ) -> (
     EndpointHarness,
     EndpointHarness,
@@ -249,7 +251,7 @@ pub fn setup_client_server_with_filter(
             rx_from_socket,
             sender_task_tx.clone(),
             command_tx.clone(),
-            None,
+            initial_data,
         );
         endpoint.set_peer_cid(peer_cid);
 
@@ -332,6 +334,7 @@ pub async fn new_stream_pair_with_filter<F>(
         server_config,
         client_tx_filter,
         server_tx_filter,
+        None,
     );
 
     let client_stream = Stream::new(

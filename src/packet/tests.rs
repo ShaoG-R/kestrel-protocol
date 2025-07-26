@@ -92,17 +92,14 @@ fn test_fin_frame_roundtrip() {
 
 #[test]
 fn test_syn_frame_roundtrip() {
-    let payload = Bytes::from_static(b"optional 0-rtt data");
     let header = LongHeader {
         command: Command::Syn,
         protocol_version: 1,
-        payload_length: payload.len() as u16,
         destination_cid: 9876,
         source_cid: 5432,
     };
     let frame = Frame::Syn {
         header,
-        payload,
     };
     frame_roundtrip_test(frame);
 }
@@ -112,7 +109,6 @@ fn test_syn_ack_frame_roundtrip() {
     let header = LongHeader {
         command: Command::SynAck,
         protocol_version: 1,
-        payload_length: 0,
         destination_cid: 5432,
         source_cid: 9876,
     };

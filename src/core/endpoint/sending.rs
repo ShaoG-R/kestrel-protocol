@@ -43,9 +43,23 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     }
 
     pub(super) async fn send_initial_syn(&mut self) -> Result<()> {
-        let initial_payload = self.reliability.take_stream_buffer();
-        let frame = create_syn_frame(&self.config, self.local_cid, initial_payload);
-        self.send_frames(vec![frame]).await
+        // Phase 1: Create the payload-less SYN frame.
+        let syn_frame = create_syn_frame(&self.config, self.local_cid);
+
+        // Phase 2: Packetize any 0-RTT data into PUSH frames.
+        let now = Instant::now();
+        let mut frames_to_send = self.reliability.packetize_stream_data(
+            self.peer_cid,
+            self.peer_recv_window,
+            now,
+            self.start_time,
+        );
+
+        // Phase 3: Prepend the SYN frame to coalesce it with the PUSH frames.
+        frames_to_send.insert(0, syn_frame);
+
+        // Phase 4: Send them all in one go.
+        self.send_frames(frames_to_send).await
     }
 
     /// Sends a SYN-ACK frame without a payload.

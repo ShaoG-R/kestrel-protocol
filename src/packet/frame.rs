@@ -25,12 +25,9 @@ pub enum Frame {
     /// A PING frame.
     /// PING 帧。
     Ping { header: ShortHeader },
-    /// A SYN frame to initiate a connection. May carry 0-RTT data.
-    /// 用于发起连接的 SYN 帧。可携带0-RTT数据。
-    Syn {
-        header: LongHeader,
-        payload: Bytes,
-    },
+    /// A SYN frame to initiate a connection. It no longer carries a payload.
+    /// 用于发起连接的 SYN 帧。它不再携带载荷。
+    Syn { header: LongHeader },
     /// A SYN-ACK frame to acknowledge a connection. It never carries a payload.
     /// 用于确认连接的 SYN-ACK 帧。它从不携带载荷。
     SynAck {
@@ -149,20 +146,14 @@ impl Frame {
 
     /// Creates a new SYN frame.
     /// 创建一个新的 SYN 帧。
-    pub fn new_syn(
-        protocol_version: u8,
-        source_cid: u32,
-        destination_cid: u32,
-        payload: Bytes,
-    ) -> Self {
+    pub fn new_syn(protocol_version: u8, source_cid: u32, destination_cid: u32) -> Self {
         let header = LongHeader {
             command: command::Command::Syn,
             protocol_version,
-            payload_length: payload.len() as u16,
             destination_cid,
             source_cid,
         };
-        Frame::Syn { header, payload }
+        Frame::Syn { header }
     }
 
     /// Creates a new SYN-ACK frame.
@@ -175,7 +166,6 @@ impl Frame {
         let header = LongHeader {
             command: command::Command::SynAck,
             protocol_version,
-            payload_length: 0, // SYN-ACK frames never have a payload.
             destination_cid,
             source_cid,
         };
@@ -247,22 +237,9 @@ impl Frame {
             let header = LongHeader::decode(cursor)?;
             return match header.command {
                 command::Command::Syn => {
-                    let payload_len = header.payload_length as usize;
-                    if cursor.len() < payload_len {
-                        return None;
-                    }
-                    let payload = Bytes::copy_from_slice(&cursor[..payload_len]);
-                    cursor.advance(payload_len);
-                    Some(Frame::Syn { header, payload })
+                    Some(Frame::Syn { header })
                 }
                 command::Command::SynAck => {
-                    // By our protocol design, SYN-ACK frames never have a payload.
-                    // To be robust against misbehaving peers, we must still advance
-                    // the cursor by the payload length specified in the header.
-                    if cursor.len() < header.payload_length as usize {
-                        return None;
-                    }
-                    cursor.advance(header.payload_length as usize);
                     Some(Frame::SynAck { header })
                 }
                 _ => None,
@@ -336,13 +313,10 @@ impl Frame {
                 debug_assert_eq!(header.payload_length, 0);
                 header.encode(buf);
             }
-            Frame::Syn { header, payload } => {
-                debug_assert_eq!(header.payload_length as usize, payload.len());
+            Frame::Syn { header } => {
                 header.encode(buf);
-                buf.put_slice(payload);
             }
             Frame::SynAck { header } => {
-                debug_assert_eq!(header.payload_length, 0);
                 header.encode(buf);
             }
             Frame::Fin { header } => {

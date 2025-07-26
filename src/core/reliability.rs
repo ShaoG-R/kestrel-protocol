@@ -124,6 +124,8 @@ impl ReliabilityLayer {
     }
 
     /// Takes data from the stream buffer and packetizes it.
+    ///
+    /// 从流缓冲区获取数据并打包。
     pub fn packetize_stream_data(
         &mut self,
         peer_cid: u32,

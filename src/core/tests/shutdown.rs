@@ -103,7 +103,6 @@ async fn test_shutdown_when_syn_received() {
         0,
         1, // client's CID
         harness.server_cid,
-        Bytes::new(),
     );
     harness
         .tx_to_endpoint_network

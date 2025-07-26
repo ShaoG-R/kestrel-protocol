@@ -103,6 +103,7 @@ async fn test_endpoint_rto_retransmission() {
             Config::default(),
             client_tx_filter,
             server_tx_filter,
+            None,
         );
 
     // Establish connection.
@@ -231,6 +232,7 @@ async fn test_endpoint_fast_retransmission() {
         Config::default(),
         client_tx_filter,
         server_tx_filter,
+        None,
     );
 
     // Establish connection.

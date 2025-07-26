@@ -12,16 +12,47 @@
 
 ### 1. 0-RTT/1-RTT 连接建立
 
-协议通过延迟发送 `SYN-ACK` 的方式，优雅地统一了 0-RTT 和 1-RTT 的连接流程。
+协议通过**帧聚合 (Packet Coalescing)** 和 **延迟发送 `SYN-ACK`** 的方式，优雅地统一了 0-RTT 和 1-RTT 的连接流程。
+
+```mermaid
+sequenceDiagram
+    participant ClientApp
+    participant ClientStack
+    participant ServerStack
+    participant ServerApp
+
+    ClientApp->>ClientStack: connect(initial_data)
+    ClientStack->>ServerStack: 发送 UDP 包 [SYN, PUSH(initial_data)]
+
+    ServerStack->>ServerStack: 解码出 SYN 和 PUSH 帧
+    ServerStack->>ServerApp: accept() 返回 Stream
+    ServerStack->>ServerStack: 将 PUSH 数据放入接收区
+    ServerApp->>ServerStack: stream.read()
+    ServerApp-->>ServerApp: 获得 initial_data
+
+    Note right of ServerStack: 服务端已收到0-RTT数据, <br/>并立即为PUSH发送一个独立的ACK
+    ServerStack-->>ClientStack: [ACK]
+
+    ServerApp->>ServerStack: stream.write(response_data)
+    Note right of ServerStack: 应用层写入触发 SYN-ACK
+    ServerStack->>ClientStack: 发送 UDP 包 [SYN-ACK, PUSH(response_data)]
+
+    ClientStack-->>ClientApp: 连接建立, 可读/写
+```
 
 - **0-RTT (客户端有初始数据)**:
-    1.  **客户端**: 用户在调用 `connect` 时可以附带初始数据。这些数据会被打包进第一个 `SYN` 包中一同发送。
-    2.  **服务端**: 服务器收到带数据的 `SYN` 后，会立即创建一个 `Endpoint` 任务并向上层应用返回一个 `Stream` 句柄，但此时连接状态为 `SynReceived`，并**不立刻回复 `SYN-ACK`**。
-    3.  **触发**: 当服务器端应用准备好并首次调用 `stream.write()` 发送数据时，`Endpoint` 会将一个无载荷的 `SYN-ACK` 帧和携带业务数据（被封装在 `PUSH` 帧中）的**合并到同一个UDP包中**发送给客户端。
-    4.  **客户端**: 收到 `SYN-ACK` 和数据，连接建立，同时读出第一批数据。
+    1.  **客户端**: 当用户调用 `connect` 并提供初始数据时，客户端协议栈会创建一个**无载荷的`SYN`帧**，并将初始数据打包成一个或多个`PUSH`帧。这些帧会被**聚合（Coalesce）**到同一个UDP数据报中一次性发出。
+    2.  **服务端接收与处理**:
+        *   `SocketActor` 收到数据报后，会解码出其中所有的帧（一个`SYN`和若干`PUSH`）。
+        *   识别到第一个帧是`SYN`后，它会创建一个新的`Endpoint`任务（状态为`SynReceived`）并向上层返回一个`Stream`句柄。
+        *   关键地，`SocketActor`会**立即**将`SYN`帧之后的所有`PUSH`帧转发给这个新创建的`Endpoint`。
+    3.  **数据立即可用**: `Endpoint`在启动后，其接收队列中已经有了0-RTT数据。这些数据被正常处理并放入接收缓冲区，因此服务器应用几乎可以立刻通过`stream.read()`读到这份数据，真正实现0-RTT。
+    4.  **服务端响应**:
+        *   `Endpoint`在收到`PUSH`帧后，会立即回复一个独立的`ACK`帧以快速确认。
+        *   当服务器应用调用`stream.write()`发送响应数据时，`Endpoint`才会将`SYN-ACK`帧和包含响应数据的`PUSH`帧聚合在一起发送给客户端。
 
 - **1-RTT (客户端无初始数据)**:
-    - 流程与0-RTT类似，只是客户端的第一个 `SYN` 包不包含数据。服务端的 `SYN-ACK` 也可能不包含数据（如果服务端应用没有立即写入），但整个交互的模式是相同的。
+    - 流程简化：客户端只发送一个单独的`SYN`帧。服务器收到后，创建`Endpoint`并返回`Stream`。当服务器应用调用`stream.write()`时，会发送`SYN-ACK`（可能聚合了数据），完成握手。
 
 这种设计确保了 `SYN-ACK` 的发送总是与服务器的实际就绪状态同步，提高了效率。
 
