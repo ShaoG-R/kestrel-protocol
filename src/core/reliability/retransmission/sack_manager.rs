@@ -126,55 +126,6 @@ impl SackManager {
             .min()
     }
 
-    /// Generates SACK ranges from a receive buffer state
-    /// 
-    /// This method takes the out-of-order packets and generates
-    /// continuous ranges for SACK information.
-    pub fn generate_sack_ranges(
-        &self,
-        received_packets: &BTreeMap<u32, bool>, // seq -> is_received
-        next_expected_seq: u32,
-    ) -> Vec<SackRange> {
-        let mut ranges = Vec::new();
-        let mut current_range: Option<SackRange> = None;
-
-        // Only consider packets beyond the next expected sequence
-        for (&seq, &is_received) in received_packets.range(next_expected_seq..) {
-            if !is_received {
-                continue;
-            }
-
-            match current_range.as_mut() {
-                Some(range) => {
-                    if seq == range.end + 1 {
-                        // Extend current range
-                        range.end = seq;
-                    } else {
-                        // Gap detected, finalize current range and start new one
-                        ranges.push(range.clone());
-                        current_range = Some(SackRange {
-                            start: seq,
-                            end: seq,
-                        });
-                    }
-                }
-                None => {
-                    // Start first range
-                    current_range = Some(SackRange {
-                        start: seq,
-                        end: seq,
-                    });
-                }
-            }
-        }
-
-        if let Some(range) = current_range {
-            ranges.push(range);
-        }
-
-        ranges
-    }
-
     /// Processes incoming ACK with SACK information
     /// 
     /// This is the core SACK processing logic that:
@@ -302,6 +253,13 @@ impl SackManager {
     pub fn should_send_standalone_ack(&self, sack_ranges: &[SackRange]) -> bool {
         self.ack_eliciting_packets_count >= self.ack_threshold && !sack_ranges.is_empty()
     }
+
+    /// Clears all in-flight packets from tracking.
+    ///
+    /// 清除所有在途数据包的跟踪。
+    pub fn clear(&mut self) {
+        self.in_flight_packets.clear();
+    }
 }
 
 #[cfg(test)]
@@ -312,29 +270,6 @@ mod tests {
 
     fn create_test_push_frame(seq: u32) -> Frame {
         Frame::new_push(1, seq, 0, 1024, 0, Bytes::from(format!("data-{}", seq)))
-    }
-
-    #[test]
-    fn test_generate_sack_ranges() {
-        let manager = SackManager::new(3, 5);
-        let mut received_packets = BTreeMap::new();
-        
-        // Simulate received packets: 0, 1, 3, 4, 6
-        received_packets.insert(0, true);
-        received_packets.insert(1, true);
-        received_packets.insert(2, false); // gap
-        received_packets.insert(3, true);
-        received_packets.insert(4, true);
-        received_packets.insert(5, false); // gap
-        received_packets.insert(6, true);
-
-        // After processing 0 and 1, next expected is 2
-        let ranges = manager.generate_sack_ranges(&received_packets, 2);
-        
-        assert_eq!(ranges, vec![
-            SackRange { start: 3, end: 4 },
-            SackRange { start: 6, end: 6 },
-        ]);
     }
 
     #[test]
@@ -432,5 +367,15 @@ mod tests {
         assert!(manager.should_send_standalone_ack(&ranges));
         manager.ack_eliciting_packets_count = 10;
         assert!(manager.should_send_standalone_ack(&ranges));
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut manager = SackManager::new(3, 5);
+        let now = Instant::now();
+        manager.add_in_flight_packet(create_test_push_frame(0), now);
+        assert_eq!(manager.in_flight_count(), 1);
+        manager.clear();
+        assert_eq!(manager.in_flight_count(), 0);
     }
 }

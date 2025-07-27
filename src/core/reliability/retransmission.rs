@@ -7,10 +7,15 @@
 //!
 //! 此模块提供统一接口来管理基于SACK的可靠传输和基于超时的简单重传。
 
-use super::{
+mod sack_manager;
+mod simple_retx_manager;
+pub mod rtt;
+
+use self::{
     sack_manager::SackManager,
     simple_retx_manager::SimpleRetransmissionManager,
 };
+
 use crate::{
     config::Config,
     packet::{frame::{Frame, ReliabilityMode}, sack::SackRange},
@@ -239,6 +244,15 @@ impl RetransmissionManager {
     pub fn decode_sack_ranges(&self, payload: bytes::Bytes) -> Vec<SackRange> {
         self.sack_manager.decode_sack_ranges(payload)
     }
+
+    /// Clears all in-flight packets from both managers.
+    ///
+    /// 从两个管理器中清除所有在途数据包。
+    pub fn clear(&mut self) {
+        self.sack_manager.clear();
+        self.simple_retx_manager.clear();
+        debug!("Cleared all in-flight packets from both SACK and simple retransmission managers.");
+    }
 }
 
 #[cfg(test)]
@@ -360,5 +374,20 @@ mod tests {
         let deadline = manager.next_retransmission_deadline(Duration::from_secs(1));
         assert!(deadline.is_some());
         assert!(deadline.unwrap() > now);
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut manager = RetransmissionManager::new(create_test_config());
+        let now = Instant::now();
+
+        // Add packets to both managers
+        manager.add_in_flight_packet(create_fin_frame(1), now);
+        manager.add_in_flight_packet(create_regular_push_frame(10), now);
+
+        assert_eq!(manager.total_in_flight_count(), 2);
+        manager.clear();
+        assert_eq!(manager.total_in_flight_count(), 0);
+        assert!(manager.is_all_in_flight_empty());
     }
 }

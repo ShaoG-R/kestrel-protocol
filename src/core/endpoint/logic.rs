@@ -383,6 +383,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         {
             info!(cid = self.local_cid, "All data ACKed, entering Closed state.");
             self.state = ConnectionState::Closed;
+            self.reliability.clear_in_flight_packets(); // Clean up here
         }
 
         // The endpoint's run loop should terminate ONLY when the state is definitively `Closed`.
@@ -415,6 +416,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     "Connection closed by user during non-established state, aborting."
                 );
                 self.state = ConnectionState::Closed;
+                self.reliability.clear_in_flight_packets(); // Also clean up here for aborts
             }
         }
     }

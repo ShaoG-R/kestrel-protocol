@@ -1,76 +1,77 @@
-# 5: 动态RTO与重传机制
+# 5: 统一重传管理器与动态RTO
 
 **功能描述:**
 
-协议实现了一套完备的重传机制，以应对网络丢包。它结合了基于动态RTO（Retransmission Timeout）的超时重传和基于SACK的快速重传，能够在不同网络状况下高效地恢复丢失的数据。
+协议实现了一套完备的重传机制，以应对网络丢包。它结合了基于动态RTO（Retransmission Timeout）的超时重传和基于SACK的快速重传。目前，这套机制已重构为一个统一的重传管理器，能够区分处理需要SACK完全可靠性的数据包和仅需简单重试的控制包。
 
 **实现位置:**
 
-- **动态RTO计算**: `src/core/reliability/rtt.rs` (`RttEstimator`)
-- **重传逻辑**: `src/core/reliability/send_buffer.rs` (`SendBuffer`)
+- **统一管理器**: `src/core/reliability/retransmission.rs` (`RetransmissionManager`)
+- **SACK可靠性逻辑**: `src/core/reliability/retransmission/sack_manager.rs` (`SackManager`)
+- **简单重传逻辑**: `src/core/reliability/retransmission/simple_retx_manager.rs` (`SimpleRetransmissionManager`)
+- **动态RTO计算**: `src/core/reliability/retransmission/rtt.rs` (`RttEstimator`)
 - **顶层协调**: `src/core/reliability.rs` (`ReliabilityLayer`)
 
 ### 1. 动态RTO计算 (`RttEstimator`)
 
-为了适应变化的网络延迟，协议没有使用固定的重传超时，而是实现了一个遵循 **RFC 6298** 标准的动态RTO估算器。
+为了适应变化的网络延迟，协议没有使用固定的重传超时，而是实现了一个遵循 **RFC 6298** 标准的动态RTO估算器。这一部分保持不变。
 
-- **核心算法**: `RttEstimator` 内部维护着 `srtt`（平滑化的RTT）和 `rttvar`（RTT方差）。每次收到一个有效的ACK并计算出新的RTT样本时，`update` 方法会使用加权移动平均算法来更新这两个值。
+- **核心算法**: `RttEstimator` 内部维护着 `srtt`（平滑化的RTT）和 `rttvar`（RTT方差）。
 - **RTO计算公式**: `rto = srtt + 4 * rttvar`
-- **指数退避**: 当发生超时重传时，`backoff()` 方法会被调用，将当前RTO值翻倍，以快速应对网络拥塞或恶化。
-
-```rust
-// 位于 src/core/reliability/rtt.rs
-pub fn update(&mut self, rtt_sample: Duration, min_rto: Duration) {
-    if self.srtt == 0.0 { // First sample
-        self.srtt = rtt_sample_f64;
-        self.rttvar = rtt_sample_f64 / 2.0;
-    } else {
-        let delta = (self.srtt - rtt_sample_f64).abs();
-        self.rttvar = (1.0 - BETA) * self.rttvar + BETA * delta;
-        self.srtt = (1.0 - ALPHA) * self.srtt + ALPHA * rtt_sample_f64;
-    }
-    // ...
-}
-```
+- **指数退避**: 当发生超时重传时，`backoff()` 方法会被调用，将当前RTO值翻倍。
 
 ### 2. 超时重传 (Timeout Retransmission)
 
-这是最基本的重传机制，作为最后的保障。
+超时重传是最后的保障机制，现在由统一的 `RetransmissionManager` 协调。
 
-- **机制**: `SendBuffer` 为每个已发送但未确认的包（在途包）记录一个 `last_sent_at` 时间戳。`Endpoint` 的主事件循环会定期（基于 `next_rto_deadline`）检查是否有包的发送时间超过了当前的动态RTO值。如果有，这些包将被重新发送。
+- **机制**: `Endpoint` 的主事件循环会定期检查超时。`RetransmissionManager` 会调用其下的两个子管理器：
+    - `SackManager` 根据动态RTO检查可靠数据包的超时。
+    - `SimpleRetransmissionManager` 根据配置的固定间隔检查控制包的超时。
 
 ```rust
-// 位于 src/core/reliability/send_buffer.rs
-pub fn check_for_rto(&mut self, rto: std::time::Duration, now: Instant) -> Vec<Frame> {
-    let mut frames_to_resend = Vec::new();
-    for packet in self.in_flight.values_mut() {
-        if now.duration_since(packet.last_sent_at) > rto {
-            frames_to_resend.push(packet.frame.clone());
-            packet.last_sent_at = now; // 更新发送时间
-        }
-    }
-    frames_to_resend
+// 位于 src/core/reliability/retransmission.rs
+pub fn check_for_retransmissions(&mut self, rto: Duration, now: Instant) -> Vec<Frame> {
+    let mut frames_to_retx = Vec::new();
+    
+    // 检查SACK管理的超时
+    let sack_retx = self.sack_manager.check_for_rto(rto, now);
+    frames_to_retx.extend(sack_retx);
+    
+    // 检查简单重传的超时
+    let simple_retx = self.simple_retx_manager.check_for_retransmissions(now);
+    frames_to_retx.extend(simple_retx);
+
+    frames_to_retx
 }
 ```
 
 ### 3. 快速重传 (Fast Retransmission)
 
-为了在轻微丢包时能更快地恢复，协议实现了基于SACK的快速重传。
+快速重传逻辑被完全封装在 `SackManager` 内部，仅作用于需要SACK保证的可靠数据包。
 
-- **触发条件**: 当发送方收到一个ACK，该ACK确认了某个序号为 `N` 的包，但发送方发现自己的在途包列表中仍然存在序号小于 `N` 的包时，就认为这些更早的包可能已丢失。
-- **丢包计数**: 每个在途包都有一个 `fast_retx_count` 计数器。每当它被一个更新的ACK“跳过”，这个计数器就加一。
-- **执行重传**: 当计数器的值达到 `config.fast_retx_threshold`（通常是3）时，该包会被立即重传，而无需等待RTO计时器超时。
+- **触发条件**: 当`SackManager`处理一个ACK时，如果发现该ACK确认了序列号更高的包，导致某些在途包被“跳过”，则认为可能发生了丢包。
+- **丢包计数**: `SackManager` 中每个在途包都有一个 `fast_retx_count` 计数器。
+- **执行重传**: 当计数器的值达到配置的阈值（`fast_retx_threshold`）时，该包被立即重传。
 
 ```rust
-// 位于 src/core/reliability/send_buffer.rs - handle_ack 方法
-// ...
-if let Some(&highest_acked_in_this_ack) = acked_in_sack.iter().max() {
-    for (&seq, _packet) in self.in_flight.range(..highest_acked_in_this_ack) {
-        // ... 增加 fast_retx_count ...
-        if packet.fast_retx_count >= fast_retx_threshold {
-            // ... 将包加入重传队列 ...
+// 位于 src/core/reliability/retransmission/sack_manager.rs
+fn check_fast_retransmission(
+    &mut self,
+    sack_acked_sequences: &[u32],
+    now: Instant,
+) -> Vec<Frame> {
+    // ...
+    if let Some(highest_sacked_seq) = sack_acked_sequences.iter().max().copied() {
+        // ...
+        for seq in keys_to_modify {
+            if let Some(packet) = self.in_flight_packets.get_mut(&seq) {
+                packet.fast_retx_count += 1;
+                if packet.fast_retx_count >= self.fast_retx_threshold {
+                    // ... 将包加入重传队列 ...
+                }
+            }
         }
     }
+    // ...
 }
-// ...
 ``` 

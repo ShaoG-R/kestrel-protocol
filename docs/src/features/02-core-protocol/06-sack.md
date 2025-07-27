@@ -6,10 +6,10 @@
 
 **实现位置:**
 
-- **SACK统一管理**: `src/core/reliability/sack_manager.rs` - 集中管理所有SACK相关逻辑
+- **SACK统一管理**: `src/core/reliability/retransmission/sack_manager.rs` - 集中管理所有SACK相关逻辑
 - **SACK范围生成**: `src/core/reliability/recv_buffer.rs` - 从接收缓冲区生成SACK范围
 - **SACK序列化**: `src/packet/sack.rs` - SACK数据的编解码
-- **可靠性层集成**: `src/core/reliability.rs` - 通过SackManager协调SACK功能
+- **可靠性层集成**: `src/core/reliability.rs` - 通过 `RetransmissionManager` 协调SACK功能
 
 ### 1. SACK的工作原理
 
@@ -22,10 +22,10 @@
 
 **2.1 统一的SACK管理器**
 
-`SackManager` 是SACK功能的核心，集中管理所有SACK相关的状态和逻辑：
+`SackManager` 是SACK功能的核心，它被包含在 `RetransmissionManager` 中，集中管理所有SACK相关的状态和逻辑：
 
 ```rust
-// 位于 src/core/reliability/sack_manager.rs
+// 位于 src/core/reliability/retransmission/sack_manager.rs
 pub struct SackManager {
     fast_retx_threshold: u16,
     in_flight_packets: BTreeMap<u32, SackInFlightPacket>,
@@ -60,7 +60,7 @@ impl SackManager {
 
 **2.2 SACK范围生成**
 
-`ReceiveBuffer` 负责从乱序接收的数据包中生成SACK范围：
+`ReceiveBuffer` 负责从乱序接收的数据包中生成SACK范围，此部分职责不变：
 
 ```rust
 // 位于 src/core/reliability/recv_buffer.rs
@@ -94,32 +94,24 @@ pub fn get_sack_ranges(&self) -> Vec<SackRange> {
 
 **3.1 SACK编码**
 
-`SackManager` 提供统一的SACK编解码接口：
+`RetransmissionManager` 将SACK编解码的职责委托给底层的 `SackManager`：
 
 ```rust
-// 位于 src/core/reliability/sack_manager.rs
-impl SackManager {
-    /// 将SACK范围编码为字节流
-    pub fn encode_sack_ranges(&self, ranges: &[SackRange]) -> Bytes {
-        use bytes::BytesMut;
-        use crate::packet::sack::encode_sack_ranges;
-
-        let mut payload = BytesMut::with_capacity(ranges.len() * 8);
-        encode_sack_ranges(ranges, &mut payload);
-        payload.freeze()
+// 位于 src/core/reliability/retransmission.rs
+impl RetransmissionManager {
+    pub fn encode_sack_ranges(&self, ranges: &[SackRange]) -> bytes::Bytes {
+        self.sack_manager.encode_sack_ranges(ranges)
     }
 
-    /// 从字节流解码SACK范围
-    pub fn decode_sack_ranges(&self, payload: Bytes) -> Vec<SackRange> {
-        use crate::packet::sack::decode_sack_ranges;
-        decode_sack_ranges(payload)
+    pub fn decode_sack_ranges(&self, payload: bytes::Bytes) -> Vec<SackRange> {
+        self.sack_manager.decode_sack_ranges(payload)
     }
 }
 ```
 
 **3.2 ACK帧构造**
 
-发送方在构造 `ACK` 包时，通过可靠性层获取SACK信息：
+发送方在构造 `ACK` 包时，通过可靠性层获取SACK信息，此流程基本不变，但内部实现已更新：
 
 ```rust
 // 位于 src/core/endpoint/frame_factory.rs
@@ -130,7 +122,17 @@ pub fn create_ack_frame(
 ) -> Frame {
     let (sack_ranges, recv_next, window_size) = reliability.get_ack_info();
     let timestamp = Instant::now().duration_since(start_time).as_millis() as u32;
-    Frame::new_ack(peer_cid, recv_next, window_size, &sack_ranges, timestamp)
+    
+    // 编码SACK范围
+    let sack_payload = reliability.retransmission_manager.encode_sack_ranges(&sack_ranges);
+
+    Frame::new_ack(
+        peer_cid,
+        recv_next,
+        window_size,
+        sack_payload,
+        timestamp,
+    )
 }
 ```
 
@@ -138,7 +140,7 @@ pub fn create_ack_frame(
 
 **4.1 统一的ACK处理流程**
 
-当发送方收到一个 `ACK` 包时，`ReliabilityLayer` 通过 `SackManager` 进行统一处理：
+当发送方收到一个 `ACK` 包时，`ReliabilityLayer` 通过 `RetransmissionManager` 进行统一处理：
 
 ```rust
 // 位于 src/core/reliability.rs
@@ -148,8 +150,8 @@ pub fn handle_ack(
     sack_ranges: Vec<SackRange>,
     now: Instant,
 ) -> Vec<Frame> {
-    // 使用集中式SACK管理器处理ACK
-    let result = self.sack_manager.process_ack(recv_next_seq, &sack_ranges, now);
+    // 使用统一重传管理器处理ACK
+    let result = self.retransmission_manager.process_ack(recv_next_seq, &sack_ranges, now);
 
     // 更新RTT和拥塞控制
     for rtt_sample in result.rtt_samples {
@@ -168,10 +170,10 @@ pub fn handle_ack(
 
 **4.2 SACK处理的核心逻辑**
 
-`SackManager::process_ack` 实现了完整的SACK处理流程：
+`SackManager::process_ack` 实现了完整的SACK处理流程，这部分的核心逻辑保持不变，但现在它位于 `sack_manager.rs` 中，职责更加清晰。
 
 ```rust
-// 位于 src/core/reliability/sack_manager.rs
+// 位于 src/core/reliability/retransmission/sack_manager.rs
 pub fn process_ack(
     &mut self,
     recv_next_seq: u32,
@@ -225,9 +227,10 @@ pub fn process_ack(
 
 **4.3 快速重传逻辑**
 
-基于SACK信息的快速重传检测：
+快速重传逻辑完全封装在 `SackManager` 中，细节与之前相同。
 
 ```rust
+// 位于 src/core/reliability/retransmission/sack_manager.rs
 fn check_fast_retransmission(
     &mut self,
     sack_acked_sequences: &[u32],
@@ -264,18 +267,19 @@ fn check_fast_retransmission(
 ### 5. 架构优势
 
 **5.1 集中化管理**
-- 所有SACK相关逻辑集中在 `SackManager` 中，便于维护和测试
-- 统一的状态管理，避免了逻辑分散导致的不一致问题
+- 所有SACK相关逻辑（在途包跟踪、ACK处理、快速重传）集中在 `SackManager` 中，便于维护和测试。
+- `RetransmissionManager` 统一了接口，对上层屏蔽了SACK和简单重传的差异。
 
 **5.2 清晰的职责分离**
-- `ReceiveBuffer`: 负责SACK范围生成
-- `SackManager`: 负责SACK处理和在途包管理
-- `ReliabilityLayer`: 负责协调各组件并处理上层逻辑
-- `SendBuffer`: 专注于流缓冲区管理
+- `ReceiveBuffer`: 负责SACK范围生成。
+- `SackManager`: 负责SACK确认和重传的核心逻辑。
+- `SimpleRetransmissionManager`: 负责非SACK帧的简单重传。
+- `ReliabilityLayer`: 负责协调各组件。
+- `SendBuffer`: 职责被极大简化，仅作为待发送数据的流缓冲区。
 
 **5.3 高效的处理流程**
-- 双重确认机制（累积ACK + SACK）最大化信息利用
-- 精确的快速重传检测，减少不必要的重传
-- 统一的RTT计算和拥塞控制集成
+- 双重确认机制（累积ACK + SACK）最大化信息利用。
+- 精确的快速重传检测，减少不必要的重传。
+- 统一的RTT计算和拥塞控制集成。
 
 这种重构后的架构确保了SACK功能的高效性和可维护性，同时为未来的扩展提供了良好的基础。 

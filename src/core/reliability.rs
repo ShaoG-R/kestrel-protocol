@@ -11,17 +11,13 @@
 
 pub mod packetizer;
 pub mod recv_buffer;
-pub mod retransmission_manager;
-pub mod rtt;
-pub mod sack_manager;
+pub mod retransmission;
 pub mod send_buffer;
-pub mod simple_retx_manager;
 
 use self::{
     packetizer::{packetize, PacketizerContext},
     recv_buffer::ReceiveBuffer,
-    retransmission_manager::RetransmissionManager,
-    rtt::RttEstimator,
+    retransmission::{RetransmissionManager, rtt::RttEstimator},
     send_buffer::SendBuffer,
 };
 use crate::{
@@ -248,6 +244,14 @@ impl ReliabilityLayer {
 
     pub fn track_frame_in_flight(&mut self, frame: Frame, now: Instant) {
         self.retransmission_manager.add_in_flight_packet(frame, now);
+    }
+
+    /// Clears all in-flight packets. This is used when the connection is being
+    /// torn down and we no longer need to track packets for retransmission.
+    ///
+    /// 清除所有在途数据包。这在连接被拆除且不再需要跟踪重传数据包时使用。
+    pub fn clear_in_flight_packets(&mut self) {
+        self.retransmission_manager.clear();
     }
 
     // --- Internal helpers ---
