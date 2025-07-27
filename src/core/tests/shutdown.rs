@@ -377,4 +377,121 @@ async fn test_data_is_fully_read_before_shutdown_eof() {
             .is_none();
     
     assert!(server_recv_eof, "Server stream should now be closed (EOF)");
+}
+
+#[tokio::test]
+async fn test_retransmission_after_fin_is_ignored() {
+    crate::core::test_utils::init_tracing();
+    // This test verifies that once a FIN has been processed by the receiver,
+    // any subsequent (spurious) retransmissions of packets that came before
+    // that FIN are ignored.
+    use crate::packet::{command::Command, header::ShortHeader};
+
+    // 1. Setup a server harness, which allows us to manually inject frames.
+    let mut harness = setup_server_harness();
+
+    // 2. The server starts in `SynReceived`. Trigger a transition to `Established`
+    // by having the "user" send data, which causes a SYN-ACK to be sent.
+    harness
+        .tx_to_endpoint_user
+        .send(StreamCommand::SendData(Bytes::new()))
+        .await
+        .unwrap();
+    // Consume the SYN-ACK from the network out-queue to confirm state transition.
+    assert!(
+        timeout(
+            Duration::from_millis(100),
+            harness.rx_from_endpoint_network.recv()
+        )
+        .await
+        .is_ok(),
+        "Server should have sent a SYN-ACK"
+    );
+
+    // 3. Manually craft and send a PUSH frame followed by a FIN frame.
+    let test_data = Bytes::from("final data");
+    let push_frame = Frame::Push {
+        header: ShortHeader {
+            command: Command::Push,
+            connection_id: harness.server_cid,
+            payload_length: test_data.len() as u16,
+            recv_window_size: 1024,
+            timestamp: 100,
+            sequence_number: 0,
+            recv_next_sequence: 0,
+        },
+        payload: test_data.clone(),
+    };
+
+    let fin_frame = Frame::Fin {
+        header: ShortHeader {
+            command: Command::Fin,
+            connection_id: harness.server_cid,
+            payload_length: 0,
+            recv_window_size: 1024,
+            timestamp: 101,
+            sequence_number: 1,
+            recv_next_sequence: 0,
+        },
+    };
+
+    harness
+        .tx_to_endpoint_network
+        .send((push_frame.clone(), harness.client_addr))
+        .await
+        .unwrap();
+    harness
+        .tx_to_endpoint_network
+        .send((fin_frame, harness.client_addr))
+        .await
+        .unwrap();
+
+    // 4. The server should process the data and then receive an EOF from the FIN.
+    let received_data = timeout(
+        Duration::from_millis(200),
+        harness.rx_from_endpoint_user.recv(),
+    )
+    .await
+    .expect("Should receive data")
+    .expect("Stream should not be closed yet")
+    .into_iter()
+    .flatten()
+    .collect::<Bytes>();
+    assert_eq!(received_data, test_data);
+
+    let eof = timeout(
+        Duration::from_millis(200),
+        harness.rx_from_endpoint_user.recv(),
+    )
+    .await
+    .expect("Should receive EOF signal")
+    .is_none();
+    assert!(eof, "Stream should be closed with EOF");
+
+    // At this point, the server's recv_buffer has `fin_reached = true`.
+
+    // IMPORTANT: Consume the two legitimate ACKs that were sent for the
+    // initial PUSH and FIN frames.
+    assert!(harness.rx_from_endpoint_network.recv().await.is_some(), "Should have received ACK for PUSH");
+    assert!(harness.rx_from_endpoint_network.recv().await.is_some(), "Should have received ACK for FIN");
+
+    // 5. Send a spurious retransmission of the first PUSH packet.
+    harness
+        .tx_to_endpoint_network
+        .send((push_frame, harness.client_addr))
+        .await
+        .unwrap();
+
+    // 6. Verify that the endpoint ignores this packet completely.
+    //    - No more data should be sent to the user stream (checked by timeout).
+    //    - No more packets (e.g., ACKs) should be sent to the network.
+    let spurious_ack = timeout(
+        Duration::from_millis(100),
+        harness.rx_from_endpoint_network.recv(),
+    )
+    .await;
+    assert!(
+        spurious_ack.is_err(),
+        "Server should not send any packets in response to a retransmission after FIN"
+    );
 } 
