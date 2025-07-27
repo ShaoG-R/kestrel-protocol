@@ -354,6 +354,12 @@ pub async fn new_stream_pair_with_filter<F>(
 ///
 /// This does NOT spawn the relay tasks, allowing the test to act as the network
 /// by directly using the `tx_to_endpoint_network` and `rx_from_endpoint_network` channels.
+/// 
+/// 建立一个server端测试环境，用于测试server端的行为。
+/// 
+/// 这个函数不会自动发送数据到 `tx_to_endpoint_network` 和 `rx_from_endpoint_network` 通道。
+/// 需要手动发送数据到 `tx_to_endpoint_network` 和 `rx_from_endpoint_network` 通道。
+/// 
 pub fn setup_server_harness() -> ServerTestHarness {
     let _server_addr: SocketAddr = "127.0.0.1:5678".parse().unwrap();
     let client_addr: SocketAddr = "127.0.0.1:1234".parse().unwrap(); // "old" client addr
