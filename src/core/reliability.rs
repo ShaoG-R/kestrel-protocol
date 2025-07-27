@@ -12,12 +12,14 @@
 pub mod packetizer;
 pub mod recv_buffer;
 pub mod rtt;
+pub mod sack_manager;
 pub mod send_buffer;
 
 use self::{
     packetizer::{packetize, PacketizerContext},
     recv_buffer::ReceiveBuffer,
     rtt::RttEstimator,
+    sack_manager::SackManager,
     send_buffer::SendBuffer,
 };
 use crate::{
@@ -37,6 +39,7 @@ pub struct ReliabilityLayer {
     recv_buffer: ReceiveBuffer,
     rto_estimator: RttEstimator,
     congestion_control: Box<dyn CongestionControl>,
+    sack_manager: SackManager,
     config: Config,
     sequence_number_counter: u32,
     ack_pending: bool,
@@ -50,6 +53,7 @@ impl ReliabilityLayer {
             recv_buffer: ReceiveBuffer::new(config.recv_buffer_capacity_packets),
             rto_estimator: RttEstimator::new(config.initial_rto),
             congestion_control,
+            sack_manager: SackManager::new(config.fast_retx_threshold),
             config,
             sequence_number_counter: 0,
             ack_pending: false,
@@ -206,8 +210,12 @@ impl ReliabilityLayer {
     }
 
     pub fn should_send_standalone_ack(&self) -> bool {
-        self.ack_eliciting_packets_since_last_ack >= self.config.ack_threshold
-            && !self.recv_buffer.get_sack_ranges().is_empty()
+        let sack_ranges = self.recv_buffer.get_sack_ranges();
+        self.sack_manager.should_send_standalone_ack(
+            &sack_ranges,
+            self.ack_eliciting_packets_since_last_ack as u32,
+            self.config.ack_threshold as u32,
+        )
     }
 
     pub fn is_ack_pending(&self) -> bool {

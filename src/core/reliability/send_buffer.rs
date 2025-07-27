@@ -5,20 +5,16 @@
 
 use crate::packet::frame::Frame;
 use crate::packet::sack::SackRange;
+use super::sack_manager::{SackManager, SackInFlightPacket};
 use bytes::Bytes;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::debug;
-use tracing::trace;
 
 /// A packet that has been sent but not yet acknowledged (in-flight).
-#[derive(Debug, Clone)]
-pub struct InFlightPacket {
-    pub last_sent_at: Instant,
-    pub frame: Frame,
-    pub fast_retx_count: u16,
-}
+/// This is now an alias for the SACK manager's version.
+pub type InFlightPacket = SackInFlightPacket;
 
 /// Manages outgoing data.
 #[derive(Debug)]
@@ -115,7 +111,7 @@ impl SendBuffer {
         let seq = frame
             .sequence_number()
             .expect("Cannot add frame with no sequence number to in-flight buffer");
-        let packet = InFlightPacket {
+        let packet = SackInFlightPacket {
             last_sent_at: now,
             frame,
             fast_retx_count: 0,
@@ -140,9 +136,7 @@ impl SendBuffer {
             .any(|p| matches!(p.frame, Frame::Fin { .. }))
     }
 
-    /// Processes SACK information, removing acknowledged packets, calculating RTT for
-    /// them, and identifying packets that need to be fast-retransmitted.
-    ///
+    /// Processes SACK information using the centralized SACK manager.
     /// Returns a tuple of (frames_to_retransmit, rtt_samples).
     pub fn handle_ack(
         &mut self,
@@ -151,78 +145,18 @@ impl SendBuffer {
         fast_retx_threshold: u16,
         now: Instant,
     ) -> (Vec<Frame>, Vec<Duration>) {
-        let mut rtt_samples = Vec::new();
+        // Create a temporary SACK manager for this operation
+        // In a future refactor, this could be passed in as a parameter
+        let sack_manager = SackManager::new(fast_retx_threshold);
+        
+        let result = sack_manager.process_ack(
+            &mut self.in_flight,
+            recv_next_seq,
+            sack_ranges,
+            now,
+        );
 
-        // Process cumulative ACK.
-        let mut newly_acked_keys = Vec::new();
-        for (&seq, packet) in self.in_flight.iter() {
-            if seq < recv_next_seq {
-                newly_acked_keys.push(seq);
-                rtt_samples.push(now.saturating_duration_since(packet.last_sent_at));
-            } else {
-                break; // BTreeMap is sorted by key.
-            }
-        }
-        for key in newly_acked_keys {
-            self.in_flight.remove(&key);
-        }
-
-        // Process SACK ranges.
-        let mut acked_in_sack = Vec::new();
-        for range in sack_ranges {
-            for seq in range.start..=range.end {
-                if let Some(packet) = self.in_flight.remove(&seq) {
-                    rtt_samples.push(now.saturating_duration_since(packet.last_sent_at));
-                    acked_in_sack.push(seq);
-                }
-            }
-        }
-
-        // Now, check for fast retransmissions.
-        let mut frames_to_fast_retx = Vec::new();
-        let mut keys_to_modify = Vec::new();
-
-        // The trigger for fast retransmission is an ACK for a packet with a higher
-        // sequence number than a packet that is still in flight.
-        if let Some(&highest_acked_in_this_ack) = acked_in_sack.iter().max() {
-            trace!(
-                highest_acked = highest_acked_in_this_ack,
-                "Checking for fast retransmission against in-flight packets."
-            );
-            // Iterate through in-flight packets that were sent *before* the highest SACKed packet.
-            for (&seq, _packet) in self.in_flight.range(..highest_acked_in_this_ack) {
-                keys_to_modify.push(seq);
-            }
-        }
-
-        for seq in keys_to_modify {
-            if let Some(packet) = self.in_flight.get_mut(&seq) {
-                let old_count = packet.fast_retx_count;
-                packet.fast_retx_count += 1;
-                trace!(
-                    seq,
-                    old_count,
-                    new_count = packet.fast_retx_count,
-                    threshold = fast_retx_threshold,
-                    "Packet skipped by SACK, incrementing fast retransmission count."
-                );
-
-                if packet.fast_retx_count >= fast_retx_threshold {
-                    // Avoid re-adding if another SACK already triggered it.
-                    if !frames_to_fast_retx
-                        .iter()
-                        .any(|f: &Frame| f.sequence_number() == Some(seq))
-                    {
-                        debug!(seq, "Fast retransmission triggered");
-                        frames_to_fast_retx.push(packet.frame.clone());
-                        packet.last_sent_at = now;
-                        packet.fast_retx_count = 0; // Reset after adding.
-                    }
-                }
-            }
-        }
-
-        (frames_to_fast_retx, rtt_samples)
+        (result.frames_to_retransmit, result.rtt_samples)
     }
 
     /// Checks for packets that have timed out based on the RTO.
