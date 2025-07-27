@@ -75,6 +75,26 @@ pub struct Config {
     ///
     /// 套接字actor检查并清理已完成 `drain_timeout` 的CID的间隔。
     pub draining_cleanup_interval: Duration,
+
+    /// Maximum retries for handshake data frames.
+    /// 握手阶段数据帧的最大重传次数。
+    pub handshake_data_max_retries: u8,
+
+    /// Retry interval for handshake data frames.
+    /// 握手阶段数据帧的重传间隔。
+    pub handshake_data_retry_interval: Duration,
+
+    /// Maximum retries for control frames (SYN, SYN-ACK, FIN).
+    /// 控制帧（SYN、SYN-ACK、FIN）的最大重传次数。
+    pub control_frame_max_retries: u8,
+
+    /// Retry interval for control frames.
+    /// 控制帧的重传间隔。
+    pub control_frame_retry_interval: Duration,
+
+    /// Enable layered retransmission mechanism.
+    /// 启用分层重传机制。
+    pub enable_layered_retransmission: bool,
 }
 
 impl Default for Config {
@@ -97,6 +117,11 @@ impl Default for Config {
             recv_buffer_capacity_packets: 256,
             drain_timeout: Duration::from_secs(3),
             draining_cleanup_interval: Duration::from_secs(1),
+            handshake_data_max_retries: 3,
+            handshake_data_retry_interval: Duration::from_millis(200),
+            control_frame_max_retries: 5,
+            control_frame_retry_interval: Duration::from_millis(500),
+            enable_layered_retransmission: true,
         }
     }
 } 

@@ -11,15 +11,17 @@
 
 pub mod packetizer;
 pub mod recv_buffer;
+pub mod retransmission_manager;
 pub mod rtt;
 pub mod sack_manager;
 pub mod send_buffer;
+pub mod simple_retx_manager;
 
 use self::{
     packetizer::{packetize, PacketizerContext},
     recv_buffer::ReceiveBuffer,
+    retransmission_manager::RetransmissionManager,
     rtt::RttEstimator,
-    sack_manager::SackManager,
     send_buffer::SendBuffer,
 };
 use crate::{
@@ -39,7 +41,7 @@ pub struct ReliabilityLayer {
     recv_buffer: ReceiveBuffer,
     rto_estimator: RttEstimator,
     congestion_control: Box<dyn CongestionControl>,
-    sack_manager: SackManager,
+    retransmission_manager: RetransmissionManager,
     config: Config,
     sequence_number_counter: u32,
     ack_pending: bool,
@@ -53,7 +55,7 @@ impl ReliabilityLayer {
             recv_buffer: ReceiveBuffer::new(config.recv_buffer_capacity_packets),
             rto_estimator: RttEstimator::new(config.initial_rto),
             congestion_control,
-            sack_manager: SackManager::new(config.fast_retx_threshold, config.ack_threshold as u32),
+            retransmission_manager: RetransmissionManager::new(config.clone()),
             config,
             sequence_number_counter: 0,
             ack_pending: false,
@@ -68,10 +70,11 @@ impl ReliabilityLayer {
         sack_ranges: Vec<SackRange>,
         now: Instant,
     ) -> Vec<Frame> {
-        // Use the centralized SACK manager for ACK processing
-        let result = self.sack_manager.process_ack(recv_next_seq, &sack_ranges, now);
+        // Use the unified retransmission manager for ACK processing
+        let result = self.retransmission_manager.process_ack(recv_next_seq, &sack_ranges, now);
 
-        // Update RTT and congestion control with real samples.
+        // Update RTT and congestion control with real samples from SACK-managed packets.
+        // Simple retransmission packets don't contribute to RTT estimation or congestion control.
         for rtt_sample in result.rtt_samples {
             self.rto_estimator.update(rtt_sample, self.config.min_rto);
             let old_cwnd = self.congestion_control.congestion_window();
@@ -90,7 +93,7 @@ impl ReliabilityLayer {
                 old_cwnd,
                 new_cwnd,
                 count = result.frames_to_retransmit.len(),
-                "Congestion window reduced due to fast retransmission"
+                "Congestion window reduced due to retransmission"
             );
         }
 
@@ -100,7 +103,7 @@ impl ReliabilityLayer {
     /// Checks for RTO and returns frames to be retransmitted.
     pub fn check_for_retransmissions(&mut self, now: Instant) -> Vec<Frame> {
         let rto = self.rto_estimator.rto();
-        let frames_to_resend = self.sack_manager.check_for_rto(rto, now);
+        let frames_to_resend = self.retransmission_manager.check_for_retransmissions(rto, now);
 
         if !frames_to_resend.is_empty() {
             let old_cwnd = self.congestion_control.congestion_window();
@@ -110,7 +113,7 @@ impl ReliabilityLayer {
                 old_cwnd,
                 new_cwnd,
                 count = frames_to_resend.len(),
-                "Congestion window reduced due to RTO"
+                "Congestion window reduced due to retransmissions"
             );
             self.rto_estimator.backoff();
         }
@@ -120,7 +123,7 @@ impl ReliabilityLayer {
 
     /// Returns the deadline for the next RTO event.
     pub fn next_rto_deadline(&self) -> Option<Instant> {
-        self.sack_manager.next_rto_deadline(self.rto_estimator.rto())
+        self.retransmission_manager.next_retransmission_deadline(self.rto_estimator.rto())
     }
 
     /// Takes data from the stream buffer and packetizes it.
@@ -142,7 +145,7 @@ impl ReliabilityLayer {
             peer_cid,
             timestamp: now.duration_since(start_time).as_millis() as u32,
             congestion_window: self.congestion_control.congestion_window(),
-            in_flight_count: self.sack_manager.in_flight_count(),
+            in_flight_count: self.retransmission_manager.sack_in_flight_count(),
             peer_recv_window,
             max_payload_size: self.config.max_payload_size,
             ack_info: (recv_next_sequence, local_window_size),
@@ -156,18 +159,18 @@ impl ReliabilityLayer {
         );
 
         for frame in &frames {
-            // 只添加 Push 帧到 SACK 管理器
-            if let Frame::Push { .. } = frame {
-                self.sack_manager.add_in_flight_packet(frame.clone(), now);
-            }
+            // Add all frames to the unified retransmission manager
+            // 将所有帧添加到统一重传管理器
+            self.retransmission_manager.add_in_flight_packet(frame.clone(), now);
         }
 
         frames
     }
 
     /// Determines if more packets can be sent.
+    /// Only SACK-managed packets count towards congestion control.
     pub fn can_send_more(&self, peer_recv_window: u32) -> bool {
-        let in_flight = self.sack_manager.in_flight_count() as u32;
+        let in_flight = self.retransmission_manager.sack_in_flight_count() as u32;
         let cwnd = self.congestion_control.congestion_window();
         in_flight < cwnd && in_flight < peer_recv_window
     }
@@ -178,7 +181,7 @@ impl ReliabilityLayer {
         self.recv_buffer.receive_push(sequence_number, payload);
         self.ack_pending = true;
         self.ack_eliciting_packets_since_last_ack += 1;
-        self.sack_manager.on_ack_eliciting_packet_received();
+        self.retransmission_manager.on_ack_eliciting_packet_received();
     }
 
     pub fn receive_fin(&mut self, sequence_number: u32) {
@@ -187,7 +190,7 @@ impl ReliabilityLayer {
         self.recv_buffer.receive_fin(sequence_number);
         self.ack_pending = true;
         self.ack_eliciting_packets_since_last_ack += 1;
-        self.sack_manager.on_ack_eliciting_packet_received();
+        self.retransmission_manager.on_ack_eliciting_packet_received();
     }
 
     pub fn reassemble(&mut self) -> (Option<Vec<Bytes>>, bool) {
@@ -208,7 +211,7 @@ impl ReliabilityLayer {
 
     pub fn should_send_standalone_ack(&self) -> bool {
         let sack_ranges = self.recv_buffer.get_sack_ranges();
-        self.sack_manager.should_send_standalone_ack(&sack_ranges)
+        self.retransmission_manager.should_send_standalone_ack(&sack_ranges)
     }
 
     pub fn is_ack_pending(&self) -> bool {
@@ -218,7 +221,7 @@ impl ReliabilityLayer {
     pub fn on_ack_sent(&mut self) {
         self.ack_pending = false;
         self.ack_eliciting_packets_since_last_ack = 0;
-        self.sack_manager.on_ack_sent();
+        self.retransmission_manager.on_ack_sent();
     }
 
     // --- Passthrough methods to send_buffer ---
@@ -236,15 +239,15 @@ impl ReliabilityLayer {
     }
 
     pub fn is_in_flight_empty(&self) -> bool {
-        self.sack_manager.is_in_flight_empty()
+        self.retransmission_manager.is_all_in_flight_empty()
     }
 
     pub fn has_fin_in_flight(&self) -> bool {
-        self.sack_manager.has_fin_in_flight()
+        self.retransmission_manager.has_fin_in_flight()
     }
 
     pub fn track_frame_in_flight(&mut self, frame: Frame, now: Instant) {
-        self.sack_manager.add_in_flight_packet(frame, now);
+        self.retransmission_manager.add_in_flight_packet(frame, now);
     }
 
     // --- Internal helpers ---

@@ -5,6 +5,25 @@ use super::command;
 use super::header::{LongHeader, ShortHeader};
 use crate::packet::sack::{self, SackRange};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use std::time::Duration;
+
+/// Defines the retransmission strategy for different frame types.
+/// 定义不同帧类型的重传策略。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReliabilityMode {
+    /// Use full SACK-based reliable transmission.
+    /// 使用基于SACK的完整可靠传输。
+    Reliable,
+    /// Use simple timeout-based retransmission.
+    /// 使用基于超时的简单重传。
+    SimpleRetransmit {
+        max_retries: u8,
+        retry_interval: Duration,
+    },
+    /// Best effort, no retransmission.
+    /// 尽力而为，不重传。
+    BestEffort,
+}
 
 /// A complete protocol frame that can be sent or received.
 /// 一个可以被发送或接收的完整协议帧。
@@ -386,6 +405,80 @@ impl Frame {
             Frame::Ping { header, .. } => header.connection_id,
             Frame::PathChallenge { header, .. } => header.connection_id,
             Frame::PathResponse { header, .. } => header.connection_id,
+        }
+    }
+
+    /// Returns the reliability mode for this frame type.
+    /// This determines how the frame should be retransmitted.
+    ///
+    /// 返回此帧类型的可靠性模式。
+    /// 这决定了帧应该如何重传。
+    pub fn reliability_mode(&self) -> ReliabilityMode {
+        match self {
+            // Regular PUSH frames use full SACK-based reliability
+            // 常规PUSH帧使用基于SACK的完整可靠性
+            Frame::Push { .. } => ReliabilityMode::Reliable,
+            
+            // Control frames use simple retransmission
+            // 控制帧使用简单重传
+            Frame::Syn { .. } | Frame::SynAck { .. } | Frame::Fin { .. } => {
+                ReliabilityMode::SimpleRetransmit {
+                    max_retries: 5,
+                    retry_interval: Duration::from_millis(500),
+                }
+            }
+            
+            // ACK and PING frames don't need retransmission
+            // ACK和PING帧不需要重传
+            Frame::Ack { .. } | Frame::Ping { .. } => ReliabilityMode::BestEffort,
+            
+            // Path validation frames use simple retransmission
+            // 路径验证帧使用简单重传
+            Frame::PathChallenge { .. } | Frame::PathResponse { .. } => {
+                ReliabilityMode::SimpleRetransmit {
+                    max_retries: 3,
+                    retry_interval: Duration::from_millis(100),
+                }
+            }
+        }
+    }
+
+    /// Returns the reliability mode for this frame type with custom configuration.
+    /// 使用自定义配置返回此帧类型的可靠性模式。
+    pub fn reliability_mode_with_config(&self, config: &crate::config::Config) -> ReliabilityMode {
+        if !config.enable_layered_retransmission {
+            // If layered retransmission is disabled, all frames except ACK/PING use SACK
+            // 如果禁用分层重传，除了ACK/PING外的所有帧都使用SACK
+            return match self {
+                Frame::Ack { .. } | Frame::Ping { .. } => ReliabilityMode::BestEffort,
+                _ => ReliabilityMode::Reliable,
+            };
+        }
+
+        match self {
+            // For now, only use simple retransmission for control frames
+            // Regular PUSH frames always use SACK-based reliability for better performance
+            // 目前，只对控制帧使用简单重传
+            // 常规PUSH帧始终使用基于SACK的可靠性以获得更好的性能
+            Frame::Push { .. } => ReliabilityMode::Reliable,
+            
+            // Control frames use configured parameters
+            // 控制帧使用配置的参数
+            Frame::Syn { .. } | Frame::SynAck { .. } | Frame::Fin { .. } => {
+                ReliabilityMode::SimpleRetransmit {
+                    max_retries: config.control_frame_max_retries,
+                    retry_interval: config.control_frame_retry_interval,
+                }
+            }
+            
+            Frame::Ack { .. } | Frame::Ping { .. } => ReliabilityMode::BestEffort,
+            
+            Frame::PathChallenge { .. } | Frame::PathResponse { .. } => {
+                ReliabilityMode::SimpleRetransmit {
+                    max_retries: 3,
+                    retry_interval: Duration::from_millis(100),
+                }
+            }
         }
     }
 } 
