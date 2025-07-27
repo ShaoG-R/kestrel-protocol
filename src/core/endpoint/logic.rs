@@ -130,7 +130,27 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         trace!(local_cid = self.local_cid, ?frame, "Processing incoming frame");
         self.last_recv_time = Instant::now();
 
-        // --- Path Migration Logic ---
+        // Check for path migration before dispatching to state handlers
+        self.check_path_migration(src_addr).await?;
+
+        // Dispatch frame handling based on current state
+        match &self.state {
+            ConnectionState::Connecting => self.handle_frame_connecting(frame, src_addr).await,
+            ConnectionState::SynReceived => self.handle_frame_syn_received(frame, src_addr).await,
+            ConnectionState::Established => self.handle_frame_established(frame, src_addr).await,
+            ConnectionState::ValidatingPath { .. } => self.handle_frame_validating_path(frame, src_addr).await,
+            ConnectionState::Closing => self.handle_frame_closing(frame, src_addr).await,
+            ConnectionState::ClosingWait => self.handle_frame_closing_wait(frame, src_addr).await,
+            ConnectionState::FinWait => self.handle_frame_fin_wait(frame, src_addr).await,
+            ConnectionState::Closed => {
+                // Ignore all frames in closed state
+                trace!(cid = self.local_cid, "Ignoring frame in Closed state");
+                Ok(())
+            }
+        }
+    }
+
+    async fn check_path_migration(&mut self, src_addr: std::net::SocketAddr) -> Result<()> {
         if src_addr != self.remote_addr && self.state == ConnectionState::Established {
             // Address has changed, initiate path validation.
             let challenge_data = rand::random();
@@ -149,97 +169,97 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             // From now on, we will continue processing packets from the old address,
             // but will not send anything other than path validation packets to the new address.
         }
-        // --- End Path Migration Logic ---
+        Ok(())
+    }
 
+    async fn handle_frame_connecting(&mut self, frame: Frame, _src_addr: std::net::SocketAddr) -> Result<()> {
+        match frame {
+            Frame::SynAck { header } => {
+                self.state = ConnectionState::Established;
+                self.peer_cid = header.source_cid;
+                info!(cid = self.local_cid, "Connection established (client-side)");
+
+                // Acknowledge the SYN-ACK, potentially with piggybacked data if the
+                // user has already called write().
+                if !self.reliability.is_send_buffer_empty() {
+                    self.packetize_and_send().await?;
+                } else {
+                    self.send_standalone_ack().await?;
+                }
+            }
+            Frame::PathChallenge { header, challenge_data } => {
+                self.handle_path_challenge(header, challenge_data, _src_addr).await?;
+            }
+            _ => {
+                trace!(cid = self.local_cid, ?frame, "Ignoring unexpected frame in Connecting state");
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_frame_syn_received(&mut self, frame: Frame, src_addr: std::net::SocketAddr) -> Result<()> {
         match frame {
             Frame::Syn { .. } => {
                 // This is now primarily handled by the Socket creating the Endpoint.
                 // If we receive another SYN, it might be a retransmission from the client
                 // because it hasn't received our SYN-ACK yet.
-                //
-                // 这里处理的是客户端的SYN，如果客户端的SYN被丢弃了，那么这个SYN是用来触发SYN-ACK的
-                // 如果客户端的SYN没有被丢弃，那么这个SYN是用来触发0-RTT的
-                if self.state == ConnectionState::SynReceived {
-                    info!(cid = self.local_cid, "Received duplicate SYN, ignoring.");
-                    // If we have already been triggered to send a SYN-ACK (i.e., data is in the
-                    // send buffer), we can resend it.
-                    if !self.reliability.is_send_buffer_empty() {
-                        self.send_syn_ack().await?;
-                    }
-                }
-            }
-            Frame::SynAck { header } => {
-                if self.state == ConnectionState::Connecting {
-                    self.state = ConnectionState::Established;
-                    self.peer_cid = header.source_cid;
-                    info!(cid = self.local_cid, "Connection established (client-side)");
-
-                    // Acknowledge the SYN-ACK, potentially with piggybacked data if the
-                    // user has already called write().
-                    if !self.reliability.is_send_buffer_empty() {
-                        self.packetize_and_send().await?;
-                    } else {
-                        self.send_standalone_ack().await?;
-                    }
+                info!(cid = self.local_cid, "Received duplicate SYN, ignoring.");
+                // If we have already been triggered to send a SYN-ACK (i.e., data is in the
+                // send buffer), we can resend it.
+                if !self.reliability.is_send_buffer_empty() {
+                    self.send_syn_ack().await?;
                 }
             }
             Frame::Push { header, payload } => {
-                self.reliability
-                    .receive_push(header.sequence_number, payload);
-                // Only send an immediate standalone ACK if the connection is already established.
+                self.reliability.receive_push(header.sequence_number, payload);
                 // For 0-RTT PUSH frames received during the `SynReceived` state, the ACK
                 // will be piggybacked onto the eventual SYN-ACK.
-                if self.state != ConnectionState::SynReceived {
-                    self.send_standalone_ack().await?;
-                }
             }
             Frame::Ack { header, payload } => {
-                self.peer_recv_window = header.recv_window_size as u32;
-                let sack_ranges = decode_sack_ranges(payload);
-                let frames_to_retx = self.reliability.handle_ack(
-                    header.recv_next_sequence,
-                    sack_ranges,
-                    Instant::now(),
-                );
-                if !frames_to_retx.is_empty() {
-                    self.send_frames(frames_to_retx).await?;
-                }
+                self.handle_ack_frame(header, payload).await?;
             }
             Frame::Fin { header, .. } => {
-                // The reliability layer will now handle the FIN and its sequence number.
-                // The reassembly process will later tell us when this FIN is "seen".
-                self.reliability.receive_fin(header.sequence_number);
-                self.send_standalone_ack().await?;
+                // Handle FIN even in SynReceived state - this can happen with 0-RTT
+                // where client sends data and immediately closes
+                self.handle_fin_frame(header.sequence_number).await?;
+                self.state = ConnectionState::FinWait;
+            }
+            Frame::PathChallenge { header, challenge_data } => {
+                self.handle_path_challenge(header, challenge_data, src_addr).await?;
+            }
+            _ => {
+                trace!(cid = self.local_cid, ?frame, "Ignoring unexpected frame in SynReceived state");
+            }
+        }
+        Ok(())
+    }
 
-                // State transition still happens immediately. The EOF signal to the user
-                // is what gets deferred.
-                match self.state {
-                    ConnectionState::Established => {
-                        self.state = ConnectionState::FinWait;
-                    }
-                    ConnectionState::Closing => {
-                        self.state = ConnectionState::ClosingWait;
-                    }
-                    _ => {}
-                }
+    async fn handle_frame_established(&mut self, frame: Frame, src_addr: std::net::SocketAddr) -> Result<()> {
+        match frame {
+            Frame::Push { header, payload } => {
+                self.reliability.receive_push(header.sequence_number, payload);
+                self.send_standalone_ack().await?;
             }
-            Frame::PathChallenge {
-                header,
-                challenge_data,
-            } => {
-                let response_frame = create_path_response_frame(
-                    self.peer_cid,
-                    header.sequence_number, // Echo the sequence number
-                    self.start_time,
-                    challenge_data,
-                );
-                // The response MUST be sent back to the address the challenge came from.
-                self.send_frame_to(response_frame, src_addr).await?;
+            Frame::Ack { header, payload } => {
+                self.handle_ack_frame(header, payload).await?;
             }
-            Frame::PathResponse {
-                header: _,
-                challenge_data,
-            } => {
+            Frame::Fin { header, .. } => {
+                self.handle_fin_frame(header.sequence_number).await?;
+                self.state = ConnectionState::FinWait;
+            }
+            Frame::PathChallenge { header, challenge_data } => {
+                self.handle_path_challenge(header, challenge_data, src_addr).await?;
+            }
+            _ => {
+                trace!(cid = self.local_cid, ?frame, "Ignoring unexpected frame in Established state");
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_frame_validating_path(&mut self, frame: Frame, src_addr: std::net::SocketAddr) -> Result<()> {
+        match frame {
+            Frame::PathResponse { header: _, challenge_data } => {
                 if let ConnectionState::ValidatingPath {
                     new_addr,
                     challenge_data: expected_challenge,
@@ -272,8 +292,125 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     }
                 }
             }
-            _ => {}
+            Frame::Push { header, payload } => {
+                // Continue processing data frames during path validation
+                self.reliability.receive_push(header.sequence_number, payload);
+                self.send_standalone_ack().await?;
+            }
+            Frame::Ack { header, payload } => {
+                self.handle_ack_frame(header, payload).await?;
+            }
+            Frame::Fin { header, .. } => {
+                self.handle_fin_frame(header.sequence_number).await?;
+                self.state = ConnectionState::FinWait;
+            }
+            Frame::PathChallenge { header, challenge_data } => {
+                self.handle_path_challenge(header, challenge_data, src_addr).await?;
+            }
+            _ => {
+                trace!(cid = self.local_cid, ?frame, "Ignoring unexpected frame in ValidatingPath state");
+            }
         }
+        Ok(())
+    }
+
+    async fn handle_frame_closing(&mut self, frame: Frame, src_addr: std::net::SocketAddr) -> Result<()> {
+        match frame {
+            Frame::Push { header, payload } => {
+                // It's possible to receive data after we've decided to close,
+                // as the peer might have sent it before receiving our FIN.
+                self.reliability.receive_push(header.sequence_number, payload);
+                self.send_standalone_ack().await?;
+            }
+            Frame::Ack { header, payload } => {
+                self.handle_ack_frame(header, payload).await?;
+            }
+            Frame::Fin { header, .. } => {
+                self.handle_fin_frame(header.sequence_number).await?;
+                self.state = ConnectionState::ClosingWait;
+            }
+            Frame::PathChallenge { header, challenge_data } => {
+                self.handle_path_challenge(header, challenge_data, src_addr).await?;
+            }
+            _ => {
+                trace!(cid = self.local_cid, ?frame, "Ignoring unexpected frame in Closing state");
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_frame_closing_wait(&mut self, frame: Frame, src_addr: std::net::SocketAddr) -> Result<()> {
+        match frame {
+            Frame::Ack { header, payload } => {
+                self.handle_ack_frame(header, payload).await?;
+            }
+            Frame::PathChallenge { header, challenge_data } => {
+                self.handle_path_challenge(header, challenge_data, src_addr).await?;
+            }
+            _ => {
+                trace!(cid = self.local_cid, ?frame, "Ignoring unexpected frame in ClosingWait state");
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_frame_fin_wait(&mut self, frame: Frame, src_addr: std::net::SocketAddr) -> Result<()> {
+        match frame {
+            Frame::Push { header, payload } => {
+                self.reliability.receive_push(header.sequence_number, payload);
+                self.send_standalone_ack().await?;
+            }
+            Frame::Ack { header, payload } => {
+                self.handle_ack_frame(header, payload).await?;
+            }
+            Frame::Fin { header, .. } => {
+                // This is a retransmitted FIN from the peer. Just acknowledge it again.
+                // Do NOT change state here. The state should only transition to `Closing`
+                // when the local application calls `shutdown()`.
+                self.handle_fin_frame(header.sequence_number).await?;
+            }
+            Frame::PathChallenge { header, challenge_data } => {
+                self.handle_path_challenge(header, challenge_data, src_addr).await?;
+            }
+            _ => {
+                trace!(cid = self.local_cid, ?frame, "Ignoring unexpected frame in FinWait state");
+            }
+        }
+        Ok(())
+    }
+
+    // Helper methods for common frame handling logic
+    async fn handle_ack_frame(&mut self, header: crate::packet::header::ShortHeader, payload: bytes::Bytes) -> Result<()> {
+        self.peer_recv_window = header.recv_window_size as u32;
+        let sack_ranges = decode_sack_ranges(payload);
+        let frames_to_retx = self.reliability.handle_ack(
+            header.recv_next_sequence,
+            sack_ranges,
+            Instant::now(),
+        );
+        if !frames_to_retx.is_empty() {
+            self.send_frames(frames_to_retx).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_fin_frame(&mut self, sequence_number: u32) -> Result<()> {
+        // The reliability layer will now handle the FIN and its sequence number.
+        // The reassembly process will later tell us when this FIN is "seen".
+        self.reliability.receive_fin(sequence_number);
+        self.send_standalone_ack().await?;
+        Ok(())
+    }
+
+    async fn handle_path_challenge(&mut self, header: crate::packet::header::ShortHeader, challenge_data: u64, src_addr: std::net::SocketAddr) -> Result<()> {
+        let response_frame = create_path_response_frame(
+            self.peer_cid,
+            header.sequence_number, // Echo the sequence number
+            self.start_time,
+            challenge_data,
+        );
+        // The response MUST be sent back to the address the challenge came from.
+        self.send_frame_to(response_frame, src_addr).await?;
         Ok(())
     }
 
