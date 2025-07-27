@@ -320,8 +320,6 @@ async fn test_concurrent_connections_cid_isolation() {
             writer.shutdown().await.unwrap();
             tracing::info!("[Client {}] Writer shut down.", id);
 
-            tokio::time::sleep(Duration::from_millis(300)).await;
-
             // D. Wait for the server's final, unique acknowledgment.
             let expected_ack = format!("server ack {}", id);
             let mut ack_buf = Vec::new();
