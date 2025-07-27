@@ -347,10 +347,10 @@ async fn test_concurrent_connections_cid_isolation() {
     tracing::info!("[Test] CID isolation test passed.");
 } 
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 32)]
 async fn test_high_concurrency_1rtt_connections() {
     init_tracing();
-    const NUM_CLIENTS: usize = 6;
+    const NUM_CLIENTS: usize = 1000;
     tracing::info!(
         "[Test] Starting high concurrency 1-RTT test with {} clients...",
         NUM_CLIENTS

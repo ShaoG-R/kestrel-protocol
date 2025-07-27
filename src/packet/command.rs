@@ -70,6 +70,6 @@ impl fmt::Display for Command {
             Command::PathChallenge => "PATH_CHALLENGE",
             Command::PathResponse => "PATH_RESPONSE",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }

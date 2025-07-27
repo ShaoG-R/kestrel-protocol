@@ -66,8 +66,11 @@ impl SendBuffer {
         }
 
         let chunk = if chunk_size >= first_chunk.len() {
-            // The whole chunk is being taken, so we can pop it.
-            self.stream_buffer.pop_front().unwrap()
+            // The whole chunk is being taken, so we can pop it. Since we know
+            // the buffer is not empty from the `front_mut` check above, this
+            // pop should always succeed. We handle the `None` case just to
+            // satisfy the linter, but it should be unreachable.
+            self.stream_buffer.pop_front()?
         } else {
             // Only a part of the chunk is taken.
             first_chunk.split_to(chunk_size)
