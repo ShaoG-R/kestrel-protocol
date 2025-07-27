@@ -31,6 +31,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             let fin_frame = create_fin_frame(
                 self.peer_cid,
                 self.reliability.next_sequence_number(),
+                &self.reliability,
                 self.start_time,
             );
             self.reliability

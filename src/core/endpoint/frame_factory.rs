@@ -45,13 +45,20 @@ pub(super) fn create_ack_frame(
 pub(super) fn create_fin_frame(
     peer_cid: u32,
     sequence_number: u32,
+    reliability: &ReliabilityLayer,
     start_time: Instant,
 ) -> Frame {
     let timestamp = Instant::now().duration_since(start_time).as_millis() as u32;
-    // For FIN frames, recv_next_sequence and recv_window_size are not strictly necessary,
-    // as the connection is being torn down and no new data is expected.
-    // However, including them can be a good practice for consistency. We'll use 0 for now.
-    Frame::new_fin(peer_cid, sequence_number, timestamp, 0, 0)
+    // A FIN frame should also carry the latest acknowledgment information, just like a PUSH frame.
+    // This is the last chance to acknowledge any packets received before closing.
+    let (_, recv_next_sequence, recv_window_size) = reliability.get_ack_info();
+    Frame::new_fin(
+        peer_cid,
+        sequence_number,
+        timestamp,
+        recv_next_sequence,
+        recv_window_size,
+    )
 }
 
 /// Creates a PATH_CHALLENGE frame.
@@ -102,12 +109,17 @@ mod tests {
 
     #[test]
     fn test_create_fin_frame() {
-        let frame = create_fin_frame(456, 10, Instant::now());
+        let mut reliability = create_test_reliability_layer();
+        reliability.receive_push(0, Bytes::new());
+        let _ = reliability.reassemble();
+
+        let frame = create_fin_frame(456, 10, &reliability, Instant::now());
         match frame {
             Frame::Fin { header } => {
                 assert_eq!(header.connection_id, 456);
                 assert_eq!(header.sequence_number, 10);
                 assert_eq!(header.payload_length, 0);
+                assert_eq!(header.recv_next_sequence, 1); // Should carry ACK info
             }
             _ => panic!("Incorrect frame type"),
         }
