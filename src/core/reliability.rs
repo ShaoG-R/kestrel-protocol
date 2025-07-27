@@ -173,20 +173,26 @@ impl ReliabilityLayer {
 
     // --- Passthrough methods to recv_buffer ---
 
-    pub fn receive_push(&mut self, sequence_number: u32, payload: Bytes) {
-        self.recv_buffer.receive_push(sequence_number, payload);
-        self.ack_pending = true;
-        self.ack_eliciting_packets_since_last_ack += 1;
-        self.retransmission_manager.on_ack_eliciting_packet_received();
+    pub fn receive_push(&mut self, sequence_number: u32, payload: Bytes) -> bool {
+        let accepted = self.recv_buffer.receive_push(sequence_number, payload);
+        if accepted {
+            self.ack_pending = true;
+            self.ack_eliciting_packets_since_last_ack += 1;
+            self.retransmission_manager.on_ack_eliciting_packet_received();
+        }
+        accepted
     }
 
-    pub fn receive_fin(&mut self, sequence_number: u32) {
+    pub fn receive_fin(&mut self, sequence_number: u32) -> bool {
         // A FIN packet is like a PUSH with no data, but is handled specially now.
         // It still occupies a sequence number and must be acknowledged.
-        self.recv_buffer.receive_fin(sequence_number);
-        self.ack_pending = true;
-        self.ack_eliciting_packets_since_last_ack += 1;
-        self.retransmission_manager.on_ack_eliciting_packet_received();
+        let accepted = self.recv_buffer.receive_fin(sequence_number);
+        if accepted {
+            self.ack_pending = true;
+            self.ack_eliciting_packets_since_last_ack += 1;
+            self.retransmission_manager.on_ack_eliciting_packet_received();
+        }
+        accepted
     }
 
     pub fn reassemble(&mut self) -> (Option<Vec<Bytes>>, bool) {

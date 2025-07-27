@@ -76,30 +76,53 @@ impl ReceiveBuffer {
         self.received.is_empty()
     }
 
-    /// Receives a data packet payload for a given sequence number.
+    /// Receives a data packet payload for a given sequence number. Returns `true`
+    /// if the packet was accepted, `false` if it was a duplicate or ignored.
     ///
-    /// 为给定的序列号接收一个数据包有效载荷。
-    pub fn receive_push(&mut self, sequence_number: u32, payload: Bytes) {
-        if self.fin_reached {
-            return;
+    /// 为给定的序列号接收一个数据包有效载荷。如果数据包被接受，则返回 `true`，
+    /// 如果是重复或被忽略，则返回 `false`。
+    pub fn receive_push(&mut self, sequence_number: u32, payload: Bytes) -> bool {
+        // 1. Ignore packets received after a FIN has been processed.
+        // 2. Ignore old packets that have already been delivered.
+        if self.fin_reached || sequence_number < self.next_sequence {
+            return false;
         }
-        if sequence_number >= self.next_sequence {
-            if let Entry::Vacant(entry) = self.received.entry(sequence_number) {
+
+        // Use entry API to atomically check for existence and insert if vacant.
+        // This handles duplicate packets correctly.
+        match self.received.entry(sequence_number) {
+            Entry::Vacant(entry) => {
                 entry.insert(PacketOrFin::Push(payload));
+                true
+            }
+            Entry::Occupied(_) => {
+                // Duplicate packet, ignore.
+                false
             }
         }
     }
 
-    /// Receives a FIN signal for a given sequence number.
+    /// Receives a FIN signal for a given sequence number. Returns `true` if the
+    /// signal was accepted, `false` if it was a duplicate or ignored.
     ///
-    /// 为给定的序列号接收一个FIN信号。
-    pub fn receive_fin(&mut self, sequence_number: u32) {
-        if self.fin_reached {
-            return;
+    /// 为给定的序列号接收一个FIN信号。如果信号被接受，则返回 `true`，
+    /// 如果是重复或被忽略，则返回 `false`。
+    pub fn receive_fin(&mut self, sequence_number: u32) -> bool {
+        // 1. Ignore packets received after a FIN has been processed.
+        // 2. Ignore old packets that have already been delivered.
+        if self.fin_reached || sequence_number < self.next_sequence {
+            return false;
         }
-        if sequence_number >= self.next_sequence {
-            if let Entry::Vacant(entry) = self.received.entry(sequence_number) {
+
+        // Use entry API to atomically check for existence and insert if vacant.
+        match self.received.entry(sequence_number) {
+            Entry::Vacant(entry) => {
                 entry.insert(PacketOrFin::Fin);
+                true
+            }
+            Entry::Occupied(_) => {
+                // Duplicate FIN, ignore.
+                false
             }
         }
     }

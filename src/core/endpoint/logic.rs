@@ -100,14 +100,21 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 }
             }
 
-            // 6. Packetize and send any pending user data, but only if established.
+            // 6. After reassembly, check if a FIN was processed and transition state accordingly.
+            // This is the single source of truth for moving to the FinWait state.
+            if fin_seen && self.state == ConnectionState::Established {
+                trace!(cid = self.local_cid, "FIN processed by reassemble, moving to FinWait state.");
+                self.state = ConnectionState::FinWait;
+            }
+
+            // 7. Packetize and send any pending user data, but only if established.
             if self.state == ConnectionState::Established
                 || self.state == ConnectionState::FinWait
             {
                 self.packetize_and_send().await?;
             }
 
-            // 7. Check if we need to send a deferred EOF.
+            // 8. Check if we need to send a deferred EOF.
             // This happens after a FIN has been received and all data that came before
             // the FIN has been passed to the user's stream.
             if self.fin_pending_eof && self.reliability.is_recv_buffer_empty() {
@@ -118,7 +125,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 }
             }
 
-            // 8. Check if we need to close the connection
+            // 9. Check if we need to close the connection
             if self.should_close() {
                 break;
             }
@@ -211,9 +218,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 }
             }
             Frame::Push { header, payload } => {
-                self.reliability.receive_push(header.sequence_number, payload);
                 // For 0-RTT PUSH frames received during the `SynReceived` state, the ACK
                 // will be piggybacked onto the eventual SYN-ACK.
+                self.reliability.receive_push(header.sequence_number, payload);
             }
             Frame::Ack { header, payload } => {
                 self.handle_ack_frame(header, payload).await?;
@@ -221,8 +228,10 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             Frame::Fin { header, .. } => {
                 // Handle FIN even in SynReceived state - this can happen with 0-RTT
                 // where client sends data and immediately closes
-                self.handle_fin_frame(header.sequence_number).await?;
-                self.state = ConnectionState::FinWait;
+                if self.reliability.receive_fin(header.sequence_number) {
+                    self.send_standalone_ack().await?;
+                    self.state = ConnectionState::FinWait;
+                }
             }
             Frame::PathChallenge { header, challenge_data } => {
                 self.handle_path_challenge(header, challenge_data, src_addr).await?;
@@ -237,15 +246,20 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     async fn handle_frame_established(&mut self, frame: Frame, src_addr: std::net::SocketAddr) -> Result<()> {
         match frame {
             Frame::Push { header, payload } => {
-                self.reliability.receive_push(header.sequence_number, payload);
-                self.send_standalone_ack().await?;
+                if self.reliability.receive_push(header.sequence_number, payload) {
+                    self.send_standalone_ack().await?;
+                }
             }
             Frame::Ack { header, payload } => {
                 self.handle_ack_frame(header, payload).await?;
             }
             Frame::Fin { header, .. } => {
-                self.handle_fin_frame(header.sequence_number).await?;
-                self.state = ConnectionState::FinWait;
+                // Just receive the FIN and ACK it. Do NOT change state here.
+                // The state transition to FinWait is driven by the `reassemble`
+                // method in the main loop, which is the single source of truth.
+                if self.reliability.receive_fin(header.sequence_number) {
+                    self.send_standalone_ack().await?;
+                }
             }
             Frame::PathChallenge { header, challenge_data } => {
                 self.handle_path_challenge(header, challenge_data, src_addr).await?;
@@ -294,15 +308,18 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             }
             Frame::Push { header, payload } => {
                 // Continue processing data frames during path validation
-                self.reliability.receive_push(header.sequence_number, payload);
-                self.send_standalone_ack().await?;
+                if self.reliability.receive_push(header.sequence_number, payload) {
+                    self.send_standalone_ack().await?;
+                }
             }
             Frame::Ack { header, payload } => {
                 self.handle_ack_frame(header, payload).await?;
             }
             Frame::Fin { header, .. } => {
-                self.handle_fin_frame(header.sequence_number).await?;
-                self.state = ConnectionState::FinWait;
+                if self.reliability.receive_fin(header.sequence_number) {
+                    self.send_standalone_ack().await?;
+                    self.state = ConnectionState::FinWait;
+                }
             }
             Frame::PathChallenge { header, challenge_data } => {
                 self.handle_path_challenge(header, challenge_data, src_addr).await?;
@@ -319,15 +336,18 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             Frame::Push { header, payload } => {
                 // It's possible to receive data after we've decided to close,
                 // as the peer might have sent it before receiving our FIN.
-                self.reliability.receive_push(header.sequence_number, payload);
-                self.send_standalone_ack().await?;
+                if self.reliability.receive_push(header.sequence_number, payload) {
+                    self.send_standalone_ack().await?;
+                }
             }
             Frame::Ack { header, payload } => {
                 self.handle_ack_frame(header, payload).await?;
             }
             Frame::Fin { header, .. } => {
-                self.handle_fin_frame(header.sequence_number).await?;
-                self.state = ConnectionState::ClosingWait;
+                if self.reliability.receive_fin(header.sequence_number) {
+                    self.send_standalone_ack().await?;
+                    self.state = ConnectionState::ClosingWait;
+                }
             }
             Frame::PathChallenge { header, challenge_data } => {
                 self.handle_path_challenge(header, challenge_data, src_addr).await?;
@@ -357,8 +377,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     async fn handle_frame_fin_wait(&mut self, frame: Frame, src_addr: std::net::SocketAddr) -> Result<()> {
         match frame {
             Frame::Push { header, payload } => {
-                self.reliability.receive_push(header.sequence_number, payload);
-                self.send_standalone_ack().await?;
+                if self.reliability.receive_push(header.sequence_number, payload) {
+                    self.send_standalone_ack().await?;
+                }
             }
             Frame::Ack { header, payload } => {
                 self.handle_ack_frame(header, payload).await?;
@@ -367,7 +388,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 // This is a retransmitted FIN from the peer. Just acknowledge it again.
                 // Do NOT change state here. The state should only transition to `Closing`
                 // when the local application calls `shutdown()`.
-                self.handle_fin_frame(header.sequence_number).await?;
+                if self.reliability.receive_fin(header.sequence_number) {
+                    self.send_standalone_ack().await?;
+                }
             }
             Frame::PathChallenge { header, challenge_data } => {
                 self.handle_path_challenge(header, challenge_data, src_addr).await?;
@@ -391,14 +414,6 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         if !frames_to_retx.is_empty() {
             self.send_frames(frames_to_retx).await?;
         }
-        Ok(())
-    }
-
-    async fn handle_fin_frame(&mut self, sequence_number: u32) -> Result<()> {
-        // The reliability layer will now handle the FIN and its sequence number.
-        // The reassembly process will later tell us when this FIN is "seen".
-        self.reliability.receive_fin(sequence_number);
-        self.send_standalone_ack().await?;
         Ok(())
     }
 
