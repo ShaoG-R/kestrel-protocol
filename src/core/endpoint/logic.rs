@@ -110,6 +110,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             // 7. Packetize and send any pending user data, but only if established.
             if self.state == ConnectionState::Established
                 || self.state == ConnectionState::FinWait
+                || self.state == ConnectionState::Closing
             {
                 self.packetize_and_send().await?;
             }
