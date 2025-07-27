@@ -6,13 +6,18 @@ use kestrel_protocol::socket::ReliableUdpSocket;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::Instrument;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 /// Helper to initialize tracing for tests.
 fn init_tracing() {
     static TRACING_INIT: Once = Once::new();
     TRACING_INIT.call_once(|| {
+        let filter = std::env::var("RUST_LOG")
+            .unwrap_or_else(|_| "kestrel_protocol=debug,lifecycle=info".to_string());
         tracing_subscriber::fmt()
-            .with_env_filter("trace")
+            .with_env_filter(filter)
+            .with_span_events(FmtSpan::FULL) // Log span lifecycle events
             .with_test_writer()
             .init();
     });
@@ -340,4 +345,167 @@ async fn test_concurrent_connections_cid_isolation() {
     }
     
     tracing::info!("[Test] CID isolation test passed.");
+} 
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_high_concurrency_1rtt_connections() {
+    init_tracing();
+    const NUM_CLIENTS: usize = 6;
+    tracing::info!(
+        "[Test] Starting high concurrency 1-RTT test with {} clients...",
+        NUM_CLIENTS
+    );
+
+    // 1. Setup server
+    let server_addr = "127.0.0.1:9990".parse().unwrap();
+    let (_server_socket, mut server_listener) =
+        ReliableUdpSocket::<tokio::net::UdpSocket>::bind(server_addr)
+            .await
+            .unwrap();
+
+    // 2. The server task accepts connections and spawns a handler for each.
+    let server_handle = tokio::spawn(async move {
+        tracing::info!("[Server] Ready to accept {} connections.", NUM_CLIENTS);
+        let mut handlers = Vec::new();
+        for i in 0..NUM_CLIENTS {
+            let (stream, remote_addr) = server_listener.accept().await.unwrap();
+            tracing::info!(
+                "[Server] Accepted connection #{} from {}",
+                i + 1,
+                remote_addr
+            );
+
+            // Spawn an independent task to handle this specific client connection.
+            let handler = tokio::spawn(
+                async move {
+                    let (mut reader, mut writer) = tokio::io::split(stream);
+
+                    // A. Trigger SYN-ACK by writing a fixed-size welcome message.
+                    // This is the core of the 1-RTT handshake from the server side.
+                    const WELCOME_MSG: &[u8] = b"WELCOME";
+                    writer
+                        .write_all(WELCOME_MSG)
+                        .await
+                        .expect("Server handler failed to write welcome");
+                    tracing::info!("Sent WELCOME.");
+
+                    // B. Read the client's full message. This read will complete when
+                    // the client shuts down its writing side, sending a FIN.
+                    let mut client_msg_buf = Vec::new();
+                    reader
+                        .read_to_end(&mut client_msg_buf)
+                        .await
+                        .expect("Failed to read client message");
+                    let client_msg_str = String::from_utf8_lossy(&client_msg_buf);
+                    assert!(client_msg_str.starts_with("Message from client"));
+                    tracing::info!("Read message: '{}'", client_msg_str);
+
+                    // C. Send a final, fixed-size response.
+                    const GOODBYE_MSG: &[u8] = b"GOODBYE";
+                    writer
+                        .write_all(GOODBYE_MSG)
+                        .await
+                        .expect("Server handler failed to write goodbye");
+
+                    // D. Gracefully shutdown the connection from the server side.
+                    writer
+                        .shutdown()
+                        .await
+                        .expect("Server handler failed to shutdown");
+                    tracing::info!("Finished.");
+                }
+                .instrument(tracing::info_span!(
+                    "handler",
+                    side = "server",
+                    id = i,
+                    addr = %remote_addr
+                )),
+            );
+            handlers.push(handler);
+        }
+
+        // Wait for all client handlers to complete successfully.
+        for handler in handlers {
+            handler.await.unwrap();
+        }
+        tracing::info!(
+            "[Server] All {} client handlers finished.",
+            NUM_CLIENTS
+        );
+    });
+
+    // 3. Setup and connect N clients concurrently
+    let mut client_handles = Vec::new();
+    for i in 0..NUM_CLIENTS {
+        let client_addr: std::net::SocketAddr = format!("127.0.0.1:{}", 10000 + i).parse().unwrap();
+        
+        let client_handle = tokio::spawn(
+            async move {
+                let (client_socket, _) =
+                    ReliableUdpSocket::<tokio::net::UdpSocket>::bind(client_addr)
+                        .await
+                        .unwrap();
+
+                tracing::info!("Connecting to server...");
+                let stream = client_socket.connect(server_addr).await.unwrap();
+                let (mut reader, mut writer) = tokio::io::split(stream);
+
+                // A. Read the server's fixed-size welcome message. This confirms
+                // the 1-RTT handshake is complete.
+                const WELCOME_MSG: &[u8] = b"WELCOME";
+                let mut welcome_buf = vec![0; WELCOME_MSG.len()];
+                reader
+                    .read_exact(&mut welcome_buf)
+                    .await
+                    .expect("Client failed to read welcome message");
+                assert_eq!(&welcome_buf, WELCOME_MSG);
+                tracing::info!("Received WELCOME.");
+
+                // B. Send a unique message.
+                let msg = format!("Message from client {}", i);
+                writer
+                    .write_all(msg.as_bytes())
+                    .await
+                    .expect("Client failed to write message");
+                tracing::info!("Sent message.");
+
+                // C. Shutdown the writer to send a FIN. This signals to the server
+                // that we are done sending data.
+                writer
+                    .shutdown()
+                    .await
+                    .expect("Client failed to shutdown writer");
+                tracing::info!("Writer shut down.");
+
+                // D. Wait for the server's final acknowledgment. This read will complete
+                // when the server shuts down its writer.
+                const GOODBYE_MSG: &[u8] = b"GOODBYE";
+                let mut final_buf = Vec::new();
+                reader
+                    .read_to_end(&mut final_buf)
+                    .await
+                    .expect("Failed to read server's final response");
+                assert_eq!(final_buf, GOODBYE_MSG);
+                tracing::info!("Received GOODBYE and connection closed.");
+            }
+            .instrument(tracing::info_span!(
+                "handler",
+                side = "client",
+                id = i,
+                addr = %client_addr
+            )),
+        );
+        client_handles.push(client_handle);
+    }
+
+    // Wait for all top-level tasks to complete
+    for handle in client_handles {
+        handle.await.unwrap();
+    }
+    server_handle.await.unwrap();
+
+    tracing::info!(
+        "[Test] High concurrency 1-RTT test with {} clients passed.",
+        NUM_CLIENTS
+    );
 } 
