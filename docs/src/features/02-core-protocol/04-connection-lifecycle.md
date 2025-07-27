@@ -7,7 +7,7 @@
 **实现位置:**
 
 - **状态机定义**: `src/core/endpoint/state.rs`
-- **核心逻辑**: `src/core/endpoint/logic.rs`
+- **核心逻辑**: `src/core/endpoint/logic.rs` (主要在 `handle_frame_*` 系列函数和 `handle_stream_command` 中)
 - **顶层协调**: `src/socket/actor.rs`
 
 ### 1. 0-RTT/1-RTT 连接建立

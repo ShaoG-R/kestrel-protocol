@@ -7,7 +7,11 @@
 **实现位置:**
 
 - **用户 API**: `src/core/stream.rs` (`poll_shutdown`)
-- **核心逻辑**: `src/core/endpoint/logic.rs` (`handle_stream_command`, `handle_frame`, `shutdown`)
+- **核心逻辑**: `src/core/endpoint/logic.rs`。关键实现分散在以下部分：
+    - `shutdown()`: 启动关闭流程的入口。
+    - `handle_stream_command()`: 处理来自 `Stream` 的 `Close` 命令。
+    - `handle_frame_*` 系列函数 (如 `handle_frame_established`, `handle_frame_closing`, `handle_frame_fin_wait`): 根据当前状态处理 `FIN` 和 `ACK` 帧。
+    - `should_close()`: 判断何时可以安全地终止 `Endpoint` 任务。
 - **状态机**: `src/core/endpoint/state.rs`
 
 ---
@@ -69,7 +73,7 @@ sequenceDiagram
 
 1.  **接收FIN**: `Endpoint` B 从网络上接收到 `FIN` 帧。
 2.  **处理FIN与状态转换**:
-    - `handle_frame` 方法处理该 `FIN` 帧。
+    - `Endpoint` 处于 `Established` 状态，因此 `handle_frame_established` 方法会处理该 `FIN` 帧。
     - 它立即将 `Endpoint` B 的状态从 `Established` 切换到 `FinWait`。
     - **立即回复ACK**：作为响应，它向 `Endpoint` A 发送一个 `ACK` 帧，确认收到了 `FIN`。这是挥手的第二步。
     - **不直接通知应用层**：`Endpoint` B 此时**不会**做任何操作来通知用户 `Stream`。`FIN` 信号已被 `ReliabilityLayer` 接收并记录在其序列化的位置上。
@@ -99,7 +103,7 @@ sequenceDiagram
     - 此时状态从 `FinWait` 变为 `Closing`。
     - `Endpoint` B 发送它自己的 `FIN` 帧给 `Endpoint` A。这是挥手的第三步。
 2.  **主动方确认**: `Endpoint` A 接收到 `Endpoint` B 的 `FIN` 帧。
-    - `handle_frame` 方法处理这个 `FIN`。
+    - 此时 `Endpoint` A 处于 `Closing` 状态，因此 `handle_frame_closing` 方法会处理这个 `FIN`。
     - `Endpoint` A 的状态从 `Closing` 变为 `ClosingWait`。
     - **立即回复ACK**: `Endpoint` A 发送最后一个 `ACK` 给 `Endpoint` B。这是挥手的第四步。
 3.  **最终关闭**:
