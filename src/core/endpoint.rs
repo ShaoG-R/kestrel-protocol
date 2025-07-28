@@ -11,7 +11,6 @@ pub mod lifecycle_manager;
 mod logic;
 mod sending;
 pub mod state;
-mod state_manager;
 
 #[cfg(test)]
 mod tests;
