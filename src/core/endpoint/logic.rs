@@ -7,7 +7,7 @@ use super::{
     frame_factory::{
         create_path_challenge_frame, create_path_response_frame, create_syn_ack_frame,
     },
-
+    lifecycle_manager::ConnectionLifecycleManager,
     state::ConnectionState,
 };
 use crate::{
@@ -27,13 +27,13 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             _marker: std::marker::PhantomData,
         };
 
-        if *self.state_manager.current_state() == ConnectionState::Connecting {
+        if *self.lifecycle_manager.current_state() == ConnectionState::Connecting {
             self.send_initial_syn().await?;
         }
 
         loop {
             // In SynReceived, we don't set a timeout. We wait for the user to accept.
-            let next_wakeup = if *self.state_manager.current_state() == ConnectionState::SynReceived
+            let next_wakeup = if *self.lifecycle_manager.current_state() == ConnectionState::SynReceived
             {
                 Instant::now() + self.config.connection.idle_timeout // Effectively, sleep forever until a message
             } else {
@@ -42,7 +42,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     .unwrap_or_else(|| Instant::now() + self.config.connection.idle_timeout)
             };
 
-            trace!(cid = self.local_cid, state = ?self.state_manager.current_state(), "Main loop waiting for event.");
+            trace!(cid = self.local_cid, state = ?self.lifecycle_manager.current_state(), "Main loop waiting for event.");
             tokio::select! {
                 biased; // Prioritize incoming packets and user commands
 
@@ -100,7 +100,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                         if tx.send(data_vec).await.is_err() {
                             // User's stream handle has been dropped. We can no longer send.
                             self.tx_to_stream = None;
-                            let _ = self.state_manager.transition_to(ConnectionState::Closing);
+                            let _ = self.transition_state(ConnectionState::Closing);
                         }
                     }
                 }
@@ -109,11 +109,29 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             // 6. After reassembly, check if a FIN was processed and transition state accordingly.
             // This is the single source of truth for moving to the FinWait state.
             if fin_seen {
-                let _ = self.state_manager.handle_fin_received();
+                // 基于当前状态决定FIN后的状态转换 - 使用生命周期管理器
+                // Determine FIN transition based on current state - using lifecycle manager
+                match self.lifecycle_manager.current_state() {
+                    ConnectionState::Established => {
+                        let _ = self.transition_state(ConnectionState::FinWait);
+                    }
+                    ConnectionState::Closing => {
+                        let _ = self.transition_state(ConnectionState::ClosingWait);
+                    }
+                    ConnectionState::SynReceived => {
+                        // 在0-RTT场景中，从SynReceived状态转换到FinWait
+                        // In 0-RTT scenario, transition from SynReceived to FinWait
+                        let _ = self.transition_state(ConnectionState::FinWait);
+                    }
+                    _ => {
+                        // 其他状态下忽略FIN
+                        // Ignore FIN in other states
+                    }
+                }
             }
 
             // 7. Packetize and send any pending user data, but only if established.
-            let current_state = self.state_manager.current_state();
+            let current_state = self.lifecycle_manager.current_state();
             if *current_state == ConnectionState::Established
                 || *current_state == ConnectionState::FinWait
                 || *current_state == ConnectionState::Closing
@@ -148,12 +166,12 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
     pub async fn check_path_migration(&mut self, src_addr: std::net::SocketAddr) -> Result<()> {
         if src_addr != self.remote_addr
-            && *self.state_manager.current_state() == ConnectionState::Established
+            && *self.lifecycle_manager.current_state() == ConnectionState::Established
         {
             // Address has changed, initiate path validation.
             let challenge_data = rand::random();
-            self.state_manager
-                .handle_path_validation_start(src_addr, challenge_data, None)?;
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            self.start_path_validation(src_addr, challenge_data, tx)?;
             let challenge_frame = create_path_challenge_frame(
                 self.peer_cid,
                 self.reliability.next_sequence_number(),
@@ -174,8 +192,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     ) -> Result<()> {
         match frame {
             Frame::SynAck { header } => {
-                self.state_manager
-                    .handle_connection_established(header.source_cid)?;
+                self.transition_state(ConnectionState::Established)?;
                 self.peer_cid = header.source_cid;
 
                 // Acknowledge the SYN-ACK, potentially with piggybacked data if the
@@ -235,7 +252,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 // where client sends data and immediately closes
                 if self.reliability.receive_fin(header.sequence_number) {
                     self.send_standalone_ack().await?;
-                    let _ = self.state_manager.handle_fin_received();
+                    // 在0-RTT场景中，从SynReceived状态转换到FinWait - 使用生命周期管理器
+                    // In 0-RTT scenario, transition from SynReceived to FinWait - using lifecycle manager
+                    let _ = self.transition_state(ConnectionState::FinWait);
                 }
             }
             Frame::PathChallenge {
@@ -313,13 +332,17 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     new_addr,
                     challenge_data: expected_challenge,
                     notifier,
-                } = self.state_manager.current_state().clone()
+                } = self.lifecycle_manager.current_state().clone()
                 {
                     if src_addr == new_addr && challenge_data == expected_challenge {
                         // Path validation successful!
-                        let _old_addr = self
-                            .state_manager
-                            .handle_path_validation_success(new_addr)?;
+                        info!(
+                            cid = self.local_cid,
+                            old_addr = %self.remote_addr,
+                            new_addr = %new_addr,
+                            "Path validation successful, updating remote address"
+                        );
+                        self.complete_path_validation(true)?;
                         self.remote_addr = new_addr;
 
                         // Notify the caller of migrate() if there is one
@@ -359,7 +382,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             Frame::Fin { header, .. } => {
                 if self.reliability.receive_fin(header.sequence_number) {
                     self.send_standalone_ack().await?;
-                    let _ = self.state_manager.handle_fin_received();
+                    // 路径验证期间收到FIN，转换到FinWait - 使用生命周期管理器
+                    // Received FIN during path validation, transition to FinWait - using lifecycle manager
+                    let _ = self.transition_state(ConnectionState::FinWait);
                 }
             }
             Frame::PathChallenge {
@@ -402,7 +427,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             Frame::Fin { header, .. } => {
                 if self.reliability.receive_fin(header.sequence_number) {
                     self.send_standalone_ack().await?;
-                    let _ = self.state_manager.handle_fin_received();
+                    // 在Closing状态收到FIN，转换到ClosingWait - 使用生命周期管理器
+                    // Received FIN in Closing state, transition to ClosingWait - using lifecycle manager
+                    let _ = self.transition_state(ConnectionState::ClosingWait);
                 }
             }
             Frame::PathChallenge {
@@ -532,8 +559,8 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             StreamCommand::SendData(data) => {
                 // If this is the first data sent on a server-side connection,
                 // it triggers the SYN-ACK and establishes the connection. This is our 0-RTT path.
-                if *self.state_manager.current_state() == ConnectionState::SynReceived {
-                    self.state_manager.handle_connection_accepted()?;
+                if *self.lifecycle_manager.current_state() == ConnectionState::SynReceived {
+                    self.transition_state(ConnectionState::Established)?;
 
                     // 1. Queue the user's data into the reliability layer's stream buffer.
                     self.reliability.write_to_stream(data);
@@ -564,17 +591,19 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             }
             StreamCommand::Close => {
                 self.shutdown();
-                // Immediately attempt to send a FIN packet.
-                self.packetize_and_send().await?;
+                // Only attempt to send a FIN packet if we're not already closed
+                if !self.lifecycle_manager.should_close() {
+                    self.packetize_and_send().await?;
+                }
             }
             StreamCommand::Migrate { new_addr, notifier } => {
                 info!(cid = self.local_cid, new_addr = %new_addr, "Actively migrating to new address.");
                 let challenge_data = rand::random();
 
-                if let Err(_e) = self.state_manager.handle_path_validation_start(
+                if let Err(_e) = self.start_path_validation(
                     new_addr,
                     challenge_data,
-                    Some(notifier),
+                    notifier,
                 ) {
                     // 如果状态管理器返回错误，通知调用者
                     return Ok(());
@@ -603,28 +632,33 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             self.send_frames(frames_to_resend).await?;
         }
 
-        // Check for path validation timeout
+        // Check for path validation timeout - only if still in ValidatingPath state
+        // and not already closing
         if matches!(
-            self.state_manager.current_state(),
+            self.lifecycle_manager.current_state(),
             ConnectionState::ValidatingPath { .. }
         ) {
             if now.saturating_duration_since(self.last_recv_time)
                 > self.config.connection.idle_timeout
             {
                 if let ConnectionState::ValidatingPath { notifier, .. } =
-                    self.state_manager.current_state().clone()
+                    self.lifecycle_manager.current_state().clone()
                 {
                     if let Some(notifier) = notifier {
                         let _ = notifier.send(Err(Error::PathValidationTimeout));
                     }
+                    // 路径验证超时，回到Established状态 - 使用生命周期管理器
+                    // Path validation timeout, return to Established state - using lifecycle manager
+                    self.transition_state(ConnectionState::Established)?;
                 }
-                self.state_manager.handle_path_validation_timeout()?;
             }
         }
 
         if now.saturating_duration_since(self.last_recv_time) > self.config.connection.idle_timeout
         {
-            self.state_manager.handle_connection_timeout()?;
+            // 连接超时，强制关闭 - 使用生命周期管理器
+            // Connection timeout, force close - using lifecycle manager
+            self.lifecycle_manager.force_close()?;
             return Err(Error::ConnectionTimeout);
         }
         Ok(())
@@ -633,30 +667,56 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     fn should_close(&mut self) -> bool {
         // Condition 1: We are in a closing state AND all in-flight data is ACKed.
         // This is the primary condition to transition into the `Closed` state.
-        let current_state = self.state_manager.current_state();
+        let current_state = self.lifecycle_manager.current_state();
         if (*current_state == ConnectionState::Closing
             || *current_state == ConnectionState::ClosingWait)
             && self.reliability.is_in_flight_empty()
         {
-            if let Ok(should_close) = self.state_manager.handle_all_data_acked() {
-                if should_close {
-                    self.reliability.clear_in_flight_packets(); // Clean up here
-                }
+            // 所有数据已确认，转换到Closed状态 - 使用生命周期管理器
+            // All data acknowledged, transition to Closed state - using lifecycle manager
+            if let Ok(()) = self.transition_state(ConnectionState::Closed) {
+                self.reliability.clear_in_flight_packets(); // Clean up here
+                return true;
             }
         }
 
         // The endpoint's run loop should terminate ONLY when the state is definitively `Closed`.
         // The previous logic for `FinWait` was causing premature termination. The endpoint
         // should wait in `FinWait` for the user to actively close the stream.
-        self.state_manager.should_close()
+        self.lifecycle_manager.should_close()
     }
 
     fn shutdown(&mut self) {
-        let has_pending_data = !self.reliability.is_send_buffer_empty();
-        if let Ok(()) = self.state_manager.handle_user_close(has_pending_data) {
-            // 如果状态转换到了Closed，清理在途数据包
-            if self.state_manager.should_close() {
-                self.reliability.clear_in_flight_packets();
+        // 用户主动关闭，尝试优雅关闭 - 使用生命周期管理器
+        // User-initiated close, attempt graceful shutdown - using lifecycle manager
+        
+        // 对于Connecting状态，需要特殊处理：
+        // 如果有待发送数据，应该尝试建立连接后发送，然后关闭
+        // 如果没有待发送数据，可以立即关闭
+        match self.lifecycle_manager.current_state() {
+            crate::core::endpoint::state::ConnectionState::Connecting => {
+                if self.reliability.is_send_buffer_empty() {
+                    // 没有待发送数据，直接关闭
+                    if let Ok(()) = self.lifecycle_manager.transition_to(crate::core::endpoint::state::ConnectionState::Closed) {
+                        self.reliability.clear_in_flight_packets();
+                    }
+                } else {
+                    // 有待发送数据，转换到Closing状态，继续尝试连接
+                    if let Ok(()) = self.begin_graceful_shutdown() {
+                        if self.lifecycle_manager.should_close() {
+                            self.reliability.clear_in_flight_packets();
+                        }
+                    }
+                }
+            }
+            _ => {
+                // 其他状态按原逻辑处理
+                if let Ok(()) = self.begin_graceful_shutdown() {
+                    // 如果状态转换到了Closed，清理在途数据包
+                    if self.lifecycle_manager.should_close() {
+                        self.reliability.clear_in_flight_packets();
+                    }
+                }
             }
         }
     }

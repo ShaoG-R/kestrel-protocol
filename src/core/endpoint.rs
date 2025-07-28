@@ -7,6 +7,7 @@ mod constructors;
 mod event_dispatcher;
 pub mod frame_factory;
 pub mod frame_processors;
+pub mod lifecycle_manager;
 mod logic;
 mod sending;
 pub mod state;
@@ -17,7 +18,11 @@ mod tests;
 
 pub use command::StreamCommand;
 
-use self::{state::ConnectionState, state_manager::StateManager};
+use self::{
+    lifecycle_manager::{DefaultLifecycleManager, ConnectionLifecycleManager},
+    state::ConnectionState, 
+    state_manager::StateManager,
+};
 use crate::{
     config::Config,
     core::reliability::ReliabilityLayer,
@@ -59,6 +64,7 @@ pub struct Endpoint<S: AsyncUdpSocket> {
     local_cid: u32,
     peer_cid: u32,
     state_manager: StateManager,
+    lifecycle_manager: DefaultLifecycleManager,
     start_time: Instant,
     reliability: ReliabilityLayer,
     peer_recv_window: u32,
@@ -76,6 +82,75 @@ pub struct Endpoint<S: AsyncUdpSocket> {
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
 
+    /// 获取生命周期管理器的引用
+    /// Gets a reference to the lifecycle manager
+    pub fn lifecycle_manager(&self) -> &DefaultLifecycleManager {
+        &self.lifecycle_manager
+    }
+
+    /// 获取生命周期管理器的可变引用
+    /// Gets a mutable reference to the lifecycle manager
+    pub fn lifecycle_manager_mut(&mut self) -> &mut DefaultLifecycleManager {
+        &mut self.lifecycle_manager
+    }
+
+    /// 通过生命周期管理器进行状态转换（新方法）
+    /// Perform state transition through lifecycle manager (new method)
+    pub fn transition_state(&mut self, new_state: ConnectionState) -> crate::error::Result<()> {
+        // 先通过生命周期管理器验证和执行转换
+        // First validate and execute transition through lifecycle manager
+        self.lifecycle_manager.transition_to(new_state.clone())?;
+        
+        // 同时更新传统的状态管理器以保持兼容性
+        // Also update traditional state manager for compatibility
+        self.state_manager.transition_to(new_state)?;
+        
+        Ok(())
+    }
+
+    /// 检查是否可以发送数据（使用生命周期管理器）
+    /// Check if data can be sent (using lifecycle manager)
+    pub fn can_send_data(&self) -> bool {
+        self.lifecycle_manager.can_send_data()
+    }
+
+    /// 检查是否可以接收数据（使用生命周期管理器）
+    /// Check if data can be received (using lifecycle manager)  
+    pub fn can_receive_data(&self) -> bool {
+        self.lifecycle_manager.can_receive_data()
+    }
+
+    /// 开始优雅关闭（使用生命周期管理器）
+    /// Start graceful shutdown (using lifecycle manager)
+    pub fn begin_graceful_shutdown(&mut self) -> crate::error::Result<()> {
+        self.lifecycle_manager.begin_graceful_shutdown()?;
+        // 同步到旧的状态管理器
+        self.state_manager.transition_to(self.lifecycle_manager.current_state().clone())?;
+        Ok(())
+    }
+
+    /// 开始路径验证（使用生命周期管理器）
+    /// Start path validation (using lifecycle manager)
+    pub fn start_path_validation(
+        &mut self,
+        new_addr: SocketAddr,
+        challenge_data: u64,
+        notifier: tokio::sync::oneshot::Sender<crate::error::Result<()>>,
+    ) -> crate::error::Result<()> {
+        self.lifecycle_manager.start_path_validation(new_addr, challenge_data, notifier)?;
+        // 同步到旧的状态管理器
+        self.state_manager.transition_to(self.lifecycle_manager.current_state().clone())?;
+        Ok(())
+    }
+
+    /// 完成路径验证（使用生命周期管理器）
+    /// Complete path validation (using lifecycle manager)
+    pub fn complete_path_validation(&mut self, success: bool) -> crate::error::Result<()> {
+        self.lifecycle_manager.complete_path_validation(success)?;
+        // 同步到旧的状态管理器
+        self.state_manager.transition_to(self.lifecycle_manager.current_state().clone())?;
+        Ok(())
+    }
 
     /// 获取本地连接ID
     /// Gets the local connection ID

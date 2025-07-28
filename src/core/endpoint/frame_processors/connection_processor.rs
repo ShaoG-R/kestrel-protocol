@@ -18,7 +18,11 @@ use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 
-use crate::core::endpoint::{Endpoint, state::ConnectionState};
+use crate::core::endpoint::{
+    Endpoint, 
+    state::ConnectionState,
+    lifecycle_manager::ConnectionLifecycleManager,
+};
 
 /// 连接管理帧处理器
 /// Connection management frame processor
@@ -123,10 +127,9 @@ impl ConnectionProcessor {
 
         match context.connection_state {
             ConnectionState::Connecting => {
-                // 处理连接建立
-                // Handle connection establishment
-                endpoint.state_manager_mut()
-                    .handle_connection_established(header.source_cid)?;
+                // 处理连接建立 - 使用新的生命周期管理器API
+                // Handle connection establishment - using new lifecycle manager API
+                endpoint.transition_state(ConnectionState::Established)?;
                 endpoint.set_peer_cid(header.source_cid);
 
                 // 确认 SYN-ACK，如果用户已经调用了 write()，
@@ -216,7 +219,9 @@ impl ConnectionProcessor {
         // where client sends data and immediately closes
         if endpoint.reliability_mut().receive_fin(header.sequence_number) {
             endpoint.send_standalone_ack().await?;
-            let _ = endpoint.state_manager_mut().handle_fin_received();
+            // 在0-RTT场景中，从SynReceived状态转换到FinWait - 使用生命周期管理器
+            // In 0-RTT scenario, transition from SynReceived to FinWait - using lifecycle manager
+            let _ = endpoint.transition_state(ConnectionState::FinWait);
         }
         Ok(())
     }
@@ -259,7 +264,9 @@ impl ConnectionProcessor {
 
         if endpoint.reliability_mut().receive_fin(header.sequence_number) {
             endpoint.send_standalone_ack().await?;
-            let _ = endpoint.state_manager_mut().handle_fin_received();
+            // 路径验证期间收到FIN，转换到FinWait - 使用生命周期管理器
+            // Received FIN during path validation, transition to FinWait - using lifecycle manager
+            let _ = endpoint.transition_state(ConnectionState::FinWait);
         }
         Ok(())
     }
@@ -302,7 +309,17 @@ impl ConnectionProcessor {
 
         if endpoint.reliability_mut().receive_fin(header.sequence_number) {
             endpoint.send_standalone_ack().await?;
-            let _ = endpoint.state_manager_mut().handle_fin_received();
+            // 基于当前状态决定FIN后的状态转换 - 使用生命周期管理器
+            // Determine FIN transition based on current state - using lifecycle manager
+            match endpoint.lifecycle_manager().current_state() {
+                ConnectionState::Closing => {
+                    let _ = endpoint.transition_state(ConnectionState::ClosingWait);
+                }
+                _ => {
+                    // 如果不在Closing状态，可能是重传的FIN，忽略状态转换
+                    // If not in Closing state, might be retransmitted FIN, ignore state transition
+                }
+            }
         }
         Ok(())
     }

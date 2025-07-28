@@ -19,7 +19,10 @@ use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 
-use crate::core::endpoint::{Endpoint, state::ConnectionState};
+use crate::core::endpoint::{
+    Endpoint, 
+    state::ConnectionState,
+};
 
 /// 路径验证帧处理器
 /// Path validation frame processor
@@ -200,9 +203,7 @@ impl PathProcessor {
                 "Path validation successful, migrating connection"
             );
 
-            let _old_addr = endpoint
-                .state_manager_mut()
-                .handle_path_validation_success(expected_addr)?;
+            endpoint.complete_path_validation(true)?;
             endpoint.set_remote_addr(expected_addr);
 
             // 通知 migrate() 的调用者（如果有的话）

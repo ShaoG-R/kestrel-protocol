@@ -178,6 +178,18 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         if frames.is_empty() {
             return Ok(());
         }
+        
+        // 添加调试信息
+        if !frames.is_empty() {
+            tracing::debug!(
+                cid = self.local_cid,
+                remote_addr = %self.remote_addr,
+                frame_count = frames.len(),
+                first_frame = ?frames[0],
+                "Sending frames to remote address"
+            );
+        }
+        
         let cmd = SendCommand {
             remote_addr: self.remote_addr,
             frames,

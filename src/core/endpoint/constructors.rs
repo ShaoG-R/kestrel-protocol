@@ -1,6 +1,7 @@
 //! Constructors for the `Endpoint`.
 
 use super::{
+    lifecycle_manager::{DefaultLifecycleManager, ConnectionLifecycleManager},
     state::ConnectionState,
     state_manager::StateManager,
     {Endpoint, StreamCommand},
@@ -40,11 +41,18 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         }
         let now = Instant::now();
 
+        let mut lifecycle_manager = DefaultLifecycleManager::new(
+            ConnectionState::Connecting,
+            config.clone(),
+        );
+        lifecycle_manager.initialize(local_cid, remote_addr).unwrap();
+
         let endpoint = Self {
             remote_addr,
             local_cid,
             peer_cid: 0,
             state_manager: StateManager::new(ConnectionState::Connecting, local_cid),
+            lifecycle_manager,
             start_time: now,
             reliability,
             peer_recv_window: 32,
@@ -78,11 +86,18 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         let reliability = ReliabilityLayer::new(config.clone(), congestion_control);
         let now = Instant::now();
 
+        let mut lifecycle_manager = DefaultLifecycleManager::new(
+            ConnectionState::SynReceived,
+            config.clone(),
+        );
+        lifecycle_manager.initialize(local_cid, remote_addr).unwrap();
+
         let endpoint = Self {
             remote_addr,
             local_cid,
             peer_cid,
             state_manager: StateManager::new(ConnectionState::SynReceived, local_cid),
+            lifecycle_manager,
             start_time: now,
             reliability,
             peer_recv_window: 32,
