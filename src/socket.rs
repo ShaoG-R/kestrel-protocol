@@ -1,12 +1,11 @@
-//! 包含协议的顶层Socket接口。
-//! Contains the top-level Socket interface for the protocol.
-
-mod actor;
-mod command;
-mod handle;
-mod sender;
-mod traits;
+//! The socket-level API, including the main actor, commands, and handles.
+pub mod actor;
+pub mod command;
 mod draining;
+pub mod handle;
+mod sender;
+pub mod traits;
+pub mod zerortt;
 
 pub use command::{SocketActorCommand, SenderTaskCommand, SendCommand};
 pub use handle::{Listener, ReliableUdpSocket};

@@ -11,6 +11,7 @@ use crate::{
     config::Config,
     core::stream::Stream,
     error::{Error, Result},
+    socket::zerortt::InitialData,
 };
 use std::{marker::PhantomData, net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
@@ -144,57 +145,40 @@ impl<S: BindableUdpSocket> ReliableUdpSocket<S> {
 
     /// Establishes a new reliable connection to the given remote address.
     ///
-    /// This will create a new `Stream` instance and spawn its event loop.
-    /// The connection can be used immediately to write 0-RTT data.
+    /// This is a convenience method that uses the default configuration and sends
+    /// no 0-RTT data. For more control, see [`connect_with_config`](#method.connect_with_config).
     ///
     /// 建立一个到指定远程地址的新的可靠连接。
     ///
-    /// 这会创建一个新的 `Stream` 实例并生成其事件循环。
-    /// 该连接可以立即用于写入0-RTT数据。
+    /// 这是一个使用默认配置且不发送0-RTT数据的便捷方法。
+    /// 如需更多控制，请参阅 [`connect_with_config`](#method.connect_with_config)。
     pub async fn connect(&self, remote_addr: SocketAddr) -> Result<Stream> {
         self.connect_with_config(remote_addr, Config::default(), None)
             .await
     }
 
-    /// Establishes a new reliable connection with 0-RTT data.
+    /// Establishes a new reliable connection to the given remote address with
+    /// custom configuration and optional 0-RTT data.
     ///
-    /// The size of `initial_data` must not exceed `max_payload_size` from the config.
+    /// The `initial_data` must be created using [`InitialData::new`], which
+    /// validates that the data will fit into a single initial UDP packet.
+    /// This enforces the single-packet constraint for 0-RTT at the API level.
     ///
-    /// 建立一个携带0-RTT数据的新的可靠连接。
+    /// 使用自定义配置和可选的0-RTT数据，建立一个到指定远程地址的新的可靠连接。
     ///
-    /// `initial_data` 的大小不能超过配置中的 `max_payload_size`。
-    pub async fn connect_with_0rtt(
-        &self,
-        remote_addr: SocketAddr,
-        initial_data: &[u8],
-    ) -> Result<Stream> {
-        self.connect_with_config(
-            remote_addr,
-            Config::default(),
-            Some(bytes::Bytes::copy_from_slice(initial_data)),
-        )
-        .await
-    }
-
-    /// Establishes a new reliable connection to the given remote address with custom configuration.
-    ///
-    /// 使用自定义配置建立一个到指定远程地址的新的可靠连接。
+    /// `initial_data` 必须使用 [`InitialData::new`] 创建，该函数会验证数据
+    /// 能否装入单个初始UDP包中。这在API层面强制实施了0-RTT的单包约束。
     pub async fn connect_with_config(
         &self,
         remote_addr: SocketAddr,
         config: Config,
-        initial_data: Option<bytes::Bytes>,
+        initial_data: Option<InitialData>,
     ) -> Result<Stream> {
-        if let Some(data) = &initial_data {
-            if data.len() > config.max_payload_size {
-                return Err(crate::error::Error::MessageTooLarge);
-            }
-        }
         let (response_tx, response_rx) = oneshot::channel();
         let cmd = SocketActorCommand::Connect {
             remote_addr,
             config,
-            initial_data,
+            initial_data: initial_data.map(|d| d.into_bytes()),
             response_tx,
         };
         self.command_tx

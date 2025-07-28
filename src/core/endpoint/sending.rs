@@ -118,10 +118,8 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         // Phase 1: Collect all frames to be sent for the initial packet.
         let now = Instant::now();
         let mut frames_to_send = Vec::new();
-        let mut total_size = 0;
 
         let syn_frame = create_syn_frame(&self.config, self.local_cid);
-        total_size += syn_frame.encoded_size();
         frames_to_send.push(syn_frame);
 
         let push_frames = self.reliability.packetize_stream_data(
@@ -131,15 +129,16 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             self.start_time,
             None,
         );
-        for frame in &push_frames {
-            total_size += frame.encoded_size();
-        }
         frames_to_send.extend(push_frames);
 
-        // Phase 2: Enforce the single-packet limit for 0-RTT.
-        if total_size > self.config.max_packet_size {
-            return Err(Error::InitialDataTooLarge);
-        }
+        // Phase 2: Assert the single-packet limit.
+        // The check is now enforced at the API level by `InitialData::new`.
+        // We assert here to catch any logic errors during development.
+        let total_size: usize = frames_to_send.iter().map(|f| f.encoded_size()).sum();
+        assert!(
+            total_size <= self.config.max_packet_size,
+            "Initial packet size exceeded MTU, which should have been caught at the API level!"
+        );
 
         // Phase 3: Send as a single raw datagram.
         self.send_raw_frames(frames_to_send).await

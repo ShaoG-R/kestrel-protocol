@@ -4,8 +4,6 @@
 use super::command::Command;
 use bytes::{Buf, BufMut};
 
-pub const SHORT_HEADER_SIZE: usize = 21;
-
 /// The short header, used for most data transmission packets after connection is established.
 /// 短头，用于连接建立后的大部分数据传输包。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +32,10 @@ pub struct ShortHeader {
 }
 
 impl ShortHeader {
+    /// The size of the short header on the wire, excluding the command byte.
+    /// 短头的有线大小, 不包括命令字节。
+    pub const ENCODED_SIZE: usize = 4 + 2 + 2 + 4 + 4 + 4; // cid + payload_len + recv_win + ts + seq + recv_next_seq
+
     /// 将短头编码到缓冲区。
     /// Encodes the short header into a buffer.
     pub fn encode<B: BufMut>(&self, buf: &mut B) {
@@ -49,7 +51,7 @@ impl ShortHeader {
     /// 从缓冲区解码短头。
     /// Decodes a short header from a buffer.
     pub fn decode<B: Buf>(buf: &mut B) -> Option<Self> {
-        if buf.remaining() < SHORT_HEADER_SIZE {
+        if buf.remaining() < 1 + Self::ENCODED_SIZE {
             return None;
         }
         let command = Command::from_u8(buf.get_u8())?;
@@ -67,12 +69,6 @@ impl ShortHeader {
         })
     }
 }
-
-impl ShortHeader {
-    pub const ENCODED_SIZE: usize = 4 + 2 + 4 + 4 + 4; // connection_id + recv_window_size + timestamp + sequence_number + recv_next_sequence
-}
-
-pub const LONG_HEADER_SIZE: usize = 10; // command(1) + version(1) + dcid(4) + scid(4)
 
 /// The long header, used for connection management packets.
 /// 长头，用于连接管理包。
@@ -93,6 +89,9 @@ pub struct LongHeader {
 }
 
 impl LongHeader {
+    /// The size of the long header on the wire, excluding the command byte.
+    pub const ENCODED_SIZE: usize = 1 + 4 + 4; // version + dest_cid + source_cid
+
     /// 将长头编码到缓冲区。
     /// Encodes the long header into a buffer.
     pub fn encode<B: BufMut>(&self, buf: &mut B) {
@@ -105,7 +104,7 @@ impl LongHeader {
     /// 从缓冲区解码长头。
     /// Decodes a long header from a buffer.
     pub fn decode<B: Buf>(buf: &mut B) -> Option<Self> {
-        if buf.remaining() < LONG_HEADER_SIZE {
+        if buf.remaining() < 1 + Self::ENCODED_SIZE {
             return None;
         }
         let command = Command::from_u8(buf.get_u8())?;
@@ -119,8 +118,4 @@ impl LongHeader {
             source_cid: buf.get_u32(),
         })
     }
-}
-
-impl LongHeader {
-    pub const ENCODED_SIZE: usize = 1 + 1 + 4 + 4; // command + version + dest_cid + source_cid
 }
