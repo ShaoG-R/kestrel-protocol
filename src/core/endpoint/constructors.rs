@@ -3,7 +3,6 @@
 use super::{
     lifecycle_manager::{DefaultLifecycleManager, ConnectionLifecycleManager},
     state::ConnectionState,
-    state_manager::StateManager,
     {Endpoint, StreamCommand},
 };
 use crate::{
@@ -51,7 +50,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             remote_addr,
             local_cid,
             peer_cid: 0,
-            state_manager: StateManager::new(ConnectionState::Connecting, local_cid),
+
             lifecycle_manager,
             start_time: now,
             reliability,
@@ -96,7 +95,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             remote_addr,
             local_cid,
             peer_cid,
-            state_manager: StateManager::new(ConnectionState::SynReceived, local_cid),
+
             lifecycle_manager,
             start_time: now,
             reliability,

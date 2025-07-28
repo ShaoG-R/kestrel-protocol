@@ -676,6 +676,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             // All data acknowledged, transition to Closed state - using lifecycle manager
             if let Ok(()) = self.transition_state(ConnectionState::Closed) {
                 self.reliability.clear_in_flight_packets(); // Clean up here
+                // 连接关闭时，关闭用户流接收器
+                // Close user stream receiver when connection closes
+                self.tx_to_stream = None;
                 return true;
             }
         }
@@ -687,34 +690,48 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     }
 
     fn shutdown(&mut self) {
-        // 用户主动关闭，尝试优雅关闭 - 使用生命周期管理器
-        // User-initiated close, attempt graceful shutdown - using lifecycle manager
+        // 用户主动关闭，根据状态决定处理方式
+        // User-initiated close, handle based on current state
         
-        // 对于Connecting状态，需要特殊处理：
-        // 如果有待发送数据，应该尝试建立连接后发送，然后关闭
-        // 如果没有待发送数据，可以立即关闭
         match self.lifecycle_manager.current_state() {
+            crate::core::endpoint::state::ConnectionState::SynReceived => {
+                // 在SynReceived状态下，连接还没有真正建立，立即关闭用户流接收器
+                // In SynReceived state, connection is not established yet, immediately close user stream receiver
+                self.tx_to_stream = None;
+                
+                // 尝试优雅关闭
+                if let Ok(()) = self.begin_graceful_shutdown() {
+                    if self.lifecycle_manager.should_close() {
+                        self.reliability.clear_in_flight_packets();
+                    }
+                }
+            }
             crate::core::endpoint::state::ConnectionState::Connecting => {
                 if self.reliability.is_send_buffer_empty() {
                     // 没有待发送数据，直接关闭
                     if let Ok(()) = self.lifecycle_manager.transition_to(crate::core::endpoint::state::ConnectionState::Closed) {
                         self.reliability.clear_in_flight_packets();
+                        // 连接直接关闭时才关闭用户流
+                        self.tx_to_stream = None;
                     }
                 } else {
                     // 有待发送数据，转换到Closing状态，继续尝试连接
                     if let Ok(()) = self.begin_graceful_shutdown() {
                         if self.lifecycle_manager.should_close() {
                             self.reliability.clear_in_flight_packets();
+                            self.tx_to_stream = None;
                         }
                     }
                 }
             }
             _ => {
-                // 其他状态按原逻辑处理
+                // 其他状态保持读端开放，直到收到FIN或连接完全关闭
+                // For other states, keep read side open until FIN received or connection fully closed
                 if let Ok(()) = self.begin_graceful_shutdown() {
-                    // 如果状态转换到了Closed，清理在途数据包
+                    // 只有连接完全关闭时才关闭用户流
                     if self.lifecycle_manager.should_close() {
                         self.reliability.clear_in_flight_packets();
+                        self.tx_to_stream = None;
                     }
                 }
             }

@@ -28,7 +28,7 @@ use crate::{
 use std::net::SocketAddr;
 use tokio::time::Instant;
 
-use super::{Endpoint, state::ConnectionState};
+use super::{Endpoint, state::ConnectionState, lifecycle_manager::ConnectionLifecycleManager};
 
 /// 帧处理器特征，定义了所有帧处理器的通用接口
 /// Frame processor trait that defines the common interface for all frame processors
@@ -149,7 +149,7 @@ impl FrameProcessingContext {
         Self {
             now,
             src_addr,
-            connection_state: endpoint.state_manager().current_state().clone(),
+            connection_state: endpoint.lifecycle_manager().current_state().clone(),
             local_cid: endpoint.local_cid(),
         }
     }

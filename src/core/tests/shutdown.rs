@@ -95,6 +95,7 @@ async fn test_shutdown_when_connecting() {
 
 #[tokio::test]
 async fn test_shutdown_when_syn_received() {
+    crate::core::test_utils::init_tracing();
     // Test closing a server connection before the app `accepts` it (i.e., sends data).
     let mut harness = setup_server_harness();
 

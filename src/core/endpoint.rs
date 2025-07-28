@@ -20,8 +20,7 @@ pub use command::StreamCommand;
 
 use self::{
     lifecycle_manager::{DefaultLifecycleManager, ConnectionLifecycleManager},
-    state::ConnectionState, 
-    state_manager::StateManager,
+    state::ConnectionState,
 };
 use crate::{
     config::Config,
@@ -63,7 +62,7 @@ pub struct Endpoint<S: AsyncUdpSocket> {
     remote_addr: SocketAddr,
     local_cid: u32,
     peer_cid: u32,
-    state_manager: StateManager,
+
     lifecycle_manager: DefaultLifecycleManager,
     start_time: Instant,
     reliability: ReliabilityLayer,
@@ -97,14 +96,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// 通过生命周期管理器进行状态转换（新方法）
     /// Perform state transition through lifecycle manager (new method)
     pub fn transition_state(&mut self, new_state: ConnectionState) -> crate::error::Result<()> {
-        // 先通过生命周期管理器验证和执行转换
-        // First validate and execute transition through lifecycle manager
-        self.lifecycle_manager.transition_to(new_state.clone())?;
-        
-        // 同时更新传统的状态管理器以保持兼容性
-        // Also update traditional state manager for compatibility
-        self.state_manager.transition_to(new_state)?;
-        
+        // 只通过生命周期管理器验证和执行转换
+        // Only validate and execute transition through lifecycle manager
+        self.lifecycle_manager.transition_to(new_state)?;
         Ok(())
     }
 
@@ -123,10 +117,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// 开始优雅关闭（使用生命周期管理器）
     /// Start graceful shutdown (using lifecycle manager)
     pub fn begin_graceful_shutdown(&mut self) -> crate::error::Result<()> {
-        self.lifecycle_manager.begin_graceful_shutdown()?;
-        // 同步到旧的状态管理器
-        self.state_manager.transition_to(self.lifecycle_manager.current_state().clone())?;
-        Ok(())
+        self.lifecycle_manager.begin_graceful_shutdown()
     }
 
     /// 开始路径验证（使用生命周期管理器）
@@ -137,19 +128,13 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         challenge_data: u64,
         notifier: tokio::sync::oneshot::Sender<crate::error::Result<()>>,
     ) -> crate::error::Result<()> {
-        self.lifecycle_manager.start_path_validation(new_addr, challenge_data, notifier)?;
-        // 同步到旧的状态管理器
-        self.state_manager.transition_to(self.lifecycle_manager.current_state().clone())?;
-        Ok(())
+        self.lifecycle_manager.start_path_validation(new_addr, challenge_data, notifier)
     }
 
     /// 完成路径验证（使用生命周期管理器）
     /// Complete path validation (using lifecycle manager)
     pub fn complete_path_validation(&mut self, success: bool) -> crate::error::Result<()> {
-        self.lifecycle_manager.complete_path_validation(success)?;
-        // 同步到旧的状态管理器
-        self.state_manager.transition_to(self.lifecycle_manager.current_state().clone())?;
-        Ok(())
+        self.lifecycle_manager.complete_path_validation(success)
     }
 
     /// 获取本地连接ID
@@ -173,20 +158,10 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// 获取当前连接状态
     /// Gets the current connection state
     pub fn state(&self) -> &ConnectionState {
-        self.state_manager.current_state()
+        self.lifecycle_manager.current_state()
     }
 
-    /// 获取状态管理器的引用
-    /// Gets a reference to the state manager
-    pub fn state_manager(&self) -> &StateManager {
-        &self.state_manager
-    }
 
-    /// 获取状态管理器的可变引用
-    /// Gets a mutable reference to the state manager
-    pub fn state_manager_mut(&mut self) -> &mut StateManager {
-        &mut self.state_manager
-    }
 
     /// 更新最后接收时间
     /// Updates the last receive time
