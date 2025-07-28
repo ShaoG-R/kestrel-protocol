@@ -8,9 +8,9 @@
 //! related frames, including path challenges, path responses,
 //! address validation, etc.
 
-use super::{FrameProcessingContext, FrameProcessor, FrameProcessorStatic, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::PathFrame};
+use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::PathFrame};
 use crate::{
-    error::{Error, Result},
+    error::Result,
     packet::frame::Frame,
     socket::{AsyncUdpSocket, SocketActorCommand},
 };
@@ -116,33 +116,7 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for PathProcessor {
     }
 }
 
-// 为了向后兼容，保留旧接口实现
-// Keep old interface implementation for backward compatibility
-impl<S: AsyncUdpSocket> FrameProcessor<S> for PathProcessor {
-    fn process_frame(
-        endpoint: &mut Endpoint<S>,
-        frame: Frame,
-        src_addr: SocketAddr,
-        now: Instant,
-    ) -> impl std::future::Future<Output = Result<()>> + Send {
-        async move {
-            Self::process_path_frame_internal(endpoint, frame, src_addr, now).await
-        }
-    }
-}
 
-impl FrameProcessorStatic for PathProcessor {
-    fn can_handle(frame: &Frame) -> bool {
-        matches!(
-            frame,
-            Frame::PathChallenge { .. } | Frame::PathResponse { .. }
-        )
-    }
-
-    fn name() -> &'static str {
-        "PathProcessor"
-    }
-}
 
 impl PathProcessor {
     /// 处理 PathChallenge 帧
@@ -316,6 +290,7 @@ mod tests {
     use crate::packet::command::Command;
     use crate::packet::frame::Frame;
     use crate::packet::header::ShortHeader;
+    use crate::core::test_utils::MockUdpSocket;
 
     #[test]
     fn test_path_processor_can_handle() {
@@ -345,10 +320,10 @@ mod tests {
             challenge_data: 0x1234567890abcdef,
         };
 
-        assert!(<PathProcessor as FrameProcessorStatic>::can_handle(
+        assert!(<PathProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(
             &path_challenge_frame
         ));
-        assert!(<PathProcessor as FrameProcessorStatic>::can_handle(
+        assert!(<PathProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(
             &path_response_frame
         ));
 
@@ -365,7 +340,7 @@ mod tests {
             payload: bytes::Bytes::from("test data"),
         };
 
-        assert!(!<PathProcessor as FrameProcessorStatic>::can_handle(
+        assert!(!<PathProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(
             &push_frame
         ));
     }
@@ -373,7 +348,7 @@ mod tests {
     #[test]
     fn test_processor_name() {
         assert_eq!(
-            <PathProcessor as FrameProcessorStatic>::name(),
+            <PathProcessor as UnifiedFrameProcessor<MockUdpSocket>>::name(),
             "PathProcessor"
         );
     }

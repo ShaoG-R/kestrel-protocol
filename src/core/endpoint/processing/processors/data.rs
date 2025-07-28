@@ -8,7 +8,7 @@
 //! including PUSH frame reception, sequence number validation,
 //! data reassembly logic, etc.
 
-use super::{FrameProcessingContext, FrameProcessor, FrameProcessorStatic, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::PushFrame};
+use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::PushFrame};
 use crate::{
     error::Result,
     packet::frame::Frame,
@@ -169,75 +169,7 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for PushProcessor {
     }
 }
 
-// 保持旧的接口实现以确保向后兼容
-// Keep old interface implementations for backward compatibility
-#[allow(deprecated)]
-impl<S: AsyncUdpSocket> FrameProcessor<S> for PushProcessor {
-    fn process_frame(
-        endpoint: &mut Endpoint<S>,
-        frame: Frame,
-        src_addr: SocketAddr,
-        now: Instant,
-    ) -> impl std::future::Future<Output = Result<()>> + Send {
-        async move {
-        let Frame::Push { header, payload } = frame else {
-            return Err(crate::error::Error::InvalidFrame("Expected PUSH frame".into()));
-        };
 
-        let context = FrameProcessingContext::new(endpoint, src_addr, now);
-        
-        trace!(
-            cid = context.local_cid,
-            seq = header.sequence_number,
-            payload_len = payload.len(),
-            state = ?context.connection_state,
-            "Processing PUSH frame"
-        );
-
-        // 根据连接状态处理 PUSH 帧
-        // Handle PUSH frame based on connection state
-        match context.connection_state {
-            ConnectionState::SynReceived => {
-                Self::handle_push_in_syn_received(endpoint, header, payload).await
-            }
-            ConnectionState::Established => {
-                Self::handle_push_in_established(endpoint, header, payload).await
-            }
-            ConnectionState::ValidatingPath { .. } => {
-                Self::handle_push_in_validating_path(endpoint, header, payload).await
-            }
-            ConnectionState::FinWait => {
-                Self::handle_push_in_fin_wait(endpoint, header, payload).await
-            }
-            ConnectionState::Closing => {
-                Self::handle_push_in_closing(endpoint, header, payload).await
-            }
-            ConnectionState::ClosingWait => {
-                Self::handle_push_in_closing(endpoint, header, payload).await
-            }
-            _ => {
-                debug!(
-                    cid = context.local_cid,
-                    state = ?context.connection_state,
-                    "Ignoring PUSH frame in state"
-                );
-                Ok(())
-            }
-        }
-        }
-    }
-}
-
-#[allow(deprecated)]
-impl FrameProcessorStatic for PushProcessor {
-    fn can_handle(frame: &Frame) -> bool {
-        matches!(frame, Frame::Push { .. })
-    }
-
-    fn name() -> &'static str {
-        "PushProcessor"
-    }
-}
 
 impl PushProcessor {
     /// 在 SynReceived 状态下处理 PUSH 帧
@@ -357,13 +289,10 @@ impl PushProcessor {
 mod tests {
     use super::*;
     use crate::{
-        config::Config,
         core::test_utils::MockUdpSocket,
         packet::{frame::Frame, header::ShortHeader, command::Command},
     };
     use bytes::Bytes;
-    use std::net::SocketAddr;
-    use tokio::time::Instant;
 
     // 测试工具函数 - 创建测试用的PUSH帧
     // Test utility function - Create test PUSH frame
@@ -405,19 +334,16 @@ mod tests {
         // 测试能够处理PUSH帧
         // Test can handle PUSH frame
         let push_frame = create_test_push_frame(1, "test data");
-        assert!(<PushProcessor as FrameProcessorStatic>::can_handle(&push_frame));
         assert!(<PushProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame));
 
         // 测试不能处理非PUSH帧
         // Test cannot handle non-PUSH frame
         let ack_frame = create_test_ack_frame();
-        assert!(!<PushProcessor as FrameProcessorStatic>::can_handle(&ack_frame));
         assert!(!<PushProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&ack_frame));
     }
 
     #[test]
     fn test_processor_name() {
-        assert_eq!(<PushProcessor as FrameProcessorStatic>::name(), "PushProcessor");
         assert_eq!(<PushProcessor as UnifiedFrameProcessor<MockUdpSocket>>::name(), "PushProcessor");
         assert_eq!(<PushProcessor as TypeSafeFrameProcessor<MockUdpSocket>>::name(), "PushProcessor");
     }
@@ -460,18 +386,15 @@ mod tests {
         
         // 确保所有接口实现的行为一致
         // Ensure all interface implementations behave consistently
-        let static_can_handle = <PushProcessor as FrameProcessorStatic>::can_handle(&push_frame);
         let unified_can_handle = <PushProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame);
-        
-        assert_eq!(static_can_handle, unified_can_handle);
+        assert!(unified_can_handle);
         
         // 确保名称一致
         // Ensure names are consistent
-        let static_name = <PushProcessor as FrameProcessorStatic>::name();
         let unified_name = <PushProcessor as UnifiedFrameProcessor<MockUdpSocket>>::name();
         let type_safe_name = <PushProcessor as TypeSafeFrameProcessor<MockUdpSocket>>::name();
         
-        assert_eq!(static_name, unified_name);
-        assert_eq!(static_name, type_safe_name);
+        assert_eq!(unified_name, type_safe_name);
+        assert_eq!(unified_name, "PushProcessor");
     }
 }

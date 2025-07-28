@@ -7,7 +7,7 @@
 //! This module specifically handles ACK frames, including SACK information parsing,
 //! RTT calculation, congestion control updates, etc.
 
-use super::{FrameProcessingContext, FrameProcessor, FrameProcessorStatic, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::AckFrame};
+use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::AckFrame};
 use crate::{
     error::Result,
     packet::{frame::Frame, sack::decode_sack_ranges},
@@ -112,20 +112,7 @@ impl AckProcessor {
     }
 }
 
-// 为了向后兼容，保留旧接口实现
-// Keep old interface implementation for backward compatibility
-impl<S: AsyncUdpSocket> FrameProcessor<S> for AckProcessor {
-    fn process_frame(
-        endpoint: &mut Endpoint<S>,
-        frame: Frame,
-        src_addr: SocketAddr,
-        now: Instant,
-    ) -> impl std::future::Future<Output = Result<()>> + Send {
-        async move {
-            Self::process_ack_frame_internal(endpoint, frame, src_addr, now).await
-        }
-    }
-}
+
 
 // 统一接口实现
 // Unified interface implementation
@@ -151,15 +138,7 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for AckProcessor {
     }
 }
 
-impl FrameProcessorStatic for AckProcessor {
-    fn can_handle(frame: &Frame) -> bool {
-        matches!(frame, Frame::Ack { .. })
-    }
 
-    fn name() -> &'static str {
-        "AckProcessor"
-    }
-}
 
 impl AckProcessor {
     /// 处理 ACK 帧的通用逻辑
@@ -312,6 +291,7 @@ mod tests {
     use crate::packet::header::ShortHeader;
     use crate::packet::command::Command;
     use bytes::Bytes;
+    use crate::core::test_utils::MockUdpSocket;
 
     #[test]
     fn test_ack_processor_can_handle() {
@@ -328,7 +308,7 @@ mod tests {
             payload: Bytes::new(),
         };
 
-        assert!(<AckProcessor as FrameProcessorStatic>::can_handle(&ack_frame));
+        assert!(<AckProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&ack_frame));
 
         let push_frame = Frame::Push {
             header: ShortHeader {
@@ -343,11 +323,11 @@ mod tests {
             payload: Bytes::from("test data"),
         };
 
-        assert!(!<AckProcessor as FrameProcessorStatic>::can_handle(&push_frame));
+        assert!(!<AckProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame));
     }
 
     #[test]
     fn test_processor_name() {
-        assert_eq!(<AckProcessor as FrameProcessorStatic>::name(), "AckProcessor");
+        assert_eq!(<AckProcessor as UnifiedFrameProcessor<MockUdpSocket>>::name(), "AckProcessor");
     }
 }

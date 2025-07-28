@@ -226,32 +226,7 @@ pub trait UnifiedFrameProcessor<S: AsyncUdpSocket> {
     }
 }
 
-/// 旧版本兼容性：帧处理器特征，定义了所有帧处理器的通用接口
-/// Legacy compatibility: Frame processor trait that defines the common interface for all frame processors
-#[deprecated(note = "Use UnifiedFrameProcessor instead")]
-pub trait FrameProcessor<S: AsyncUdpSocket> {
-    /// 处理特定类型的帧
-    /// Process a specific type of frame
-    fn process_frame(
-        endpoint: &mut Endpoint<S>,
-        frame: Frame,
-        src_addr: SocketAddr,
-        now: Instant,
-    ) -> impl std::future::Future<Output = Result<()>> + Send;
-}
 
-/// 旧版本兼容性：帧处理器静态方法特征，用于不依赖泛型参数的方法
-/// Legacy compatibility: Frame processor static methods trait for methods that don't depend on generic parameters
-#[deprecated(note = "Use UnifiedFrameProcessor instead")]
-pub trait FrameProcessorStatic {
-    /// 检查该处理器是否可以处理给定的帧类型
-    /// Check if this processor can handle the given frame type
-    fn can_handle(frame: &Frame) -> bool;
-
-    /// 获取处理器的名称，用于日志记录
-    /// Get the processor name for logging
-    fn name() -> &'static str;
-}
 
 /// 动态帧处理器注册表
 /// Dynamic frame processor registry
@@ -467,9 +442,12 @@ mod tests {
             payload: Bytes::from("test data"),
         };
         
-        assert!(<PushProcessor as FrameProcessorStatic>::can_handle(&push_frame));
-        assert!(!<AckProcessor as FrameProcessorStatic>::can_handle(&push_frame));
-        assert!(!<ConnectionProcessor as FrameProcessorStatic>::can_handle(&push_frame));
-        assert!(!<PathProcessor as FrameProcessorStatic>::can_handle(&push_frame));
+        // 注意：这里使用一个占位符类型来满足泛型约束
+        // Note: Using a placeholder type to satisfy generic constraints
+        use crate::core::test_utils::MockUdpSocket;
+        assert!(<PushProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame));
+        assert!(!<AckProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame));
+        assert!(!<ConnectionProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame));
+        assert!(!<PathProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame));
     }
 }
