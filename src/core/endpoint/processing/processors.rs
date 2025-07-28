@@ -404,6 +404,155 @@ impl<S: AsyncUdpSocket> Default for FrameProcessorRegistry<S> {
     }
 }
 
+/// 🚀 高性能静态分发帧处理器 - 零开销抽象
+/// High-performance static dispatch frame processor - Zero-cost abstraction
+/// 
+/// 这个设计使用枚举+match模式替代dyn trait对象，实现：
+/// 1. 零虚函数调用开销 - 编译器可以内联所有调用
+/// 2. 零堆分配 - 所有处理器都是栈上的零大小类型
+/// 3. 缓存友好 - 消除间接调用，改善分支预测
+/// 4. 编译时优化 - 编译器可以进行更激进的优化
+///
+/// This design uses enum+match pattern instead of dyn trait objects to achieve:
+/// 1. Zero virtual function call overhead - compiler can inline all calls
+/// 2. Zero heap allocation - all processors are zero-sized stack types  
+/// 3. Cache-friendly - eliminates indirect calls, improves branch prediction
+/// 4. Compile-time optimization - enables more aggressive compiler optimizations
+#[derive(Debug, Clone, Copy)]
+pub enum ProcessorType {
+    Push,
+    Ack, 
+    Connection,
+    Path,
+    Ping,
+}
+
+impl ProcessorType {
+    /// 快速帧类型识别 - O(1)常量时间
+    /// Fast frame type recognition - O(1) constant time
+    #[inline]
+    pub fn from_frame(frame: &Frame) -> Option<Self> {
+        match frame {
+            Frame::Push { .. } => Some(ProcessorType::Push),
+            Frame::Ack { .. } => Some(ProcessorType::Ack),
+            Frame::Syn { .. } | Frame::SynAck { .. } | Frame::Fin { .. } => Some(ProcessorType::Connection),
+            Frame::PathChallenge { .. } | Frame::PathResponse { .. } => Some(ProcessorType::Path),
+            Frame::Ping { .. } => Some(ProcessorType::Ping),
+        }
+    }
+    
+    /// 获取处理器名称
+    /// Get processor name
+    #[inline]
+    pub fn name(self) -> &'static str {
+        match self {
+            ProcessorType::Push => "PushProcessor",
+            ProcessorType::Ack => "AckProcessor", 
+            ProcessorType::Connection => "ConnectionProcessor",
+            ProcessorType::Path => "PathProcessor",
+            ProcessorType::Ping => "PingProcessor",
+        }
+    }
+}
+
+/// 🚀 零开销帧处理器注册表
+/// Zero-cost frame processor registry
+pub struct StaticFrameProcessorRegistry;
+
+impl StaticFrameProcessorRegistry {
+    /// 高性能帧路由 - 静态分发，零虚函数调用开销
+    /// High-performance frame routing - static dispatch, zero virtual call overhead
+    #[inline]
+    pub async fn route_frame<S: AsyncUdpSocket>(
+        endpoint: &mut dyn ProcessorOperations,
+        frame: Frame,
+        src_addr: SocketAddr,
+        now: Instant,
+    ) -> Result<()> {
+        // 更新最后接收时间 - 在所有处理器之前
+        // Update last receive time - before all processors
+        endpoint.update_last_recv_time(now);
+
+        // 检查路径迁移 - 在所有处理器之前
+        // Check for path migration - before all processors  
+        endpoint.check_for_path_migration(src_addr).await?;
+
+        // 🚀 静态分发 - 编译器可以内联所有调用
+        // Static dispatch - compiler can inline all calls
+        match ProcessorType::from_frame(&frame) {
+            Some(ProcessorType::Push) => {
+                tracing::trace!(
+                    processor_name = "PushProcessor",
+                    frame_type = ?frame,
+                    "Routing frame to processor (static dispatch)"
+                );
+                <PushProcessor as UnifiedFrameProcessor<S>>::process_frame(endpoint, frame, src_addr, now).await
+            }
+            Some(ProcessorType::Ack) => {
+                tracing::trace!(
+                    processor_name = "AckProcessor", 
+                    frame_type = ?frame,
+                    "Routing frame to processor (static dispatch)"
+                );
+                <AckProcessor as UnifiedFrameProcessor<S>>::process_frame(endpoint, frame, src_addr, now).await
+            }
+            Some(ProcessorType::Connection) => {
+                tracing::trace!(
+                    processor_name = "ConnectionProcessor",
+                    frame_type = ?frame, 
+                    "Routing frame to processor (static dispatch)"
+                );
+                <ConnectionProcessor as UnifiedFrameProcessor<S>>::process_frame(endpoint, frame, src_addr, now).await
+            }
+            Some(ProcessorType::Path) => {
+                tracing::trace!(
+                    processor_name = "PathProcessor",
+                    frame_type = ?frame,
+                    "Routing frame to processor (static dispatch)"
+                );
+                <PathProcessor as UnifiedFrameProcessor<S>>::process_frame(endpoint, frame, src_addr, now).await
+            }
+            Some(ProcessorType::Ping) => {
+                tracing::trace!(
+                    processor_name = "PingProcessor", 
+                    frame_type = ?frame,
+                    "Routing frame to processor (static dispatch)"
+                );
+                // PING 帧处理逻辑 - 保持原有行为
+                // PING frame handling logic - maintain original behavior
+                tracing::trace!(
+                    cid = endpoint.local_cid(),
+                    "Received PING frame, no action needed"
+                );
+                Ok(())
+            }
+            None => {
+                // 未知帧类型
+                // Unknown frame type
+                let error_context = crate::error::ProcessorErrorContext::new(
+                    "StaticFrameProcessorRegistry",
+                    endpoint.local_cid(),
+                    src_addr,
+                    format!("{:?}", endpoint.current_state()),
+                    now,
+                );
+                Err(crate::error::Error::FrameTypeMismatch {
+                    expected: "supported frame type".to_string(),
+                    actual: format!("{:?}", std::mem::discriminant(&frame)),
+                    context: error_context,
+                })
+            }
+        }
+    }
+    
+    /// 性能基准测试辅助方法
+    /// Performance benchmarking helper method
+    #[inline]
+    pub fn processor_type_for_frame(frame: &Frame) -> Option<ProcessorType> {
+        ProcessorType::from_frame(frame)
+    }
+}
+
 /// 帧处理上下文，包含处理帧时需要的通用信息
 /// Frame processing context containing common information needed when processing frames
 pub struct FrameProcessingContext {
