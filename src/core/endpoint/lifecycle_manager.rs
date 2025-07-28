@@ -41,7 +41,20 @@ pub enum LifecycleEvent {
     /// 路径验证完成
     /// Path validation completed
     PathValidationCompleted { success: bool },
+    /// 状态转换事件
+    /// State transition event
+    StateTransition { from: String, to: String },
+    /// 连接超时
+    /// Connection timeout
+    ConnectionTimeout,
+    /// 强制关闭
+    /// Force close
+    ForceClose,
 }
+
+/// 事件监听器类型定义
+/// Event listener type definition
+pub type EventListener = Box<dyn Fn(&LifecycleEvent) + Send + Sync>;
 
 /// 生命周期管理器的接口
 /// Interface for lifecycle manager
@@ -90,11 +103,18 @@ pub trait ConnectionLifecycleManager {
     /// 完成路径验证
     /// Complete path validation
     fn complete_path_validation(&mut self, success: bool) -> Result<()>;
+
+    /// 注册事件监听器
+    /// Register event listener
+    fn register_event_listener(&mut self, listener: EventListener);
+
+    /// 移除所有事件监听器
+    /// Remove all event listeners
+    fn clear_event_listeners(&mut self);
 }
 
 /// 默认的生命周期管理器实现
 /// Default lifecycle manager implementation
-#[derive(Debug)]
 pub struct DefaultLifecycleManager {
     /// 当前连接状态
     /// Current connection state
@@ -111,6 +131,22 @@ pub struct DefaultLifecycleManager {
     /// 连接开始时间
     /// Connection start time
     start_time: Instant,
+    /// 事件监听器列表
+    /// List of event listeners
+    event_listeners: Vec<EventListener>,
+}
+
+impl std::fmt::Debug for DefaultLifecycleManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DefaultLifecycleManager")
+            .field("current_state", &self.current_state)
+            .field("cid", &self.cid)
+            .field("remote_addr", &self.remote_addr)
+            .field("config", &self.config)
+            .field("start_time", &self.start_time)
+            .field("event_listeners_count", &self.event_listeners.len())
+            .finish()
+    }
 }
 
 impl DefaultLifecycleManager {
@@ -123,6 +159,7 @@ impl DefaultLifecycleManager {
             remote_addr: None,
             config,
             start_time: Instant::now(),
+            event_listeners: Vec::new(),
         }
     }
 
@@ -134,8 +171,12 @@ impl DefaultLifecycleManager {
             ?event,
             "Lifecycle event triggered"
         );
-        // 这里可以添加事件回调机制
-        // Event callback mechanism can be added here
+        
+        // 通知所有注册的监听器
+        // Notify all registered listeners
+        for listener in &self.event_listeners {
+            listener(&event);
+        }
     }
 
     /// 验证状态转换是否合法
@@ -196,10 +237,11 @@ impl ConnectionLifecycleManager for DefaultLifecycleManager {
         self.remote_addr = Some(remote_addr);
         self.start_time = Instant::now();
         
-        self.trigger_event(LifecycleEvent::ConnectionInitialized {
+        let event = LifecycleEvent::ConnectionInitialized {
             local_cid,
             remote_addr,
-        });
+        };
+        self.trigger_event(event);
         
         info!(
             cid = local_cid,
@@ -242,6 +284,16 @@ impl ConnectionLifecycleManager for DefaultLifecycleManager {
                     let _ = notifier.send(Err(error));
                 }
             }
+        }
+        
+        // 触发状态转换事件
+        // Trigger state transition event
+        if old_state != new_state_discriminant {
+            let from_state = self.state_name();
+            self.trigger_event(LifecycleEvent::StateTransition {
+                from: from_state.to_string(),
+                to: Self::state_name_for(&new_state).to_string(),
+            });
         }
         
         self.current_state = new_state;
@@ -338,6 +390,7 @@ impl ConnectionLifecycleManager for DefaultLifecycleManager {
     }
 
     fn force_close(&mut self) -> Result<()> {
+        self.trigger_event(LifecycleEvent::ForceClose);
         self.transition_to(ConnectionState::Closed)
     }
 
@@ -370,6 +423,14 @@ impl ConnectionLifecycleManager for DefaultLifecycleManager {
         } else {
             Err(Error::InvalidPacket)
         }
+    }
+
+    fn register_event_listener(&mut self, listener: EventListener) {
+        self.event_listeners.push(listener);
+    }
+
+    fn clear_event_listeners(&mut self) {
+        self.event_listeners.clear();
     }
 }
 
@@ -413,7 +474,13 @@ impl DefaultLifecycleManager {
     /// 获取当前状态的字符串表示（用于日志）
     /// Gets string representation of current state (for logging)
     pub fn state_name(&self) -> &'static str {
-        match &self.current_state {
+        Self::state_name_for(&self.current_state)
+    }
+
+    /// 获取指定状态的字符串表示（静态方法）
+    /// Gets string representation of specified state (static method)
+    fn state_name_for(state: &ConnectionState) -> &'static str {
+        match state {
             ConnectionState::Connecting => "Connecting",
             ConnectionState::SynReceived => "SynReceived", 
             ConnectionState::Established => "Established",
@@ -424,12 +491,19 @@ impl DefaultLifecycleManager {
             ConnectionState::Closed => "Closed",
         }
     }
+
+    /// 触发超时事件
+    /// Trigger timeout event
+    pub fn trigger_timeout(&self) {
+        self.trigger_event(LifecycleEvent::ConnectionTimeout);
+    }
 } 
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::{Arc, Mutex};
 
     fn create_test_config() -> Config {
         Config::default()
@@ -592,5 +666,61 @@ mod tests {
         // 完成路径验证（成功）
         assert!(manager.complete_path_validation(true).is_ok());
         assert_eq!(manager.state_name(), "Established");
+    }
+
+    #[test]
+    fn test_event_callbacks() {
+        let config = create_test_config();
+        let mut manager = DefaultLifecycleManager::new(ConnectionState::Connecting, config);
+        let addr = create_test_address();
+
+        // 创建事件收集器
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+
+        // 注册事件监听器
+        manager.register_event_listener(Box::new(move |event| {
+            events_clone.lock().unwrap().push(event.clone());
+        }));
+
+        // 初始化应该触发事件
+        manager.initialize(12345, addr).unwrap();
+
+        // 状态转换应该触发事件
+        manager.transition_to(ConnectionState::Established).unwrap();
+        manager.transition_to(ConnectionState::Closing).unwrap();
+
+        // 强制关闭应该触发事件
+        manager.force_close().unwrap();
+
+        // 检查收集到的事件
+        let captured_events = events.lock().unwrap();
+        assert!(!captured_events.is_empty());
+        
+        // 应该包含初始化事件
+        assert!(captured_events.iter().any(|e| matches!(e, LifecycleEvent::ConnectionInitialized { .. })));
+        
+        // 应该包含状态转换事件
+        assert!(captured_events.iter().any(|e| matches!(e, LifecycleEvent::StateTransition { .. })));
+        
+        // 应该包含强制关闭事件
+        assert!(captured_events.iter().any(|e| matches!(e, LifecycleEvent::ForceClose)));
+        
+        // 应该包含连接关闭事件
+        assert!(captured_events.iter().any(|e| matches!(e, LifecycleEvent::ConnectionClosed)));
+    }
+
+    #[test]
+    fn test_clear_event_listeners() {
+        let config = create_test_config();
+        let mut manager = DefaultLifecycleManager::new(ConnectionState::Connecting, config);
+
+        // 注册监听器
+        manager.register_event_listener(Box::new(|_| {}));
+        assert_eq!(manager.event_listeners.len(), 1);
+
+        // 清除监听器
+        manager.clear_event_listeners();
+        assert_eq!(manager.event_listeners.len(), 0);
     }
 } 
