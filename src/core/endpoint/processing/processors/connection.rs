@@ -19,7 +19,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 
 use crate::core::endpoint::Endpoint;
-use crate::core::endpoint::lifecycle::manager::ConnectionLifecycleManager;
+use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
 use crate::core::endpoint::types::state::ConnectionState;
 
 /// 连接管理帧处理器

@@ -13,7 +13,7 @@ mod tests;
 
 pub use types::command::StreamCommand;
 
-use lifecycle::manager::{ConnectionLifecycleManager, DefaultLifecycleManager};
+use lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::{
     config::Config,
     core::reliability::ReliabilityLayer,

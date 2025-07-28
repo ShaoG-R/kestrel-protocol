@@ -27,7 +27,7 @@ use crate::{
 };
 use std::net::SocketAddr;
 use tokio::time::Instant;
-use crate::core::endpoint::lifecycle::manager::ConnectionLifecycleManager;
+use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
 use crate::core::endpoint::types::state::ConnectionState;
 use crate::core::endpoint::Endpoint;
 

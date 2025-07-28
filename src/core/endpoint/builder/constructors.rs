@@ -13,7 +13,7 @@ use tokio::{
     sync::mpsc,
     time::Instant,
 };
-use crate::core::endpoint::lifecycle::manager::{ConnectionLifecycleManager, DefaultLifecycleManager};
+use crate::core::endpoint::lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::core::endpoint::types::state::ConnectionState;
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
