@@ -202,7 +202,7 @@ impl AckProcessor {
                 retx_count = frames_to_retx.len(),
                 "Fast retransmitting frames based on SACK"
             );
-            endpoint.send_frames(frames_to_retx).await?;
+            endpoint.send_frame_list(frames_to_retx).await?;
         }
 
         Ok(())

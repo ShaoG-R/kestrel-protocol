@@ -356,7 +356,7 @@ impl<S: AsyncUdpSocket> FrameProcessorRegistry<S> {
 
         // 检查路径迁移
         // Check for path migration
-        endpoint.check_path_migration(src_addr).await?;
+        endpoint.check_for_path_migration(src_addr).await?;
 
         // 特殊处理 PING 帧（保持原有逻辑）
         // Special handling for PING frames (maintain original logic)

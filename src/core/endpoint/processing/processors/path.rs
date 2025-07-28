@@ -235,7 +235,7 @@ impl PathProcessor {
 
         // 响应必须发送回质询来源的地址
         // The response MUST be sent back to the address the challenge came from
-        endpoint.send_frame_to(response_frame, src_addr).await?;
+        endpoint.send_frame_to_addr(response_frame, src_addr).await?;
 
         Ok(())
     }

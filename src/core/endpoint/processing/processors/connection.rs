@@ -155,7 +155,7 @@ impl ConnectionProcessor {
                 // If we have already been triggered to send a SYN-ACK (i.e., data is in the
                 // send buffer), we can resend it.
                 if !endpoint.reliability().is_send_buffer_empty() {
-                    endpoint.send_syn_ack().await?;
+                    endpoint.send_syn_ack_frame().await?;
                 }
                 Ok(())
             }
@@ -196,9 +196,9 @@ impl ConnectionProcessor {
                 // Acknowledge the SYN-ACK, potentially with piggybacked data if the
                 // user has already called write()
                 if !endpoint.reliability().is_send_buffer_empty() {
-                    endpoint.packetize_and_send().await?;
+                    endpoint.packetize_and_send_data().await?;
                 } else {
-                    endpoint.send_standalone_ack().await?;
+                    endpoint.send_standalone_ack_frame().await?;
                 }
                 
                 info!(
@@ -277,7 +277,7 @@ impl ConnectionProcessor {
         // Handle FIN even in SynReceived state - this can happen with 0-RTT
         // where client sends data and immediately closes
         if endpoint.reliability_mut().receive_fin(header.sequence_number) {
-            endpoint.send_standalone_ack().await?;
+            endpoint.send_standalone_ack_frame().await?;
             // 在0-RTT场景中，从SynReceived状态转换到FinWait - 使用生命周期管理器
             // In 0-RTT scenario, transition from SynReceived to FinWait - using lifecycle manager
             let _ = endpoint.transition_state(ConnectionState::FinWait);
@@ -304,7 +304,7 @@ impl ConnectionProcessor {
         // The state transition to FinWait is driven by the `reassemble`
         // method in the main loop, which is the single source of truth.
         if endpoint.reliability_mut().receive_fin(header.sequence_number) {
-            endpoint.send_standalone_ack().await?;
+            endpoint.send_standalone_ack_frame().await?;
         }
         Ok(())
     }
@@ -322,7 +322,7 @@ impl ConnectionProcessor {
         );
 
         if endpoint.reliability_mut().receive_fin(header.sequence_number) {
-            endpoint.send_standalone_ack().await?;
+            endpoint.send_standalone_ack_frame().await?;
             // 路径验证期间收到FIN，转换到FinWait - 使用生命周期管理器
             // Received FIN during path validation, transition to FinWait - using lifecycle manager
             let _ = endpoint.transition_state(ConnectionState::FinWait);
@@ -349,7 +349,7 @@ impl ConnectionProcessor {
         // Do NOT change state here. The state should only transition to `Closing`
         // when the local application calls `shutdown()`.
         if endpoint.reliability_mut().receive_fin(header.sequence_number) {
-            endpoint.send_standalone_ack().await?;
+            endpoint.send_standalone_ack_frame().await?;
         }
         Ok(())
     }
@@ -367,7 +367,7 @@ impl ConnectionProcessor {
         );
 
         if endpoint.reliability_mut().receive_fin(header.sequence_number) {
-            endpoint.send_standalone_ack().await?;
+            endpoint.send_standalone_ack_frame().await?;
             // 基于当前状态决定FIN后的状态转换 - 使用生命周期管理器
             // Determine FIN transition based on current state - using lifecycle manager
             match endpoint.current_state() {

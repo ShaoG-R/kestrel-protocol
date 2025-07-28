@@ -30,19 +30,19 @@ impl<S: AsyncUdpSocket> EndpointOperations for Endpoint<S> {
     // ========== 基础信息获取 (Basic Information Access) ==========
     
     fn local_cid(&self) -> u32 {
-        self.local_cid()
+        self.local_cid
     }
     
     fn peer_cid(&self) -> u32 {
-        self.peer_cid()
+        self.peer_cid
     }
     
     fn remote_addr(&self) -> SocketAddr {
-        self.remote_addr()
+        self.remote_addr
     }
     
     fn start_time(&self) -> Instant {
-        self.start_time()
+        self.start_time
     }
     
     fn peer_recv_window(&self) -> u32 {
@@ -60,29 +60,30 @@ impl<S: AsyncUdpSocket> EndpointOperations for Endpoint<S> {
     }
     
     fn transition_state(&mut self, new_state: ConnectionState) -> Result<()> {
-        self.transition_state(new_state)
+        self.lifecycle_manager_mut().transition_to(new_state)?;
+        Ok(())
     }
     
     fn set_peer_cid(&mut self, peer_cid: u32) {
-        self.set_peer_cid(peer_cid);
+        self.peer_cid = peer_cid;
     }
     
     fn set_remote_addr(&mut self, addr: SocketAddr) {
-        self.set_remote_addr(addr);
+        self.remote_addr = addr;
     }
     
     fn complete_path_validation(&mut self, success: bool) -> Result<()> {
-        self.complete_path_validation(success)
+        self.lifecycle_manager_mut().complete_path_validation(success)
     }
 
     // ========== 可靠性层操作 (Reliability Layer Operations) ==========
     
     fn reliability(&self) -> &ReliabilityLayer {
-        self.reliability()
+        &self.reliability
     }
     
     fn reliability_mut(&mut self) -> &mut ReliabilityLayer {
-        self.reliability_mut()
+        &mut self.reliability
     }
     
     fn is_send_buffer_empty(&self) -> bool {
@@ -91,41 +92,41 @@ impl<S: AsyncUdpSocket> EndpointOperations for Endpoint<S> {
 
     // ========== 帧发送操作 (Frame Sending Operations) ==========
     
-    async fn send_syn_ack(&mut self) -> Result<()> {
+    async fn send_syn_ack_frame(&mut self) -> Result<()> {
         self.send_syn_ack().await
     }
     
-    async fn send_standalone_ack(&mut self) -> Result<()> {
+    async fn send_standalone_ack_frame(&mut self) -> Result<()> {
         self.send_standalone_ack().await
     }
     
-    async fn packetize_and_send(&mut self) -> Result<()> {
+    async fn packetize_and_send_data(&mut self) -> Result<()> {
         self.packetize_and_send().await
     }
     
-    async fn send_frames(&mut self, frames: Vec<Frame>) -> Result<()> {
+    async fn send_frame_list(&mut self, frames: Vec<Frame>) -> Result<()> {
         self.send_frames(frames).await
     }
     
-    async fn send_frame_to(&mut self, frame: Frame, addr: SocketAddr) -> Result<()> {
+    async fn send_frame_to_addr(&mut self, frame: Frame, addr: SocketAddr) -> Result<()> {
         self.send_frame_to(frame, addr).await
     }
 
     // ========== 通信管道操作 (Communication Channel Operations) ==========
     
     fn command_tx(&self) -> &mpsc::Sender<SocketActorCommand> {
-        self.command_tx()
+        &self.command_tx
     }
 
     // ========== 时间管理 (Time Management) ==========
     
     fn update_last_recv_time(&mut self, now: Instant) {
-        self.update_last_recv_time(now);
+        self.last_recv_time = now;
     }
 
     // ========== 路径迁移操作 (Path Migration Operations) ==========
     
-    async fn check_path_migration(&mut self, src_addr: SocketAddr) -> Result<()> {
+    async fn check_for_path_migration(&mut self, src_addr: SocketAddr) -> Result<()> {
         self.check_path_migration(src_addr).await
     }
 }

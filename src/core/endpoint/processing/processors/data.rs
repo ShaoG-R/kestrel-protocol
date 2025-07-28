@@ -232,7 +232,7 @@ impl PushProcessor {
         // 接收数据并检查是否需要立即发送 ACK
         // Receive data and check if immediate ACK is needed
         if endpoint.reliability_mut().receive_push(header.sequence_number, payload) {
-            endpoint.send_standalone_ack().await?;
+            endpoint.send_standalone_ack_frame().await?;
         }
         
         Ok(())
@@ -254,7 +254,7 @@ impl PushProcessor {
         // 在路径验证期间继续处理数据帧
         // Continue processing data frames during path validation
         if endpoint.reliability_mut().receive_push(header.sequence_number, payload) {
-            endpoint.send_standalone_ack().await?;
+            endpoint.send_standalone_ack_frame().await?;
         }
         
         Ok(())
@@ -276,7 +276,7 @@ impl PushProcessor {
         // 即使在 FinWait 状态下也要处理数据，因为对端可能还在发送数据
         // Process data even in FinWait state as peer might still be sending data
         if endpoint.reliability_mut().receive_push(header.sequence_number, payload) {
-            endpoint.send_standalone_ack().await?;
+            endpoint.send_standalone_ack_frame().await?;
         }
         
         Ok(())
@@ -299,7 +299,7 @@ impl PushProcessor {
         // It's possible to receive data during closing as the peer might have
         // sent it before receiving our FIN
         if endpoint.reliability_mut().receive_push(header.sequence_number, payload) {
-            endpoint.send_standalone_ack().await?;
+            endpoint.send_standalone_ack_frame().await?;
         }
         
         Ok(())

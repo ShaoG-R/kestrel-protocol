@@ -103,23 +103,23 @@ pub trait EndpointOperations: Send {
     
     /// 发送SYN-ACK帧
     /// Send SYN-ACK frame
-    async fn send_syn_ack(&mut self) -> Result<()>;
+    async fn send_syn_ack_frame(&mut self) -> Result<()>;
     
     /// 发送独立的ACK帧
     /// Send standalone ACK frame
-    async fn send_standalone_ack(&mut self) -> Result<()>;
+    async fn send_standalone_ack_frame(&mut self) -> Result<()>;
     
     /// 打包并发送数据
     /// Packetize and send data
-    async fn packetize_and_send(&mut self) -> Result<()>;
+    async fn packetize_and_send_data(&mut self) -> Result<()>;
     
     /// 发送多个帧
     /// Send multiple frames
-    async fn send_frames(&mut self, frames: Vec<Frame>) -> Result<()>;
+    async fn send_frame_list(&mut self, frames: Vec<Frame>) -> Result<()>;
     
     /// 发送帧到指定地址
     /// Send frame to specific address
-    async fn send_frame_to(&mut self, frame: Frame, addr: SocketAddr) -> Result<()>;
+    async fn send_frame_to_addr(&mut self, frame: Frame, addr: SocketAddr) -> Result<()>;
 
     // ========== 通信管道操作 (Communication Channel Operations) ==========
     
@@ -137,7 +137,7 @@ pub trait EndpointOperations: Send {
     
     /// 检查路径迁移
     /// Check for path migration
-    async fn check_path_migration(&mut self, src_addr: SocketAddr) -> Result<()>;
+    async fn check_for_path_migration(&mut self, src_addr: SocketAddr) -> Result<()>;
 }
 
 /// 为处理器提供的简化操作接口
@@ -280,17 +280,17 @@ mod tests {
         fn reliability_mut(&mut self) -> &mut ReliabilityLayer { &mut self.reliability }
         fn is_send_buffer_empty(&self) -> bool { true }
         
-        async fn send_syn_ack(&mut self) -> Result<()> { Ok(()) }
-        async fn send_standalone_ack(&mut self) -> Result<()> { Ok(()) }
-        async fn packetize_and_send(&mut self) -> Result<()> { Ok(()) }
-        async fn send_frames(&mut self, frames: Vec<Frame>) -> Result<()> {
+        async fn send_syn_ack_frame(&mut self) -> Result<()> { Ok(()) }
+        async fn send_standalone_ack_frame(&mut self) -> Result<()> { Ok(()) }
+        async fn packetize_and_send_data(&mut self) -> Result<()> { Ok(()) }
+        async fn send_frame_list(&mut self, frames: Vec<Frame>) -> Result<()> {
             let mut sent = self.sent_frames.lock().await;
             for frame in frames {
                 sent.push_back(frame);
             }
             Ok(())
         }
-        async fn send_frame_to(&mut self, frame: Frame, _addr: SocketAddr) -> Result<()> {
+        async fn send_frame_to_addr(&mut self, frame: Frame, _addr: SocketAddr) -> Result<()> {
             let mut sent = self.sent_frames.lock().await;
             sent.push_back(frame);
             Ok(())
@@ -298,7 +298,7 @@ mod tests {
         
         fn command_tx(&self) -> &mpsc::Sender<SocketActorCommand> { &self.command_tx }
         fn update_last_recv_time(&mut self, _now: Instant) {}
-        async fn check_path_migration(&mut self, _src_addr: SocketAddr) -> Result<()> { Ok(()) }
+        async fn check_for_path_migration(&mut self, _src_addr: SocketAddr) -> Result<()> { Ok(()) }
     }
 
     #[tokio::test]
