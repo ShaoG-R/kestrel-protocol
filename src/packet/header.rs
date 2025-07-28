@@ -68,6 +68,10 @@ impl ShortHeader {
     }
 }
 
+impl ShortHeader {
+    pub const ENCODED_SIZE: usize = 4 + 2 + 4 + 4 + 4; // connection_id + recv_window_size + timestamp + sequence_number + recv_next_sequence
+}
+
 pub const LONG_HEADER_SIZE: usize = 10; // command(1) + version(1) + dcid(4) + scid(4)
 
 /// The long header, used for connection management packets.
@@ -115,4 +119,8 @@ impl LongHeader {
             source_cid: buf.get_u32(),
         })
     }
+}
+
+impl LongHeader {
+    pub const ENCODED_SIZE: usize = 1 + 1 + 4 + 4; // command + version + dest_cid + source_cid
 }

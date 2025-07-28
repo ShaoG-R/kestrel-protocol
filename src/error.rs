@@ -27,8 +27,16 @@ pub enum Error {
     #[error("Connection closed by peer")]
     ConnectionClosed,
 
-    /// An attempt was made to use a connection that was already closed or is in the process of closing.
-    /// 尝试使用一个已经关闭或正在关闭的连接。
+    /// The initial data provided for a 0-RTT connection attempt exceeds the
+    /// maximum packet size and cannot be sent in a single datagram.
+    ///
+    /// 为0-RTT连接尝试提供的初始数据超出了最大包大小，无法在单个数据报中发送。
+    #[error("Initial 0-RTT data is too large to fit into a single packet")]
+    InitialDataTooLarge,
+
+    /// The remote endpoint is not reachable.
+    ///
+    /// 远端端点不可达。
     #[error("Connection is closed or closing")]
     ConnectionAborted,
 
@@ -76,6 +84,7 @@ impl From<Error> for std::io::Error {
             Error::ChannelClosed => ErrorKind::BrokenPipe.into(),
             Error::MessageTooLarge => ErrorKind::InvalidInput.into(),
             Error::NotConnected => ErrorKind::NotConnected.into(),
+            Error::InitialDataTooLarge => ErrorKind::InvalidInput.into(),
         }
     }
 }

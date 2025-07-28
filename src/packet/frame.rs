@@ -481,4 +481,41 @@ impl Frame {
             }
         }
     }
+
+    /// The wire format of a frame.
+    ///
+    /// 帧的有线格式。
+    pub fn command(&self) -> command::Command {
+        match self {
+            Frame::Syn { .. } => command::Command::Syn,
+            Frame::SynAck { .. } => command::Command::SynAck,
+            Frame::Fin { .. } => command::Command::Fin,
+            Frame::Push { .. } => command::Command::Push,
+            Frame::Ack { .. } => command::Command::Ack,
+            Frame::Ping { .. } => command::Command::Ping,
+            Frame::PathChallenge { .. } => command::Command::PathChallenge,
+            Frame::PathResponse { .. } => command::Command::PathResponse,
+        }
+    }
+
+    /// Calculates the encoded size of the frame.
+    ///
+    /// 计算帧编码后的大小。
+    pub fn encoded_size(&self) -> usize {
+        let command_size = 1;
+        let header_size = match self {
+            Frame::Syn { .. } => LongHeader::ENCODED_SIZE,
+            Frame::SynAck { .. } => LongHeader::ENCODED_SIZE,
+            _ => ShortHeader::ENCODED_SIZE,
+        };
+        let payload_size = match self {
+            Frame::Push { payload, .. } => payload.len(),
+            Frame::Ack { payload, .. } => payload.len(),
+            Frame::PathChallenge { .. } => 8, // 64-bit challenge data
+            Frame::PathResponse { .. } => 8, // 64-bit challenge data
+            Frame::Ping { .. } => 0,
+            _ => 0,
+        };
+        command_size + header_size + payload_size
+    }
 } 

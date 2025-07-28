@@ -27,6 +27,9 @@ pub struct Config {
     /// The number of ACK-eliciting packets to receive before sending an immediate ACK.
     /// 在发送即时ACK之前要接收的触发ACK的包的数量。
     pub ack_threshold: u16,
+    /// The maximum size for a single UDP datagram. This is the effective MTU for the protocol.
+    /// 单个UDP数据报的最大大小。这是协议的有效MTU。
+    pub max_packet_size: usize,
     /// The initial congestion window size in packets.
     /// 初始拥塞窗口大小（以包为单位）。
     pub initial_cwnd_packets: u32,
@@ -106,6 +109,7 @@ impl Default for Config {
             fast_retx_threshold: 3,
             max_payload_size: 1200,
             ack_threshold: 2,
+            max_packet_size: 1350, // A safe default MTU, leaves room for IP/UDP headers
             initial_cwnd_packets: 32,
             min_cwnd_packets: 4,
             initial_ssthresh: u32::MAX,
