@@ -11,7 +11,7 @@ use super::traits::ProcessorOperations;
 use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::trace;
-use crate::core::endpoint::processing::processors::FrameProcessorRegistry;
+use crate::core::endpoint::processing::processors::StaticFrameProcessorRegistry;
 use crate::core::endpoint::types::command::StreamCommand;
 
 /// 事件分发器，负责将各种事件路由到正确的处理方法
@@ -28,15 +28,16 @@ impl EventDispatcher {
     ) -> Result<()> {
         trace!(local_cid = endpoint.local_cid(), ?frame, "Processing incoming frame");
         
-        // 使用默认的帧处理器注册表来处理帧
-        // 通过 trait 对象实现解耦
-        // Use default frame processor registry to handle the frame
-        // Achieve decoupling through trait objects
-        let registry = FrameProcessorRegistry::<S>::default();
-        
-        // 将具体的 Endpoint 转换为 trait 对象以实现解耦
-        // Convert concrete Endpoint to trait object to achieve decoupling
-        registry.route_frame(endpoint as &mut dyn ProcessorOperations, frame, src_addr, Instant::now()).await
+        // 🚀 使用高性能静态分发帧处理器 - 零开销抽象
+        // 无需创建对象实例，直接静态分发，编译器可以内联所有调用
+        // Use high-performance static dispatch frame processor - zero-cost abstraction
+        // No object instantiation needed, direct static dispatch, compiler can inline all calls
+        StaticFrameProcessorRegistry::route_frame::<S>(
+            endpoint as &mut dyn ProcessorOperations, 
+            frame, 
+            src_addr, 
+            Instant::now()
+        ).await
     }
 
     /// 分发流命令事件

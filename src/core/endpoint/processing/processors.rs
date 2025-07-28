@@ -233,14 +233,6 @@ pub trait UnifiedFrameProcessor<S: AsyncUdpSocket> {
     }
 }
 
-
-
-/// 动态帧处理器注册表
-/// Dynamic frame processor registry
-pub struct FrameProcessorRegistry<S: AsyncUdpSocket> {
-    processors: Vec<Box<dyn DynamicFrameProcessor<S>>>,
-}
-
 /// 动态帧处理器特征，用于 trait 对象
 /// Dynamic frame processor trait for trait objects
 /// 
@@ -306,101 +298,6 @@ where
         now: Instant,
     ) -> Result<()> {
         P::process_frame(endpoint, frame, src_addr, now).await
-    }
-}
-
-impl<S: AsyncUdpSocket> FrameProcessorRegistry<S> {
-    /// 创建新的处理器注册表
-    /// Create a new processor registry
-    pub fn new() -> Self {
-        Self {
-            processors: Vec::new(),
-        }
-    }
-    
-    /// 注册一个处理器
-    /// Register a processor
-    pub fn register<P>(&mut self, _processor_type: std::marker::PhantomData<P>)
-    where
-        P: UnifiedFrameProcessor<S> + Send + Sync + 'static,
-    {
-        self.processors.push(Box::new(ProcessorAdapter::<P>::new()));
-    }
-    
-    /// 创建默认的处理器注册表，包含所有内置处理器
-    /// Create default processor registry with all built-in processors
-    pub fn default_registry() -> Self {
-        let mut registry = Self::new();
-        registry.register::<PushProcessor>(std::marker::PhantomData);
-        registry.register::<AckProcessor>(std::marker::PhantomData);
-        registry.register::<ConnectionProcessor>(std::marker::PhantomData);
-        registry.register::<PathProcessor>(std::marker::PhantomData);
-        registry
-    }
-    
-    /// 路由帧到合适的处理器
-    /// Route frame to appropriate processor
-    /// 
-    /// 使用 EndpointOperations trait 对象实现解耦
-    /// Uses EndpointOperations trait object to achieve decoupling
-    pub async fn route_frame(
-        &self,
-        endpoint: &mut dyn ProcessorOperations,
-        frame: Frame,
-        src_addr: SocketAddr,
-        now: Instant,
-    ) -> Result<()> {
-        // 更新最后接收时间
-        // Update last receive time
-        endpoint.update_last_recv_time(now);
-
-        // 检查路径迁移
-        // Check for path migration
-        endpoint.check_for_path_migration(src_addr).await?;
-
-        // 特殊处理 PING 帧（保持原有逻辑）
-        // Special handling for PING frames (maintain original logic)
-        if matches!(frame, Frame::Ping { .. }) {
-            tracing::trace!(
-                cid = endpoint.local_cid(),
-                "Received PING frame, no action needed"
-            );
-            return Ok(());
-        }
-
-        // 查找能处理该帧的处理器
-        // Find a processor that can handle this frame
-        for processor in &self.processors {
-            if processor.can_handle(&frame) {
-                tracing::trace!(
-                    processor_name = processor.name(),
-                    frame_type = ?frame,
-                    "Routing frame to processor"
-                );
-                return processor.process_frame(endpoint, frame, src_addr, now).await;
-            }
-        }
-
-        // 没有找到合适的处理器
-        // No suitable processor found
-        let error_context = crate::error::ProcessorErrorContext::new(
-            "FrameProcessorRegistry",
-            endpoint.local_cid(),
-            src_addr,
-            format!("{:?}", endpoint.current_state()),
-            now,
-        );
-        Err(crate::error::Error::FrameTypeMismatch {
-            expected: "supported frame type".to_string(),
-            actual: format!("{:?}", std::mem::discriminant(&frame)),
-            context: error_context,
-        })
-    }
-}
-
-impl<S: AsyncUdpSocket> Default for FrameProcessorRegistry<S> {
-    fn default() -> Self {
-        Self::default_registry()
     }
 }
 
