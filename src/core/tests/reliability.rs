@@ -89,8 +89,8 @@ async fn test_data_flow_with_acks() {
 #[tokio::test]
 async fn test_endpoint_rto_retransmission() {
     let mut client_config = Config::default();
-    client_config.initial_rto = Duration::from_millis(100);
-    client_config.min_rto = Duration::from_millis(100);
+    client_config.reliability.initial_rto = Duration::from_millis(100);
+    client_config.reliability.min_rto = Duration::from_millis(100);
 
     // Filter to drop all ACK packets sent from the server.
     let server_tx_filter = Arc::new(|frame: &Frame| -> bool { !matches!(frame, Frame::Ack { .. }) });

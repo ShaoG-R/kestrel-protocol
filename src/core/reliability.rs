@@ -90,9 +90,9 @@ impl ReliabilityLayer {
     /// 创建一个新的 `ReliabilityLayer`。
     pub fn new(config: Config, congestion_control: Box<dyn CongestionControl>) -> Self {
         Self {
-            send_buffer: SendBuffer::new(config.send_buffer_capacity_bytes),
-            recv_buffer: ReceiveBuffer::new(config.recv_buffer_capacity_packets),
-            rto_estimator: RttEstimator::new(config.initial_rto),
+            send_buffer: SendBuffer::new(config.connection.send_buffer_capacity_bytes),
+            recv_buffer: ReceiveBuffer::new(config.connection.recv_buffer_capacity_packets),
+            rto_estimator: RttEstimator::new(config.reliability.initial_rto),
             congestion_control,
             retransmission_manager: RetransmissionManager::new(config.clone()),
             config,
@@ -127,7 +127,7 @@ impl ReliabilityLayer {
         // 使用从SACK管理的数据包中获得的真实样本来更新RTT和拥塞控制。
         // 简单的重传数据包不参与RTT估算或拥塞控制。
         for rtt_sample in result.rtt_samples {
-            self.rto_estimator.update(rtt_sample, self.config.min_rto);
+            self.rto_estimator.update(rtt_sample, self.config.reliability.min_rto);
             let old_cwnd = self.congestion_control.congestion_window();
             self.congestion_control.on_ack(rtt_sample);
             let new_cwnd = self.congestion_control.congestion_window();
@@ -221,7 +221,7 @@ impl ReliabilityLayer {
             congestion_window: self.congestion_control.congestion_window(),
             in_flight_count: self.retransmission_manager.sack_in_flight_count(),
             peer_recv_window,
-            max_payload_size: self.config.max_payload_size,
+            max_payload_size: self.config.connection.max_payload_size,
             ack_info: (recv_next_sequence, local_window_size),
         };
 

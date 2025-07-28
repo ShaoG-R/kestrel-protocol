@@ -59,8 +59,8 @@ impl RetransmissionManager {
     /// 创建新的统一重传管理器。
     pub fn new(config: Config) -> Self {
         let sack_manager = SackManager::new(
-            config.fast_retx_threshold,
-            config.ack_threshold as u32,
+            config.reliability.fast_retx_threshold,
+            config.reliability.ack_threshold as u32,
         );
         let simple_retx_manager = SimpleRetransmissionManager::new();
 
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn test_layered_retransmission_disabled() {
         let mut config = create_test_config();
-        config.enable_layered_retransmission = false;
+        config.reliability.enable_layered_retransmission = false;
         
         let mut manager = RetransmissionManager::new(config);
         let now = Instant::now();

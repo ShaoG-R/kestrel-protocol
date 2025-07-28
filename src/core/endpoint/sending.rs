@@ -28,7 +28,7 @@ impl<'a, S: AsyncUdpSocket> PacketBuilder<'a, S> {
             endpoint,
             frames: Vec::new(),
             current_size: 0,
-            max_size: endpoint.config.max_packet_size,
+            max_size: endpoint.config.connection.max_packet_size,
         }
     }
 
@@ -136,7 +136,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         // We assert here to catch any logic errors during development.
         let total_size: usize = frames_to_send.iter().map(|f| f.encoded_size()).sum();
         assert!(
-            total_size <= self.config.max_packet_size,
+            total_size <= self.config.connection.max_packet_size,
             "Initial packet size exceeded MTU, which should have been caught at the API level!"
         );
 

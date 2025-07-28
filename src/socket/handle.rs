@@ -100,7 +100,7 @@ impl<S: BindableUdpSocket> ReliableUdpSocket<S> {
             socket,
             connections: std::collections::HashMap::new(),
             addr_to_cid: std::collections::HashMap::new(),
-            draining_pool: DrainingPool::new(config.drain_timeout),
+            draining_pool: DrainingPool::new(config.connection.drain_timeout),
             config: config.clone(),
             send_tx,
             accept_tx,

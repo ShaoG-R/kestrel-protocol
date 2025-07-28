@@ -32,11 +32,11 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         loop {
             // In SynReceived, we don't set a timeout. We wait for the user to accept.
             let next_wakeup = if self.state == ConnectionState::SynReceived {
-                Instant::now() + self.config.idle_timeout // Effectively, sleep forever until a message
+                Instant::now() + self.config.connection.idle_timeout // Effectively, sleep forever until a message
             } else {
                 self.reliability
                     .next_rto_deadline()
-                    .unwrap_or_else(|| Instant::now() + self.config.idle_timeout)
+                    .unwrap_or_else(|| Instant::now() + self.config.connection.idle_timeout)
             };
 
             trace!(cid = self.local_cid, state = ?self.state, "Main loop waiting for event.");
@@ -510,7 +510,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
         // Check for path validation timeout
         if let ConnectionState::ValidatingPath { notifier, .. } = &mut self.state {
-            if now.saturating_duration_since(self.last_recv_time) > self.config.idle_timeout {
+            if now.saturating_duration_since(self.last_recv_time) > self.config.connection.idle_timeout {
                 info!(cid = self.local_cid, "Path validation timed out.");
                 if let Some(notifier) = notifier.take() {
                     let _ = notifier.send(Err(Error::PathValidationTimeout));
@@ -519,7 +519,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             }
         }
 
-        if now.saturating_duration_since(self.last_recv_time) > self.config.idle_timeout {
+        if now.saturating_duration_since(self.last_recv_time) > self.config.connection.idle_timeout {
             info!(cid = self.local_cid, "Connection timed out");
             self.state = ConnectionState::Closed;
             return Err(Error::ConnectionTimeout);

@@ -446,7 +446,7 @@ impl Frame {
     /// Returns the reliability mode for this frame type with custom configuration.
     /// 使用自定义配置返回此帧类型的可靠性模式。
     pub fn reliability_mode_with_config(&self, config: &crate::config::Config) -> ReliabilityMode {
-        if !config.enable_layered_retransmission {
+        if !config.reliability.enable_layered_retransmission {
             // If layered retransmission is disabled, all frames except ACK/PING use SACK
             // 如果禁用分层重传，除了ACK/PING外的所有帧都使用SACK
             return match self {
@@ -466,8 +466,8 @@ impl Frame {
             // 控制帧使用配置的参数
             Frame::Syn { .. } | Frame::SynAck { .. } | Frame::Fin { .. } => {
                 ReliabilityMode::SimpleRetransmit {
-                    max_retries: config.control_frame_max_retries,
-                    retry_interval: config.control_frame_retry_interval,
+                    max_retries: config.reliability.control_frame_max_retries,
+                    retry_interval: config.reliability.control_frame_retry_interval,
                 }
             }
             

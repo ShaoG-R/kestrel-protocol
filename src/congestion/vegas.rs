@@ -37,8 +37,8 @@ pub struct Vegas {
 impl Vegas {
     pub fn new(config: Config) -> Self {
         Self {
-            congestion_window: config.initial_cwnd_packets,
-            slow_start_threshold: config.initial_ssthresh,
+            congestion_window: config.congestion_control.initial_cwnd_packets,
+            slow_start_threshold: config.congestion_control.initial_ssthresh,
             state: State::SlowStart,
             min_rtt: Duration::from_secs(u64::MAX),
             last_rtt: Duration::from_secs(u64::MAX),
@@ -69,21 +69,21 @@ impl CongestionControl for Vegas {
             let diff_packets =
                 (expected_throughput - actual_throughput) * self.min_rtt.as_secs_f32();
 
-            if diff_packets < self.config.vegas_alpha_packets as f32 {
+            if diff_packets < self.config.congestion_control.vegas_alpha_packets as f32 {
                 self.congestion_window += 1;
                 trace!(
                     cwnd = self.congestion_window,
                     diff = diff_packets,
-                    alpha = self.config.vegas_alpha_packets,
+                    alpha = self.config.congestion_control.vegas_alpha_packets,
                     "Congestion Avoidance: increasing cwnd"
                 );
-            } else if diff_packets > self.config.vegas_beta_packets as f32 {
+            } else if diff_packets > self.config.congestion_control.vegas_beta_packets as f32 {
                 self.congestion_window =
-                    (self.congestion_window - 1).max(self.config.min_cwnd_packets);
+                    (self.congestion_window - 1).max(self.config.congestion_control.min_cwnd_packets);
                 trace!(
                     cwnd = self.congestion_window,
                     diff = diff_packets,
-                    beta = self.config.vegas_beta_packets,
+                    beta = self.config.congestion_control.vegas_beta_packets,
                     "Congestion Avoidance: decreasing cwnd"
                 );
             } else {
@@ -108,7 +108,7 @@ impl CongestionControl for Vegas {
         if is_congestive_loss {
             // Severe congestion event: Halve the window and enter slow start.
             self.slow_start_threshold =
-                (self.congestion_window / 2).max(self.config.min_cwnd_packets);
+                (self.congestion_window / 2).max(self.config.congestion_control.min_cwnd_packets);
             self.congestion_window = self.slow_start_threshold;
             self.state = State::SlowStart;
             debug!(
@@ -118,9 +118,9 @@ impl CongestionControl for Vegas {
         } else {
             // Non-congestive (random) loss: Gentle decrease, stay in congestion avoidance.
             self.congestion_window =
-                ((self.congestion_window as f32) * self.config.vegas_gentle_decrease_factor)
+                ((self.congestion_window as f32) * self.config.congestion_control.vegas_gentle_decrease_factor)
                     as u32;
-            self.congestion_window = self.congestion_window.max(self.config.min_cwnd_packets);
+            self.congestion_window = self.congestion_window.max(self.config.congestion_control.min_cwnd_packets);
             debug!(
                 "Non-congestive loss detected. Gently reducing cwnd to: {}",
                 self.congestion_window

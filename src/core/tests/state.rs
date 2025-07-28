@@ -150,7 +150,7 @@ async fn test_address_reuse_after_cid_drained() {
     // 4. Wait for a time LONGER than the drain timeout + cleanup interval
     // to ensure the CID has been fully purged from the server actor.
     info!("[Client] Waiting for CID to be drained on server...");
-    tokio::time::sleep(config.drain_timeout + config.draining_cleanup_interval).await;
+    tokio::time::sleep(config.connection.drain_timeout + config.connection.draining_cleanup_interval).await;
     
     // 5. Connection B: Connect again from the same socket.
     info!("[Client] Connecting B...");

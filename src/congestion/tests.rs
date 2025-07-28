@@ -1,18 +1,21 @@
 //! Tests for the Vegas congestion controller.
 use super::vegas::{State, Vegas};
 use super::CongestionControl;
-use crate::config::Config;
+use crate::config::{Config, CongestionControlConfig};
 use std::time::Duration;
 use tokio::time::Instant;
 
 fn test_config() -> Config {
     Config {
-        initial_cwnd_packets: 10,
-        min_cwnd_packets: 2,
-        initial_ssthresh: 100,
-        vegas_alpha_packets: 2,
-        vegas_beta_packets: 4,
-        vegas_gentle_decrease_factor: 0.8,
+        protocol_version: 1,
+        congestion_control: CongestionControlConfig {
+            initial_cwnd_packets: 10,
+            min_cwnd_packets: 2,
+            initial_ssthresh: 100,
+            vegas_alpha_packets: 2,
+            vegas_beta_packets: 4,
+            vegas_gentle_decrease_factor: 0.8,
+        },
         ..Default::default()
     }
 }
@@ -157,7 +160,7 @@ fn test_vegas_min_rtt_tracking() {
 #[test]
 fn test_vegas_avoidance_decrease_clamp_to_min() {
     let mut config = test_config();
-    config.min_cwnd_packets = 5;
+    config.congestion_control.min_cwnd_packets = 5;
     let mut vegas = Vegas::new(config);
 
     vegas.state = State::CongestionAvoidance;
@@ -173,7 +176,7 @@ fn test_vegas_avoidance_decrease_clamp_to_min() {
 #[test]
 fn test_vegas_congestive_loss_clamp_to_min() {
     let mut config = test_config();
-    config.min_cwnd_packets = 5;
+    config.congestion_control.min_cwnd_packets = 5;
     let mut vegas = Vegas::new(config);
     vegas.state = State::CongestionAvoidance;
     // Set cwnd so that cwnd/2 < min_cwnd_packets
@@ -212,7 +215,7 @@ fn test_vegas_loss_with_no_rtt_sample() {
 #[test]
 fn test_vegas_random_loss_clamp_to_min() {
     let mut config = test_config();
-    config.min_cwnd_packets = 15;
+    config.congestion_control.min_cwnd_packets = 15;
     let mut vegas = Vegas::new(config);
     vegas.state = State::CongestionAvoidance;
     vegas.congestion_window = 16; // 16 * 0.8 = 12.8, which is < 15

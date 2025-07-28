@@ -53,7 +53,7 @@ impl<S: BindableUdpSocket> SocketActor<S> {
     pub(crate) async fn run(&mut self) {
         let mut recv_buf = [0u8; 2048]; // Max UDP packet size. 最大UDP包大小。
         let mut cleanup_interval =
-            tokio::time::interval(self.config.draining_cleanup_interval);
+            tokio::time::interval(self.config.connection.draining_cleanup_interval);
 
         loop {
             tokio::select! {

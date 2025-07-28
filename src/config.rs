@@ -11,6 +11,25 @@ pub struct Config {
     /// The protocol version number. Used in the long header.
     /// 协议版本号。用于长头中。
     pub protocol_version: u8,
+
+    /// Reliability-related parameters.
+    /// 可靠性相关参数。
+    pub reliability: ReliabilityConfig,
+
+    /// Congestion control-related parameters.
+    /// 拥塞控制相关参数。
+    pub congestion_control: CongestionControlConfig,
+
+    /// Connection and buffer-related parameters.
+    /// 连接和缓冲区相关参数。
+    pub connection: ConnectionConfig,
+}
+
+/// Reliability-related parameters.
+///
+/// 可靠性相关参数。
+#[derive(Debug, Clone)]
+pub struct ReliabilityConfig {
     /// The initial round-trip time (RTO) for a new connection.
     /// 新连接的初始往返时间 (RTO)。
     pub initial_rto: Duration,
@@ -21,15 +40,31 @@ pub struct Config {
     /// must be received before a packet is considered lost and fast-retransmitted.
     /// 在一个包被认为丢失并进行快速重传之前，必须收到的具有更高序列号的未确认数据包的数量。
     pub fast_retx_threshold: u16,
-    /// The maximum size of the payload for a single PUSH packet.
-    /// 单个PUSH包的最大载荷大小。
-    pub max_payload_size: usize,
     /// The number of ACK-eliciting packets to receive before sending an immediate ACK.
     /// 在发送即时ACK之前要接收的触发ACK的包的数量。
     pub ack_threshold: u16,
-    /// The maximum size for a single UDP datagram. This is the effective MTU for the protocol.
-    /// 单个UDP数据报的最大大小。这是协议的有效MTU。
-    pub max_packet_size: usize,
+    /// Maximum retries for handshake data frames.
+    /// 握手阶段数据帧的最大重传次数。
+    pub handshake_data_max_retries: u8,
+    /// Retry interval for handshake data frames.
+    /// 握手阶段数据帧的重传间隔。
+    pub handshake_data_retry_interval: Duration,
+    /// Maximum retries for control frames (SYN, SYN-ACK, FIN).
+    /// 控制帧（SYN、SYN-ACK、FIN）的最大重传次数。
+    pub control_frame_max_retries: u8,
+    /// Retry interval for control frames.
+    /// 控制帧的重传间隔。
+    pub control_frame_retry_interval: Duration,
+    /// Enable layered retransmission mechanism.
+    /// 启用分层重传机制。
+    pub enable_layered_retransmission: bool,
+}
+
+/// Congestion control-related parameters.
+///
+/// 拥塞控制相关参数。
+#[derive(Debug, Clone)]
+pub struct CongestionControlConfig {
     /// The initial congestion window size in packets.
     /// 初始拥塞窗口大小（以包为单位）。
     pub initial_cwnd_packets: u32,
@@ -51,6 +86,19 @@ pub struct Config {
     /// packet loss events.
     /// 在非拥塞性丢包事件期间，拥塞窗口减小的因子。
     pub vegas_gentle_decrease_factor: f32,
+}
+
+/// Connection and buffer-related parameters.
+///
+/// 连接和缓冲区相关参数。
+#[derive(Debug, Clone)]
+pub struct ConnectionConfig {
+    /// The maximum size of the payload for a single PUSH packet.
+    /// 单个PUSH包的最大载荷大小。
+    pub max_payload_size: usize,
+    /// The maximum size for a single UDP datagram. This is the effective MTU for the protocol.
+    /// 单个UDP数据报的最大大小。这是协议的有效MTU。
+    pub max_packet_size: usize,
     /// The maximum time a connection can be idle before it's considered timed out.
     /// An idle connection is one with no packets being sent or received.
     ///
@@ -78,54 +126,58 @@ pub struct Config {
     ///
     /// 套接字actor检查并清理已完成 `drain_timeout` 的CID的间隔。
     pub draining_cleanup_interval: Duration,
-
-    /// Maximum retries for handshake data frames.
-    /// 握手阶段数据帧的最大重传次数。
-    pub handshake_data_max_retries: u8,
-
-    /// Retry interval for handshake data frames.
-    /// 握手阶段数据帧的重传间隔。
-    pub handshake_data_retry_interval: Duration,
-
-    /// Maximum retries for control frames (SYN, SYN-ACK, FIN).
-    /// 控制帧（SYN、SYN-ACK、FIN）的最大重传次数。
-    pub control_frame_max_retries: u8,
-
-    /// Retry interval for control frames.
-    /// 控制帧的重传间隔。
-    pub control_frame_retry_interval: Duration,
-
-    /// Enable layered retransmission mechanism.
-    /// 启用分层重传机制。
-    pub enable_layered_retransmission: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             protocol_version: 1,
+            reliability: ReliabilityConfig::default(),
+            congestion_control: CongestionControlConfig::default(),
+            connection: ConnectionConfig::default(),
+        }
+    }
+}
+
+impl Default for ReliabilityConfig {
+    fn default() -> Self {
+        Self {
             initial_rto: Duration::from_millis(1000),
             min_rto: Duration::from_millis(500),
             fast_retx_threshold: 3,
-            max_payload_size: 1200,
             ack_threshold: 2,
-            max_packet_size: 1350, // A safe default MTU, leaves room for IP/UDP headers
+            handshake_data_max_retries: 3,
+            handshake_data_retry_interval: Duration::from_millis(200),
+            control_frame_max_retries: 5,
+            control_frame_retry_interval: Duration::from_millis(500),
+            enable_layered_retransmission: true,
+        }
+    }
+}
+
+impl Default for CongestionControlConfig {
+    fn default() -> Self {
+        Self {
             initial_cwnd_packets: 32,
             min_cwnd_packets: 4,
             initial_ssthresh: u32::MAX,
             vegas_alpha_packets: 2,
             vegas_beta_packets: 4,
             vegas_gentle_decrease_factor: 0.8, // 20% decrease
+        }
+    }
+}
+
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            max_payload_size: 1200,
+            max_packet_size: 1350, // A safe default MTU, leaves room for IP/UDP headers
             idle_timeout: Duration::from_secs(5),
             send_buffer_capacity_bytes: 1024 * 1024, // 1 MB
             recv_buffer_capacity_packets: 256,
             drain_timeout: Duration::from_secs(3),
             draining_cleanup_interval: Duration::from_secs(1),
-            handshake_data_max_retries: 3,
-            handshake_data_retry_interval: Duration::from_millis(200),
-            control_frame_max_retries: 5,
-            control_frame_retry_interval: Duration::from_millis(500),
-            enable_layered_retransmission: true,
         }
     }
 } 

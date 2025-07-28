@@ -29,8 +29,8 @@ async fn test_rto_recovery_on_single_packet_loss() {
 
     // 1. Configure a very short RTO for the client to ensure the test runs quickly.
     let mut client_config = Config::default();
-    client_config.initial_rto = Duration::from_millis(200);
-    client_config.min_rto = Duration::from_millis(200);
+    client_config.reliability.initial_rto = Duration::from_millis(200);
+    client_config.reliability.min_rto = Duration::from_millis(200);
 
     // 2. Create a filter that drops the first PUSH packet from the client AFTER handshake.
     let handshake_complete = Arc::new(AtomicBool::new(false));
