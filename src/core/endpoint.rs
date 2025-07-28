@@ -4,14 +4,19 @@
 
 mod command;
 mod constructors;
+mod event_dispatcher;
 pub mod frame_factory;
 mod logic;
 mod sending;
 pub mod state;
+mod state_manager;
+
+#[cfg(test)]
+mod tests;
 
 pub use command::StreamCommand;
 
-use self::state::ConnectionState;
+use self::{state::ConnectionState, state_manager::StateManager};
 use crate::{
     config::Config,
     core::reliability::ReliabilityLayer,
@@ -52,7 +57,7 @@ pub struct Endpoint<S: AsyncUdpSocket> {
     remote_addr: SocketAddr,
     local_cid: u32,
     peer_cid: u32,
-    state: ConnectionState,
+    state_manager: StateManager,
     start_time: Instant,
     reliability: ReliabilityLayer,
     peer_recv_window: u32,
@@ -74,5 +79,29 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     #[cfg(test)]
     pub fn set_peer_cid(&mut self, peer_cid: u32) {
         self.peer_cid = peer_cid;
+    }
+
+    /// 获取本地连接ID
+    /// Gets the local connection ID
+    pub fn local_cid(&self) -> u32 {
+        self.local_cid
+    }
+
+    /// 获取当前连接状态
+    /// Gets the current connection state
+    pub fn state(&self) -> &ConnectionState {
+        self.state_manager.current_state()
+    }
+
+    /// 获取状态管理器的可变引用
+    /// Gets a mutable reference to the state manager
+    pub fn state_manager_mut(&mut self) -> &mut StateManager {
+        &mut self.state_manager
+    }
+
+    /// 更新最后接收时间
+    /// Updates the last receive time
+    pub fn update_last_recv_time(&mut self, time: Instant) {
+        self.last_recv_time = time;
     }
 }

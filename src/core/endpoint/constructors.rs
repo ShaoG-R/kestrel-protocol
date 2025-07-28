@@ -2,6 +2,7 @@
 
 use super::{
     state::ConnectionState,
+    state_manager::StateManager,
     {Endpoint, StreamCommand},
 };
 use crate::{
@@ -43,7 +44,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             remote_addr,
             local_cid,
             peer_cid: 0,
-            state: ConnectionState::Connecting,
+            state_manager: StateManager::new(ConnectionState::Connecting, local_cid),
             start_time: now,
             reliability,
             peer_recv_window: 32,
@@ -81,7 +82,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             remote_addr,
             local_cid,
             peer_cid,
-            state: ConnectionState::SynReceived,
+            state_manager: StateManager::new(ConnectionState::SynReceived, local_cid),
             start_time: now,
             reliability,
             peer_recv_window: 32,

@@ -93,7 +93,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
         // 2. Perform actions that require &mut self and collect their resulting frames.
         // 2. 执行需要 &mut self 的操作，并收集它们产生的帧。
-        if self.state == super::state::ConnectionState::Closing
+        if *self.state() == super::state::ConnectionState::Closing
             && !self.reliability.has_fin_in_flight()
         {
             let fin_frame = create_fin_frame(
