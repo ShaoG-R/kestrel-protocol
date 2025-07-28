@@ -8,7 +8,7 @@
 //! including PUSH frame reception, sequence number validation,
 //! data reassembly logic, etc.
 
-use super::{FrameProcessor, FrameProcessorStatic, FrameProcessingContext};
+use super::{FrameProcessingContext, FrameProcessor, FrameProcessorStatic};
 use crate::{
     error::Result,
     packet::frame::Frame,
@@ -18,7 +18,8 @@ use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, trace, warn};
 
-use crate::core::endpoint::{Endpoint, state::ConnectionState};
+use crate::core::endpoint::Endpoint;
+use crate::core::endpoint::types::state::ConnectionState;
 
 /// PUSH 帧处理器
 /// PUSH frame processor

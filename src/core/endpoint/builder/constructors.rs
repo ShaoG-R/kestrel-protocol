@@ -1,10 +1,6 @@
 //! Constructors for the `Endpoint`.
 
-use super::{
-    lifecycle_manager::{DefaultLifecycleManager, ConnectionLifecycleManager},
-    state::ConnectionState,
-    {Endpoint, StreamCommand},
-};
+use crate::core::endpoint::{Endpoint, StreamCommand};
 use crate::{
     config::Config,
     congestion::vegas::Vegas,
@@ -17,6 +13,8 @@ use tokio::{
     sync::mpsc,
     time::Instant,
 };
+use crate::core::endpoint::lifecycle::manager::{ConnectionLifecycleManager, DefaultLifecycleManager};
+use crate::core::endpoint::types::state::ConnectionState;
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
     /// Creates a new `Endpoint` for the client-side.

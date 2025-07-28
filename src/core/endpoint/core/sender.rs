@@ -1,9 +1,6 @@
 //! Sending-related logic for the `Endpoint`.
 
-use super::{
-    frame_factory::{create_ack_frame, create_fin_frame, create_syn_ack_frame, create_syn_frame},
-    Endpoint,
-};
+use crate::core::endpoint::Endpoint;
 use crate::{
     error::{Error, Result},
     packet::frame::Frame,
@@ -11,6 +8,8 @@ use crate::{
 };
 use std::{future::Future, net::SocketAddr};
 use tokio::time::Instant;
+use crate::core::endpoint::core::frame::{create_ack_frame, create_fin_frame, create_syn_ack_frame, create_syn_frame};
+use crate::core::endpoint::types::state::ConnectionState;
 
 /// A helper to build packets that respect the configured MTU.
 ///
@@ -78,7 +77,7 @@ where
 }
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
-    pub(super) async fn packetize_and_send(&mut self) -> Result<()> {
+    pub(in crate::core::endpoint) async fn packetize_and_send(&mut self) -> Result<()> {
         let now = Instant::now();
 
         // 1. Collect all frames that need to be sent without requiring &mut self.
@@ -93,7 +92,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
         // 2. Perform actions that require &mut self and collect their resulting frames.
         // 2. 执行需要 &mut self 的操作，并收集它们产生的帧。
-        if *self.state() == super::state::ConnectionState::Closing
+        if *self.state() == ConnectionState::Closing
             && !self.reliability.has_fin_in_flight()
         {
             let fin_frame = create_fin_frame(
@@ -120,7 +119,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         Ok(())
     }
 
-    pub(super) async fn send_initial_syn(&mut self) -> Result<()> {
+    pub(in crate::core::endpoint) async fn send_initial_syn(&mut self) -> Result<()> {
         // Phase 1: Collect all frames to be sent for the initial packet.
         let now = Instant::now();
         let mut frames_to_send = Vec::new();
@@ -152,12 +151,12 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
     /// Sends a SYN-ACK frame. This is a high-priority control frame and is sent immediately.
     /// 发送一个SYN-ACK帧。这是一个高优先级的控制帧，会被立即发送。
-    pub(super) async fn send_syn_ack(&mut self) -> Result<()> {
+    pub(in crate::core::endpoint) async fn send_syn_ack(&mut self) -> Result<()> {
         let frame = create_syn_ack_frame(&self.config, self.peer_cid, self.local_cid);
         self.send_raw_frames(vec![frame]).await
     }
 
-    pub(super) async fn send_standalone_ack(&mut self) -> Result<()> {
+    pub(in crate::core::endpoint) async fn send_standalone_ack(&mut self) -> Result<()> {
         if !self.reliability.is_ack_pending() {
             return Ok(());
         }
@@ -203,7 +202,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// Sends a list of frames, respecting the MTU by chunking them into multiple packets if necessary.
     ///
     /// 发送一个帧列表，必要时通过将它们分块到多个包中来遵守MTU。
-    pub(super) async fn send_frames(&self, frames: Vec<Frame>) -> Result<()> {
+    pub(in crate::core::endpoint) async fn send_frames(&self, frames: Vec<Frame>) -> Result<()> {
         if frames.is_empty() {
             return Ok(());
         }
@@ -214,7 +213,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         packet_builder.flush().await
     }
 
-    pub(super) async fn send_frame_to(&self, frame: Frame, remote_addr: SocketAddr) -> Result<()> {
+    pub(in crate::core::endpoint) async fn send_frame_to(&self, frame: Frame, remote_addr: SocketAddr) -> Result<()> {
         let cmd = SendCommand {
             remote_addr,
             frames: vec![frame],

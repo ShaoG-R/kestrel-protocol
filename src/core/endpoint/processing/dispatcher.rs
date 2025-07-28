@@ -1,7 +1,7 @@
 //! 事件分发器 - 负责将不同类型的事件路由到相应的处理器
 //! Event Dispatcher - Routes different types of events to appropriate handlers
 
-use super::{command::StreamCommand, frame_processors::FrameProcessorRouter, Endpoint};
+use crate::core::endpoint::Endpoint;
 use crate::{
     error::Result,
     packet::frame::Frame,
@@ -10,6 +10,8 @@ use crate::{
 use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::trace;
+use crate::core::endpoint::processing::processors::FrameProcessorRouter;
+use crate::core::endpoint::types::command::StreamCommand;
 
 /// 事件分发器，负责将各种事件路由到正确的处理方法
 /// Event dispatcher that routes various events to the correct handling methods

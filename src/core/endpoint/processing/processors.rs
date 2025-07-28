@@ -8,17 +8,17 @@
 //! providing specialized processors for each frame type to improve code
 //! maintainability and testability.
 
-pub mod ack_processor;
-pub mod connection_processor;
-pub mod data_processor;
-pub mod path_processor;
+pub mod ack;
+pub mod connection;
+pub mod data;
+pub mod path;
 
 // 重新导出主要的处理器类型
 // Re-export main processor types
-pub use ack_processor::AckProcessor;
-pub use connection_processor::ConnectionProcessor;
-pub use data_processor::PushProcessor;
-pub use path_processor::PathProcessor;
+pub use ack::AckProcessor;
+pub use connection::ConnectionProcessor;
+pub use data::PushProcessor;
+pub use path::PathProcessor;
 
 use crate::{
     error::Result,
@@ -27,8 +27,9 @@ use crate::{
 };
 use std::net::SocketAddr;
 use tokio::time::Instant;
-
-use super::{Endpoint, state::ConnectionState, lifecycle_manager::ConnectionLifecycleManager};
+use crate::core::endpoint::lifecycle::manager::ConnectionLifecycleManager;
+use crate::core::endpoint::types::state::ConnectionState;
+use crate::core::endpoint::Endpoint;
 
 /// 帧处理器特征，定义了所有帧处理器的通用接口
 /// Frame processor trait that defines the common interface for all frame processors

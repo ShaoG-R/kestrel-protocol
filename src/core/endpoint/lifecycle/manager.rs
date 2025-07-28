@@ -7,7 +7,7 @@
 //! This module provides a unified connection lifecycle management interface,
 //! coordinating state transitions, event handling, cleanup logic, and other aspects.
 
-use super::state::{ConnectionState};
+use crate::core::endpoint::types::state::{ConnectionState};
 use crate::{
     error::{Error, Result},
     config::Config,

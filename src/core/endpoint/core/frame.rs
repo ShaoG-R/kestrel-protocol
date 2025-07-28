@@ -11,12 +11,12 @@ use crate::{
 };
 
 /// Creates a SYN frame.
-pub(super) fn create_syn_frame(config: &Config, local_cid: u32) -> Frame {
+pub(in crate::core::endpoint) fn create_syn_frame(config: &Config, local_cid: u32) -> Frame {
     Frame::new_syn(config.protocol_version, local_cid, 0)
 }
 
 /// Creates a SYN-ACK frame.
-pub(super) fn create_syn_ack_frame(
+pub(in crate::core::endpoint) fn create_syn_ack_frame(
     config: &Config,
     peer_cid: u32,
     local_cid: u32,
@@ -25,7 +25,7 @@ pub(super) fn create_syn_ack_frame(
 }
 
 /// Creates a standalone ACK frame.
-pub(super) fn create_ack_frame(
+pub(in crate::core::endpoint) fn create_ack_frame(
     peer_cid: u32,
     reliability: &mut ReliabilityLayer,
     start_time: Instant,
@@ -42,7 +42,7 @@ pub(super) fn create_ack_frame(
 }
 
 /// Creates a FIN frame.
-pub(super) fn create_fin_frame(
+pub(in crate::core::endpoint) fn create_fin_frame(
     peer_cid: u32,
     sequence_number: u32,
     reliability: &ReliabilityLayer,

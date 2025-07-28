@@ -1,22 +1,23 @@
 //! The core event loop and logic for the `Endpoint`.
 
-use super::{
-    ConnectionCleaner, Endpoint,
-    command::StreamCommand,
-    event_dispatcher::EventDispatcher,
-    frame_factory::{
-        create_path_challenge_frame, create_path_response_frame, create_syn_ack_frame,
-    },
-    lifecycle_manager::ConnectionLifecycleManager,
-    state::ConnectionState,
+use crate::core::endpoint::{
+    ConnectionCleaner,
+    Endpoint,
 };
 use crate::{
     error::{Error, Result},
     packet::{frame::Frame, sack::decode_sack_ranges},
     socket::{AsyncUdpSocket, SocketActorCommand},
 };
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{sleep_until, Instant};
 use tracing::{info, trace};
+use crate::core::endpoint::core::frame::{
+    create_path_challenge_frame, create_path_response_frame, create_syn_ack_frame,
+};
+use crate::core::endpoint::lifecycle::manager::ConnectionLifecycleManager;
+use crate::core::endpoint::processing::dispatcher::EventDispatcher;
+use crate::core::endpoint::types::command::StreamCommand;
+use crate::core::endpoint::types::state::ConnectionState;
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
     /// Runs the endpoint's main event loop.
@@ -694,7 +695,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         // User-initiated close, handle based on current state
         
         match self.lifecycle_manager.current_state() {
-            crate::core::endpoint::state::ConnectionState::SynReceived => {
+            crate::core::endpoint::types::state::ConnectionState::SynReceived => {
                 // 在SynReceived状态下，连接还没有真正建立，立即关闭用户流接收器
                 // In SynReceived state, connection is not established yet, immediately close user stream receiver
                 self.tx_to_stream = None;
@@ -706,10 +707,10 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     }
                 }
             }
-            crate::core::endpoint::state::ConnectionState::Connecting => {
+            crate::core::endpoint::types::state::ConnectionState::Connecting => {
                 if self.reliability.is_send_buffer_empty() {
                     // 没有待发送数据，直接关闭
-                    if let Ok(()) = self.lifecycle_manager.transition_to(crate::core::endpoint::state::ConnectionState::Closed) {
+                    if let Ok(()) = self.lifecycle_manager.transition_to(crate::core::endpoint::types::state::ConnectionState::Closed) {
                         self.reliability.clear_in_flight_packets();
                         // 连接直接关闭时才关闭用户流
                         self.tx_to_stream = None;

@@ -8,7 +8,7 @@
 //! including connection establishment, connection acknowledgment,
 //! connection termination, etc.
 
-use super::{FrameProcessor, FrameProcessorStatic, FrameProcessingContext};
+use super::{FrameProcessingContext, FrameProcessor, FrameProcessorStatic};
 use crate::{
     error::Result,
     packet::frame::Frame,
@@ -18,11 +18,9 @@ use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 
-use crate::core::endpoint::{
-    Endpoint, 
-    state::ConnectionState,
-    lifecycle_manager::ConnectionLifecycleManager,
-};
+use crate::core::endpoint::Endpoint;
+use crate::core::endpoint::lifecycle::manager::ConnectionLifecycleManager;
+use crate::core::endpoint::types::state::ConnectionState;
 
 /// 连接管理帧处理器
 /// Connection management frame processor

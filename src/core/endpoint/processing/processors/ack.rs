@@ -7,7 +7,7 @@
 //! This module specifically handles ACK frames, including SACK information parsing,
 //! RTT calculation, congestion control updates, etc.
 
-use super::{FrameProcessor, FrameProcessorStatic, FrameProcessingContext};
+use super::{FrameProcessingContext, FrameProcessor, FrameProcessorStatic};
 use crate::{
     error::Result,
     packet::{frame::Frame, sack::decode_sack_ranges},
@@ -17,7 +17,8 @@ use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, trace, warn};
 
-use crate::core::endpoint::{Endpoint, state::ConnectionState};
+use crate::core::endpoint::Endpoint;
+use crate::core::endpoint::types::state::ConnectionState;
 
 /// ACK 帧处理器
 /// ACK frame processor

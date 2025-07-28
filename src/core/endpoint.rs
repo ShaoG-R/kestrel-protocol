@@ -2,25 +2,18 @@
 //!
 //! 连接的端点，是新分层协议的“大脑”。
 
-mod command;
-mod constructors;
-mod event_dispatcher;
-pub mod frame_factory;
-pub mod frame_processors;
-pub mod lifecycle_manager;
-mod logic;
-mod sending;
-pub mod state;
+pub mod core;
+pub mod processing;
+pub mod lifecycle;
+pub mod builder;
+pub mod types;
 
 #[cfg(test)]
 mod tests;
 
-pub use command::StreamCommand;
+pub use types::command::StreamCommand;
 
-use self::{
-    lifecycle_manager::{DefaultLifecycleManager, ConnectionLifecycleManager},
-    state::ConnectionState,
-};
+use lifecycle::manager::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::{
     config::Config,
     core::reliability::ReliabilityLayer,
@@ -33,6 +26,7 @@ use tokio::{
     time::Instant,
 };
 use tracing::trace;
+use types::state::ConnectionState;
 
 /// A guard that ensures the connection is cleaned up in the `SocketActor`
 /// when the `Endpoint` is dropped.

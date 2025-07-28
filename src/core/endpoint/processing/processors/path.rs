@@ -10,7 +10,6 @@
 
 use super::{FrameProcessingContext, FrameProcessor, FrameProcessorStatic};
 use crate::{
-    core::endpoint::frame_factory::create_path_response_frame,
     error::{Error, Result},
     packet::frame::Frame,
     socket::{AsyncUdpSocket, SocketActorCommand},
@@ -18,11 +17,9 @@ use crate::{
 use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
-
-use crate::core::endpoint::{
-    Endpoint, 
-    state::ConnectionState,
-};
+use crate::core::endpoint::core::frame::create_path_response_frame;
+use crate::core::endpoint::Endpoint;
+use crate::core::endpoint::types::state::ConnectionState;
 
 /// 路径验证帧处理器
 /// Path validation frame processor
