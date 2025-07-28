@@ -83,16 +83,18 @@ sequenceDiagram
     4.  **返回结果**: `packetize` 函数返回一个包含一个或多个 `PUSH` 帧的向量给 `ReliabilityLayer`。
     5.  **更新在途状态**: `ReliabilityLayer` 接收到这些帧后，负责将它们添加到 `SendBuffer` 的在途（in-flight）队列中，然后将帧向量返回给 `Endpoint`。
 
-#### 4. 发送打包好的帧 (`src/core/endpoint/logic.rs`)
+#### 4. 打包并发送帧 (`src/core/endpoint/sending.rs`)
 
 -   **入口**: `Endpoint` 获取到 `packetize_stream_data()` 返回的 `Vec<Frame>`。
--   **实现**: `Endpoint` 的 `send_frames()` (或类似) 方法。
+-   **实现**: `Endpoint` 的 `packetize_and_send()` 方法。
 -   **动作**:
-    1.  `Endpoint` 将 `Vec<Frame>` 包装进一个 `SenderTaskCommand::Send` 命令。
-    2.  该命令通过另一个MPSC通道发送给全局唯一的 `SocketActor`。
-    3.  `SocketActor` 接收到命令后，负责将这些帧序列化为字节，并通过底层的UDP套接字发送到网络。
+    1.  `Endpoint` 使用一个内部的 `PacketBuilder` 辅助结构。
+    2.  `PacketBuilder` 接收所有待发送的帧（如 PUSH 帧、FIN 帧等）。
+    3.  它会智能地将这些帧打包成一个或多个批次（`Vec<Frame>`），确保每个批次序列化后的总大小不超过配置的 `max_packet_size` (MTU)。
+    4.  每个打包好的批次被包装进一个 `SenderTaskCommand::Send` 命令，并通过MPSC通道发送给全局唯一的 `SenderTask`。
+    5.  `SenderTask` 接收到这个**已经分好包的批次**后，仅负责将其序列化并通过一次 `send_to` 系统调用发送出去。
 
-通过这个分层、解耦的设计，协议将用户写入的任意大小的字节流，平滑地转换为符合拥塞控制和流量控制的、大小合适的、带有完整协议头的网络数据包。
+通过这个分层、解耦的设计，协议将用户写入的任意大小的字节流，平滑地转换为符合拥塞控制、流量控制和MTU限制的、大小合适的、带有完整协议头的网络数据包。
 
 ---
 

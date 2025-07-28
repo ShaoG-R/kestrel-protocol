@@ -6,24 +6,26 @@
 
 **实现位置:**
 
-- **包聚合**: `src/socket/sender.rs` (`sender_task`)
-- **快速应答**: `src/core/reliability.rs` (`ReliabilityLayer`)
+- **包聚合**: `src/core/endpoint/sending.rs` (`PacketBuilder`)
+- **快速应答**: `src/core/reliability.rs`
 
 ### 1. 包聚合 (Packet Coalescing)
 
 在高交互性场景下（例如，一个数据包紧跟着一个确认包），如果每个逻辑包都单独占用一个UDP数据报，会产生大量的IP/UDP头部开销，降低有效载荷比。包聚合正是为了解决这个问题。
 
 - **机制**:
-    1.  当 `Endpoint` 任务需要发送数据时（无论是`PUSH`, `ACK`, 还是`FIN`），它不会直接发送，而是将生成的 `Frame` 对象打包成一个 `Vec<Frame>`，并通过MPSC通道发送给全局唯一的 `SenderTask`。
-    2.  `SenderTask` 在其主循环中，会将这个 `Vec<Frame>` 里的所有帧**连续地编码**到同一个字节缓冲区中。
-    3.  最后，`SenderTask` 通过**一次** `socket.send_to()` 系统调用，将整个缓冲区作为一个UDP数据报发送出去。
+    1.  当 `Endpoint` 任务需要发送数据时（无论是`PUSH`, `ACK`, 还是`FIN`），它会使用一个内部的 `PacketBuilder` 辅助结构。
+    2.  `PacketBuilder` 会收集所有待发送的帧，并智能地将它们打包成一个或多个批次。这个打包过程会确保每个批次的总大小不超过配置的MTU限制。
+    3.  每个打包好的批次（一个 `Vec<Frame>`）代表一个即将发送的UDP包，它被发送给全局唯一的 `SenderTask`。
+    4.  `SenderTask` 接收到这个**预先聚合好的批次**后，将其中的所有帧连续编码到同一个缓冲区，并通过一次 `socket.send_to()` 系统调用发送出去。
 
 ```rust
 // 位于 src/socket/sender.rs
 // ...
 for cmd in commands.drain(..) {
     send_buf.clear();
-    // 这里是包聚合的核心：多个帧被编码进同一个缓冲区
+    // 注意：这里的cmd.frames是一个预先聚合好的批次，注定要放在同一个UDP包里。
+    // `SenderTask`只负责编码和发送，不负责聚合决策。
     for frame in cmd.frames {
         frame.encode(&mut send_buf);
     }
