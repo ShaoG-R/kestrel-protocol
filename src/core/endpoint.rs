@@ -7,7 +7,6 @@ pub mod processing;
 pub mod lifecycle;
 pub mod builder;
 pub mod types;
-pub mod operations;
 
 #[cfg(test)]
 mod tests;

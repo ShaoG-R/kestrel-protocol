@@ -19,9 +19,8 @@ use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 use async_trait::async_trait;
 
-use crate::core::endpoint::Endpoint;
-use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
 use crate::core::endpoint::types::state::ConnectionState;
+use super::super::traits::EndpointOperations;
 
 /// 连接管理帧处理器
 /// Connection management frame processor
@@ -38,7 +37,7 @@ impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for ConnectionProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut Endpoint<S>,
+        endpoint: &mut dyn EndpointOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -60,8 +59,8 @@ impl TypeSafeFrameValidator for ConnectionProcessor {
 impl ConnectionProcessor {
     /// 内部连接管理帧处理方法，供所有接口实现调用
     /// Internal connection management frame processing method, called by all interface implementations
-    async fn process_connection_frame_internal<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn process_connection_frame_internal(
+        endpoint: &mut dyn EndpointOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -83,7 +82,7 @@ impl ConnectionProcessor {
                     "ConnectionProcessor",
                     endpoint.local_cid(),
                     src_addr,
-                    format!("{:?}", endpoint.lifecycle_manager().current_state()),
+                    format!("{:?}", endpoint.current_state()),
                     now,
                 );
                 Err(crate::error::Error::FrameTypeMismatch {
@@ -115,7 +114,7 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for ConnectionProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut Endpoint<S>,
+        endpoint: &mut dyn EndpointOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -129,8 +128,8 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for ConnectionProcessor {
 impl ConnectionProcessor {
     /// 处理 SYN 帧
     /// Handle SYN frame
-    async fn handle_syn_frame<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_syn_frame(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::LongHeader,
         context: FrameProcessingContext,
     ) -> Result<()> {
@@ -173,8 +172,8 @@ impl ConnectionProcessor {
 
     /// 处理 SYN-ACK 帧
     /// Handle SYN-ACK frame
-    async fn handle_syn_ack_frame<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_syn_ack_frame(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::LongHeader,
         context: FrameProcessingContext,
     ) -> Result<()> {
@@ -222,8 +221,8 @@ impl ConnectionProcessor {
 
     /// 处理 FIN 帧
     /// Handle FIN frame
-    async fn handle_fin_frame<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_fin_frame(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
         context: FrameProcessingContext,
     ) -> Result<()> {
@@ -263,8 +262,8 @@ impl ConnectionProcessor {
 
     /// 在 SynReceived 状态下处理 FIN 帧
     /// Handle FIN frame in SynReceived state
-    async fn handle_fin_in_syn_received<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_fin_in_syn_received(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
     ) -> Result<()> {
         debug!(
@@ -288,8 +287,8 @@ impl ConnectionProcessor {
 
     /// 在 Established 状态下处理 FIN 帧
     /// Handle FIN frame in Established state
-    async fn handle_fin_in_established<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_fin_in_established(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
     ) -> Result<()> {
         trace!(
@@ -312,8 +311,8 @@ impl ConnectionProcessor {
 
     /// 在 ValidatingPath 状态下处理 FIN 帧
     /// Handle FIN frame in ValidatingPath state
-    async fn handle_fin_in_validating_path<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_fin_in_validating_path(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
     ) -> Result<()> {
         debug!(
@@ -333,8 +332,8 @@ impl ConnectionProcessor {
 
     /// 在 FinWait 状态下处理 FIN 帧
     /// Handle FIN frame in FinWait state
-    async fn handle_fin_in_fin_wait<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_fin_in_fin_wait(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
     ) -> Result<()> {
         debug!(
@@ -357,8 +356,8 @@ impl ConnectionProcessor {
 
     /// 在 Closing 状态下处理 FIN 帧
     /// Handle FIN frame in Closing state
-    async fn handle_fin_in_closing<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_fin_in_closing(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
     ) -> Result<()> {
         debug!(
@@ -371,7 +370,7 @@ impl ConnectionProcessor {
             endpoint.send_standalone_ack().await?;
             // 基于当前状态决定FIN后的状态转换 - 使用生命周期管理器
             // Determine FIN transition based on current state - using lifecycle manager
-            match endpoint.lifecycle_manager().current_state() {
+            match endpoint.current_state() {
                 ConnectionState::Closing => {
                     let _ = endpoint.transition_state(ConnectionState::ClosingWait);
                 }

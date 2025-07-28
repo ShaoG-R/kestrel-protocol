@@ -7,7 +7,7 @@
 //! This module implements EndpointOperations and ProcessorOperations traits for Endpoint<S>,
 //! providing abstract interfaces between processors and endpoints to achieve decoupled design.
 
-use super::Endpoint;
+use crate::core::endpoint::Endpoint;
 use crate::{
     core::{endpoint::{core::frame::create_path_response_frame, lifecycle::ConnectionLifecycleManager, processing::traits::{EndpointOperations, ProcessorOperations}, types::state::ConnectionState}, reliability::ReliabilityLayer},
     error::Result,

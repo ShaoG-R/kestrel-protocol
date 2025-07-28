@@ -25,11 +25,10 @@ use crate::{
     packet::frame::Frame,
     socket::AsyncUdpSocket,
 };
+use super::traits::EndpointOperations;
 use std::net::SocketAddr;
 use tokio::time::Instant;
-use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
 use crate::core::endpoint::types::state::ConnectionState;
-use crate::core::endpoint::Endpoint;
 use async_trait::async_trait;
 
 /// 帧类型标记模块 - 提供编译时类型安全保证
@@ -135,10 +134,11 @@ pub mod frame_types {
 /// Type-safe frame processor trait
 /// 
 /// 这个设计使用关联类型和PhantomData来确保编译时的类型安全，
-/// 防止处理器处理错误类型的帧。
+/// 防止处理器处理错误类型的帧。同时通过 trait bounds 实现解耦。
 /// 
 /// This design uses associated types and PhantomData to ensure compile-time type safety,
-/// preventing processors from handling frames of the wrong type.
+/// preventing processors from handling frames of the wrong type. It also achieves
+/// decoupling through trait bounds.
 #[async_trait]
 pub trait TypeSafeFrameProcessor<S: AsyncUdpSocket> {
     /// 关联的帧类型标记
@@ -151,8 +151,11 @@ pub trait TypeSafeFrameProcessor<S: AsyncUdpSocket> {
     
     /// 类型安全的帧处理方法
     /// Type-safe frame processing method
+    /// 
+    /// 使用 EndpointOperations trait 对象实现解耦
+    /// Uses EndpointOperations trait object to achieve decoupling
     async fn process_frame(
-        endpoint: &mut Endpoint<S>,
+        endpoint: &mut dyn EndpointOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -186,10 +189,11 @@ pub trait TypeSafeFrameValidator {
 /// Unified frame processor trait that integrates async processing and static methods
 /// 
 /// 这个新的 trait 设计解决了之前分离 trait 带来的复杂性问题，
-/// 提供了更好的类型安全性和更简洁的接口。
+/// 提供了更好的类型安全性和更简洁的接口，同时通过 trait bounds 实现解耦。
 /// 
 /// This new trait design solves the complexity issues brought by separated traits,
-/// providing better type safety and a cleaner interface.
+/// providing better type safety and a cleaner interface, while achieving decoupling
+/// through trait bounds.
 #[async_trait]
 pub trait UnifiedFrameProcessor<S: AsyncUdpSocket> {
     /// 关联类型：该处理器能处理的帧类型
@@ -206,8 +210,11 @@ pub trait UnifiedFrameProcessor<S: AsyncUdpSocket> {
     
     /// 处理特定类型的帧
     /// Process a specific type of frame
+    /// 
+    /// 使用 EndpointOperations trait 对象实现解耦
+    /// Uses EndpointOperations trait object to achieve decoupling
     async fn process_frame(
-        endpoint: &mut Endpoint<S>,
+        endpoint: &mut dyn EndpointOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -236,6 +243,9 @@ pub struct FrameProcessorRegistry<S: AsyncUdpSocket> {
 
 /// 动态帧处理器特征，用于 trait 对象
 /// Dynamic frame processor trait for trait objects
+/// 
+/// 支持运行时多态，使用 EndpointOperations trait 对象实现解耦
+/// Supports runtime polymorphism and achieves decoupling using EndpointOperations trait objects
 #[async_trait]
 pub trait DynamicFrameProcessor<S: AsyncUdpSocket>: Send + Sync {
     /// 检查是否可以处理给定的帧
@@ -248,9 +258,12 @@ pub trait DynamicFrameProcessor<S: AsyncUdpSocket>: Send + Sync {
     
     /// 处理帧
     /// Process frame
+    /// 
+    /// 使用 EndpointOperations trait 对象实现解耦
+    /// Uses EndpointOperations trait object to achieve decoupling
     async fn process_frame(
         &self,
-        endpoint: &mut Endpoint<S>,
+        endpoint: &mut dyn EndpointOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -287,7 +300,7 @@ where
     
     async fn process_frame(
         &self,
-        endpoint: &mut Endpoint<S>,
+        endpoint: &mut dyn EndpointOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -327,9 +340,12 @@ impl<S: AsyncUdpSocket> FrameProcessorRegistry<S> {
     
     /// 路由帧到合适的处理器
     /// Route frame to appropriate processor
+    /// 
+    /// 使用 EndpointOperations trait 对象实现解耦
+    /// Uses EndpointOperations trait object to achieve decoupling
     pub async fn route_frame(
         &self,
-        endpoint: &mut Endpoint<S>,
+        endpoint: &mut dyn EndpointOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -371,7 +387,7 @@ impl<S: AsyncUdpSocket> FrameProcessorRegistry<S> {
             "FrameProcessorRegistry",
             endpoint.local_cid(),
             src_addr,
-            format!("{:?}", endpoint.lifecycle_manager().current_state()),
+            format!("{:?}", endpoint.current_state()),
             now,
         );
         Err(crate::error::Error::FrameTypeMismatch {
@@ -411,15 +427,15 @@ pub struct FrameProcessingContext {
 impl FrameProcessingContext {
     /// 创建新的帧处理上下文
     /// Create a new frame processing context
-    pub fn new<S: AsyncUdpSocket>(
-        endpoint: &Endpoint<S>,
+    pub fn new(
+        endpoint: &dyn EndpointOperations,
         src_addr: SocketAddr,
         now: Instant,
     ) -> Self {
         Self {
             now,
             src_addr,
-            connection_state: endpoint.lifecycle_manager().current_state().clone(),
+            connection_state: endpoint.current_state().clone(),
             local_cid: endpoint.local_cid(),
         }
     }

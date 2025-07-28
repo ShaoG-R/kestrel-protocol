@@ -19,9 +19,8 @@ use tokio::time::Instant;
 use tracing::{debug, trace};
 use async_trait::async_trait;
 
-use crate::core::endpoint::Endpoint;
 use crate::core::endpoint::types::state::ConnectionState;
-use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
+use super::super::traits::EndpointOperations;
 
 /// PUSH 帧处理器
 /// PUSH frame processor
@@ -38,7 +37,7 @@ impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for PushProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut Endpoint<S>,
+        endpoint: &mut dyn EndpointOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -118,7 +117,7 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for PushProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut Endpoint<S>,
+        endpoint: &mut dyn EndpointOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -180,8 +179,8 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for PushProcessor {
 impl PushProcessor {
     /// 创建处理器错误上下文
     /// Create processor error context
-    fn create_error_context<S: AsyncUdpSocket>(
-        endpoint: &Endpoint<S>,
+    fn create_error_context(
+        endpoint: &dyn EndpointOperations,
         src_addr: SocketAddr,
         now: Instant,
     ) -> ProcessorErrorContext {
@@ -189,15 +188,15 @@ impl PushProcessor {
             "PushProcessor",
             endpoint.local_cid(),
             src_addr,
-            format!("{:?}", endpoint.lifecycle_manager().current_state()),
+            format!("{:?}", endpoint.current_state()),
             now,
         )
     }
 
     /// 在 SynReceived 状态下处理 PUSH 帧
     /// Handle PUSH frame in SynReceived state
-    async fn handle_push_in_syn_received<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_push_in_syn_received(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
     ) -> Result<()> {
@@ -218,8 +217,8 @@ impl PushProcessor {
 
     /// 在 Established 状态下处理 PUSH 帧
     /// Handle PUSH frame in Established state
-    async fn handle_push_in_established<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_push_in_established(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
     ) -> Result<()> {
@@ -241,8 +240,8 @@ impl PushProcessor {
 
     /// 在 ValidatingPath 状态下处理 PUSH 帧
     /// Handle PUSH frame in ValidatingPath state
-    async fn handle_push_in_validating_path<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_push_in_validating_path(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
     ) -> Result<()> {
@@ -263,8 +262,8 @@ impl PushProcessor {
 
     /// 在 FinWait 状态下处理 PUSH 帧
     /// Handle PUSH frame in FinWait state
-    async fn handle_push_in_fin_wait<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_push_in_fin_wait(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
     ) -> Result<()> {
@@ -285,8 +284,8 @@ impl PushProcessor {
 
     /// 在 Closing 状态下处理 PUSH 帧
     /// Handle PUSH frame in Closing state
-    async fn handle_push_in_closing<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_push_in_closing(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
     ) -> Result<()> {

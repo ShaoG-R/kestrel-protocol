@@ -19,9 +19,8 @@ use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 use async_trait::async_trait;
 use crate::core::endpoint::core::frame::create_path_response_frame;
-use crate::core::endpoint::Endpoint;
 use crate::core::endpoint::types::state::ConnectionState;
-use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
+use super::super::traits::EndpointOperations;
 
 /// 路径验证帧处理器
 /// Path validation frame processor
@@ -38,7 +37,7 @@ impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for PathProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut Endpoint<S>,
+        endpoint: &mut dyn EndpointOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -60,8 +59,8 @@ impl TypeSafeFrameValidator for PathProcessor {
 impl PathProcessor {
     /// 内部路径验证帧处理方法，供所有接口实现调用
     /// Internal path validation frame processing method, called by all interface implementations
-    async fn process_path_frame_internal<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn process_path_frame_internal(
+        endpoint: &mut dyn EndpointOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -88,7 +87,7 @@ impl PathProcessor {
                     "PathProcessor",
                     endpoint.local_cid(),
                     src_addr,
-                    format!("{:?}", endpoint.lifecycle_manager().current_state()),
+                    format!("{:?}", endpoint.current_state()),
                     now,
                 );
                 Err(crate::error::Error::FrameTypeMismatch {
@@ -119,7 +118,7 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for PathProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut Endpoint<S>,
+        endpoint: &mut dyn EndpointOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -133,8 +132,8 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for PathProcessor {
 impl PathProcessor {
     /// 处理 PathChallenge 帧
     /// Handle PathChallenge frame
-    async fn handle_path_challenge_frame<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_path_challenge_frame(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
         challenge_data: u64,
         context: FrameProcessingContext,
@@ -168,8 +167,8 @@ impl PathProcessor {
 
     /// 处理 PathResponse 帧
     /// Handle PathResponse frame
-    async fn handle_path_response_frame<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_path_response_frame(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
         challenge_data: u64,
         context: FrameProcessingContext,
@@ -214,8 +213,8 @@ impl PathProcessor {
 
     /// 发送路径响应
     /// Send path response
-    async fn send_path_response<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn send_path_response(
+        endpoint: &mut dyn EndpointOperations,
         header: crate::packet::header::ShortHeader,
         challenge_data: u64,
         src_addr: SocketAddr,
@@ -243,8 +242,8 @@ impl PathProcessor {
 
     /// 处理路径验证响应
     /// Handle path validation response
-    async fn handle_path_validation_response<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    async fn handle_path_validation_response(
+        endpoint: &mut dyn EndpointOperations,
         src_addr: SocketAddr,
         expected_addr: SocketAddr,
         received_challenge: u64,
@@ -256,7 +255,7 @@ impl PathProcessor {
             // Path validation successful!
             info!(
                 cid = endpoint.local_cid(),
-                old_addr = %endpoint.remote_addr,
+                old_addr = %endpoint.remote_addr(),
                 new_addr = %expected_addr,
                 "Path validation successful, migrating connection"
             );
