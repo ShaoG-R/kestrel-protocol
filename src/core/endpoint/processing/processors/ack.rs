@@ -53,6 +53,20 @@ impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for AckProcessor {
 // Implement type-safe validation interface
 impl TypeSafeFrameValidator for AckProcessor {
     type FrameTypeMarker = AckFrame;
+    
+    /// 验证帧类型是否为 ACK 帧
+    /// Validate that the frame type is an ACK frame
+    fn validate_frame_type(frame: &Frame) -> Result<()> {
+        match frame {
+            Frame::Ack { .. } => Ok(()),
+            _ => Err(crate::error::Error::InvalidFrame(
+                format!(
+                    "AckProcessor can only handle ACK frames, got: {:?}", 
+                    std::mem::discriminant(frame)
+                )
+            ))
+        }
+    }
 }
 
 impl AckProcessor {

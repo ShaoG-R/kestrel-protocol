@@ -53,6 +53,20 @@ impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for PathProcessor {
 // Implement type-safe validation interface
 impl TypeSafeFrameValidator for PathProcessor {
     type FrameTypeMarker = PathFrame;
+    
+    /// 验证帧类型是否为路径验证帧
+    /// Validate that the frame type is a path validation frame
+    fn validate_frame_type(frame: &Frame) -> Result<()> {
+        match frame {
+            Frame::PathChallenge { .. } | Frame::PathResponse { .. } => Ok(()),
+            _ => Err(crate::error::Error::InvalidFrame(
+                format!(
+                    "PathProcessor can only handle path validation frames (PathChallenge/PathResponse), got: {:?}", 
+                    std::mem::discriminant(frame)
+                )
+            ))
+        }
+    }
 }
 
 impl PathProcessor {

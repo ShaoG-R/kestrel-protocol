@@ -59,75 +59,6 @@ pub mod frame_types {
     /// Heartbeat frame type marker
     #[derive(Debug, Clone, Copy)]
     pub struct PingFrame;
-    
-    /// 帧类型特征 - 将运行时帧与编译时类型关联
-    /// Frame type trait - Associates runtime frames with compile-time types
-    pub trait FrameType {
-        /// 检查给定的帧是否属于此类型
-        /// Check if the given frame belongs to this type
-        fn matches(frame: &crate::packet::frame::Frame) -> bool;
-        
-        /// 获取类型名称，用于错误消息和调试
-        /// Get type name for error messages and debugging
-        fn type_name() -> &'static str;
-    }
-    
-    impl FrameType for PushFrame {
-        fn matches(frame: &crate::packet::frame::Frame) -> bool {
-            matches!(frame, crate::packet::frame::Frame::Push { .. })
-        }
-        
-        fn type_name() -> &'static str {
-            "PushFrame"
-        }
-    }
-    
-    impl FrameType for AckFrame {
-        fn matches(frame: &crate::packet::frame::Frame) -> bool {
-            matches!(frame, crate::packet::frame::Frame::Ack { .. })
-        }
-        
-        fn type_name() -> &'static str {
-            "AckFrame"
-        }
-    }
-    
-    impl FrameType for ConnectionFrame {
-        fn matches(frame: &crate::packet::frame::Frame) -> bool {
-            matches!(frame, 
-                crate::packet::frame::Frame::Syn { .. } |
-                crate::packet::frame::Frame::SynAck { .. } |
-                crate::packet::frame::Frame::Fin { .. }
-            )
-        }
-        
-        fn type_name() -> &'static str {
-            "ConnectionFrame"
-        }
-    }
-    
-    impl FrameType for PathFrame {
-        fn matches(frame: &crate::packet::frame::Frame) -> bool {
-            matches!(frame, 
-                crate::packet::frame::Frame::PathChallenge { .. } |
-                crate::packet::frame::Frame::PathResponse { .. }
-            )
-        }
-        
-        fn type_name() -> &'static str {
-            "PathFrame"
-        }
-    }
-    
-    impl FrameType for PingFrame {
-        fn matches(frame: &crate::packet::frame::Frame) -> bool {
-            matches!(frame, crate::packet::frame::Frame::Ping { .. })
-        }
-        
-        fn type_name() -> &'static str {
-            "PingFrame"
-        }
-    }
 }
 
 /// 类型安全的帧处理器特征
@@ -143,7 +74,7 @@ pub mod frame_types {
 pub trait TypeSafeFrameProcessor<S: AsyncUdpSocket> {
     /// 关联的帧类型标记
     /// Associated frame type marker
-    type FrameTypeMarker: frame_types::FrameType;
+    type FrameTypeMarker;
     
     /// 处理器名称，用于错误消息和日志
     /// Processor name for error messages and logging
@@ -167,22 +98,14 @@ pub trait TypeSafeFrameProcessor<S: AsyncUdpSocket> {
 pub trait TypeSafeFrameValidator {
     /// 关联的帧类型标记
     /// Associated frame type marker
-    type FrameTypeMarker: frame_types::FrameType;
+    type FrameTypeMarker;
     
     /// 编译时类型验证，确保帧类型匹配
     /// Compile-time type validation to ensure frame type matching
-    fn validate_frame_type(frame: &Frame) -> Result<()> {
-        if <Self::FrameTypeMarker as frame_types::FrameType>::matches(frame) {
-            Ok(())
-        } else {
-            Err(crate::error::Error::InvalidFrame(
-                format!(
-                    "Frame type mismatch: expected {}, got incompatible frame",
-                    <Self::FrameTypeMarker as frame_types::FrameType>::type_name()
-                )
-            ))
-        }
-    }
+    /// 
+    /// 每个处理器必须提供自己的验证逻辑，确保类型安全
+    /// Each processor must provide its own validation logic to ensure type safety
+    fn validate_frame_type(frame: &Frame) -> Result<()>;
 }
 
 /// 统一的帧处理器特征，整合了异步处理和静态方法
@@ -315,7 +238,7 @@ where
 /// 2. Zero heap allocation - all processors are zero-sized stack types  
 /// 3. Cache-friendly - eliminates indirect calls, improves branch prediction
 /// 4. Compile-time optimization - enables more aggressive compiler optimizations
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessorType {
     Push,
     Ack, 
@@ -374,38 +297,44 @@ impl StaticFrameProcessorRegistry {
         // Check for path migration - before all processors  
         endpoint.check_for_path_migration(src_addr).await?;
 
-        // 🚀 静态分发 - 编译器可以内联所有调用
-        // Static dispatch - compiler can inline all calls
+        // 🚀 静态分发 + 编译时类型验证 - 零开销 + 类型安全
+        // Static dispatch + compile-time type validation - zero-cost + type safety
         match ProcessorType::from_frame(&frame) {
             Some(ProcessorType::Push) => {
+                // 编译时类型验证 + 静态分发
+                // Compile-time type validation + static dispatch
+                <PushProcessor as TypeSafeFrameValidator>::validate_frame_type(&frame)?;
                 tracing::trace!(
                     processor_name = "PushProcessor",
                     frame_type = ?frame,
-                    "Routing frame to processor (static dispatch)"
+                    "Routing frame to processor (static dispatch with type validation)"
                 );
                 <PushProcessor as UnifiedFrameProcessor<S>>::process_frame(endpoint, frame, src_addr, now).await
             }
             Some(ProcessorType::Ack) => {
+                <AckProcessor as TypeSafeFrameValidator>::validate_frame_type(&frame)?;
                 tracing::trace!(
                     processor_name = "AckProcessor", 
                     frame_type = ?frame,
-                    "Routing frame to processor (static dispatch)"
+                    "Routing frame to processor (static dispatch with type validation)"
                 );
                 <AckProcessor as UnifiedFrameProcessor<S>>::process_frame(endpoint, frame, src_addr, now).await
             }
             Some(ProcessorType::Connection) => {
+                <ConnectionProcessor as TypeSafeFrameValidator>::validate_frame_type(&frame)?;
                 tracing::trace!(
                     processor_name = "ConnectionProcessor",
                     frame_type = ?frame, 
-                    "Routing frame to processor (static dispatch)"
+                    "Routing frame to processor (static dispatch with type validation)"
                 );
                 <ConnectionProcessor as UnifiedFrameProcessor<S>>::process_frame(endpoint, frame, src_addr, now).await
             }
             Some(ProcessorType::Path) => {
+                <PathProcessor as TypeSafeFrameValidator>::validate_frame_type(&frame)?;
                 tracing::trace!(
                     processor_name = "PathProcessor",
                     frame_type = ?frame,
-                    "Routing frame to processor (static dispatch)"
+                    "Routing frame to processor (static dispatch with type validation)"
                 );
                 <PathProcessor as UnifiedFrameProcessor<S>>::process_frame(endpoint, frame, src_addr, now).await
             }

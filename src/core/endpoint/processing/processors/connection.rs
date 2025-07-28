@@ -54,6 +54,20 @@ impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for ConnectionProcessor {
 // Implement type-safe validation interface
 impl TypeSafeFrameValidator for ConnectionProcessor {
     type FrameTypeMarker = ConnectionFrame;
+    
+    /// 验证帧类型是否为连接管理帧
+    /// Validate that the frame type is a connection management frame
+    fn validate_frame_type(frame: &Frame) -> Result<()> {
+        match frame {
+            Frame::Syn { .. } | Frame::SynAck { .. } | Frame::Fin { .. } => Ok(()),
+            _ => Err(crate::error::Error::InvalidFrame(
+                format!(
+                    "ConnectionProcessor can only handle connection management frames (SYN/SYN-ACK/FIN), got: {:?}", 
+                    std::mem::discriminant(frame)
+                )
+            ))
+        }
+    }
 }
 
 impl ConnectionProcessor {

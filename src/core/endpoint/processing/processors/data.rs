@@ -100,6 +100,20 @@ impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for PushProcessor {
 // Type-safe frame validator implementation
 impl TypeSafeFrameValidator for PushProcessor {
     type FrameTypeMarker = PushFrame;
+    
+    /// 验证帧类型是否为 PUSH 帧
+    /// Validate that the frame type is a PUSH frame
+    fn validate_frame_type(frame: &Frame) -> Result<()> {
+        match frame {
+            Frame::Push { .. } => Ok(()),
+            _ => Err(crate::error::Error::InvalidFrame(
+                format!(
+                    "PushProcessor can only handle PUSH frames, got: {:?}", 
+                    std::mem::discriminant(frame)
+                )
+            ))
+        }
+    }
 }
 
 // 新的统一处理器接口实现
@@ -372,24 +386,26 @@ mod tests {
     }
 
     #[test]
-    fn test_frame_types_marker_matching() {
-        use super::super::frame_types::*;
+    fn test_processor_type_identification() {
+        use super::super::ProcessorType;
         
         let push_frame = create_test_push_frame(1, "test");
         let ack_frame = create_test_ack_frame();
 
-        // 测试帧类型标记匹配
-        // Test frame type marker matching
-        assert!(PushFrame::matches(&push_frame));
-        assert!(!PushFrame::matches(&ack_frame));
+        // 测试统一的帧类型识别 - 使用 ProcessorType
+        // Test unified frame type identification using ProcessorType
+        assert_eq!(ProcessorType::from_frame(&push_frame), Some(ProcessorType::Push));
+        assert_eq!(ProcessorType::from_frame(&ack_frame), Some(ProcessorType::Ack));
         
-        assert!(!AckFrame::matches(&push_frame));
-        assert!(AckFrame::matches(&ack_frame));
+        // 测试不匹配的情况
+        // Test non-matching cases
+        assert_ne!(ProcessorType::from_frame(&push_frame), Some(ProcessorType::Ack));
+        assert_ne!(ProcessorType::from_frame(&ack_frame), Some(ProcessorType::Push));
 
-        // 测试类型名称
-        // Test type names
-        assert_eq!(PushFrame::type_name(), "PushFrame");
-        assert_eq!(AckFrame::type_name(), "AckFrame");
+        // 测试处理器名称
+        // Test processor names
+        assert_eq!(ProcessorType::Push.name(), "PushProcessor");
+        assert_eq!(ProcessorType::Ack.name(), "AckProcessor");
     }
 
     #[test]
