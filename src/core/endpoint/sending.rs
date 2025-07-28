@@ -9,26 +9,30 @@ use crate::{
     packet::frame::Frame,
     socket::{AsyncUdpSocket, SendCommand, SenderTaskCommand},
 };
-use std::net::SocketAddr;
+use std::{future::Future, net::SocketAddr};
 use tokio::time::Instant;
 
 /// A helper to build packets that respect the configured MTU.
 ///
 /// 一个辅助工具，用于构建遵守配置的MTU的包。
-struct PacketBuilder<'a, S: AsyncUdpSocket> {
-    endpoint: &'a Endpoint<S>,
+struct PacketBuilder<F> {
+    sender: F,
     frames: Vec<Frame>,
     current_size: usize,
     max_size: usize,
 }
 
-impl<'a, S: AsyncUdpSocket> PacketBuilder<'a, S> {
-    fn new(endpoint: &'a Endpoint<S>) -> Self {
+impl<F, Fut> PacketBuilder<F>
+where
+    F: Fn(Vec<Frame>) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    fn new(max_size: usize, sender: F) -> Self {
         Self {
-            endpoint,
+            sender,
             frames: Vec::new(),
             current_size: 0,
-            max_size: endpoint.config.connection.max_packet_size,
+            max_size,
         }
     }
 
@@ -67,7 +71,7 @@ impl<'a, S: AsyncUdpSocket> PacketBuilder<'a, S> {
         }
 
         let frames_to_send = std::mem::take(&mut self.frames);
-        self.endpoint.send_raw_frames(frames_to_send).await?;
+        (self.sender)(frames_to_send).await?;
         self.current_size = 0;
         Ok(())
     }
@@ -76,7 +80,7 @@ impl<'a, S: AsyncUdpSocket> PacketBuilder<'a, S> {
 impl<S: AsyncUdpSocket> Endpoint<S> {
     pub(super) async fn packetize_and_send(&mut self) -> Result<()> {
         let now = Instant::now();
-        
+
         // 1. Collect all frames that need to be sent without requiring &mut self.
         // 1. 收集所有需要发送的帧，这些操作不需要 &mut self。
         let mut frames_to_send = self.reliability.packetize_stream_data(
@@ -106,7 +110,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         // 3. Now that all mutable operations are done, create the builder and send.
         // 3. 所有可变操作都完成后，创建构建器并发送。
         if !frames_to_send.is_empty() {
-            let mut packet_builder = PacketBuilder::new(self);
+            let sender = |p: Vec<Frame>| self.send_raw_frames(p);
+            let mut packet_builder =
+                PacketBuilder::new(self.config.connection.max_packet_size, sender);
             packet_builder.add_frames(frames_to_send).await?;
             packet_builder.flush().await?;
         }
@@ -157,7 +163,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         }
         let frame = create_ack_frame(self.peer_cid, &mut self.reliability, self.start_time);
         self.reliability.on_ack_sent(); // This requires &mut self
-        
+
         // Since we've mutated self, we can now send the frame.
         self.send_raw_frames(vec![frame]).await
     }
@@ -189,7 +195,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         if frames.is_empty() {
             return Ok(());
         }
-        let mut packet_builder = PacketBuilder::new(self);
+        let sender = |p: Vec<Frame>| self.send_raw_frames(p);
+        let mut packet_builder =
+            PacketBuilder::new(self.config.connection.max_packet_size, sender);
         packet_builder.add_frames(frames).await?;
         packet_builder.flush().await
     }
@@ -203,5 +211,232 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             .send(SenderTaskCommand::Send(cmd))
             .await
             .map_err(|_| Error::ChannelClosed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::packet::{command::Command, header::ShortHeader};
+    use bytes::Bytes;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+
+    fn dummy_push_frame(payload_size: usize) -> Frame {
+        Frame::Push {
+            header: ShortHeader {
+                command: Command::Push,
+                connection_id: 123,
+                recv_window_size: 65535,
+                timestamp: 0,
+                sequence_number: 0,
+                recv_next_sequence: 0,
+                payload_length: payload_size as u16,
+            },
+            payload: Bytes::from(vec![0u8; payload_size]),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_packet_builder_flush_empty() {
+        let sent_packets = Arc::new(Mutex::new(Vec::new()));
+        let sent_packets_clone = sent_packets.clone();
+
+        let sender = move |frames: Vec<Frame>| {
+            let sent_packets_clone = sent_packets_clone.clone();
+            async move {
+                sent_packets_clone.lock().unwrap().push(frames);
+                Ok(())
+            }
+        };
+
+        let mut builder = PacketBuilder::new(1500, sender);
+        builder.flush().await.unwrap();
+
+        assert!(sent_packets.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_packet_builder_single_frame() {
+        let (tx, mut rx) = mpsc::channel(10);
+        let sender = |frames: Vec<Frame>| {
+            let tx = tx.clone();
+            async move {
+                tx.send(frames).await.unwrap();
+                Ok(())
+            }
+        };
+
+        let mut builder = PacketBuilder::new(1500, sender);
+        let frame = dummy_push_frame(100);
+        builder.add_frame(frame.clone()).await.unwrap();
+        builder.flush().await.unwrap();
+
+        let packet = rx.recv().await.unwrap();
+        assert_eq!(packet, vec![frame]);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_packet_builder_multiple_frames_fit() {
+        let (tx, mut rx) = mpsc::channel(10);
+        let sender = |frames: Vec<Frame>| {
+            let tx = tx.clone();
+            async move {
+                tx.send(frames).await.unwrap();
+                Ok(())
+            }
+        };
+
+        let mut builder = PacketBuilder::new(1500, sender);
+        let frame1 = dummy_push_frame(100);
+        let frame2 = dummy_push_frame(200);
+
+        builder.add_frame(frame1.clone()).await.unwrap();
+        builder.add_frame(frame2.clone()).await.unwrap();
+        builder.flush().await.unwrap();
+
+        let packet = rx.recv().await.unwrap();
+        assert_eq!(packet, vec![frame1, frame2]);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_packet_builder_exceeds_mtu() {
+        let (tx, mut rx) = mpsc::channel(10);
+        let sender = |frames: Vec<Frame>| {
+            let tx = tx.clone();
+            async move {
+                tx.send(frames).await.unwrap();
+                Ok(())
+            }
+        };
+
+        let max_size = 200;
+        let mut builder = PacketBuilder::new(max_size, sender);
+
+        // frame1 size: 21 + 100 = 121. current_size = 121.
+        let frame1 = dummy_push_frame(100);
+        // frame2 size: 21 + 100 = 121.  121 (current) + 121 (new) = 242 > 200.
+        // This will trigger a flush of frame1.
+        let frame2 = dummy_push_frame(100);
+
+        // Add frame1, it should be buffered
+        builder.add_frame(frame1.clone()).await.unwrap();
+        assert_eq!(builder.current_size, frame1.encoded_size());
+
+        // Add frame2, this should trigger a flush of frame1
+        builder.add_frame(frame2.clone()).await.unwrap();
+        // After flush, builder should only contain frame2
+        assert_eq!(builder.current_size, frame2.encoded_size());
+
+        // The first packet should have only frame1
+        let packet1 = rx.recv().await.unwrap();
+        assert_eq!(packet1, vec![frame1]);
+
+        // Flush the remaining frame
+        builder.flush().await.unwrap();
+        let packet2 = rx.recv().await.unwrap();
+        assert_eq!(packet2, vec![frame2]);
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_packet_builder_add_frames_batch() {
+        let (tx, mut rx) = mpsc::channel(10);
+        let sender = |frames: Vec<Frame>| {
+            let tx = tx.clone();
+            async move {
+                tx.send(frames).await.unwrap();
+                Ok(())
+            }
+        };
+
+        let max_size = 400;
+        let mut builder = PacketBuilder::new(max_size, sender);
+
+        let frames = vec![
+            dummy_push_frame(100), // 119
+            dummy_push_frame(100), // 119 -> total 238
+            dummy_push_frame(100), // 119 -> total 357
+            dummy_push_frame(100), // 119 -> total 476 > 400. This will trigger flush.
+            dummy_push_frame(100), // 119
+        ];
+
+        let frame_copies = frames.clone();
+        builder.add_frames(frames).await.unwrap();
+        builder.flush().await.unwrap();
+
+        // First packet
+        let packet1 = rx.recv().await.unwrap();
+        assert_eq!(packet1, &frame_copies[0..3]);
+
+        // Second packet
+        let packet2 = rx.recv().await.unwrap();
+        assert_eq!(packet2, &frame_copies[3..5]);
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_packet_builder_frame_equals_max_size() {
+        let (tx, mut rx) = mpsc::channel(10);
+        let sender = |frames: Vec<Frame>| {
+            let tx = tx.clone();
+            async move {
+                tx.send(frames).await.unwrap();
+                Ok(())
+            }
+        };
+
+        let max_size = 150;
+        let mut builder = PacketBuilder::new(max_size, sender);
+        let frame1 = dummy_push_frame(max_size - ShortHeader::ENCODED_SIZE - 1); // size is exactly max_size
+        let frame2 = dummy_push_frame(10);
+
+        builder.add_frame(frame1.clone()).await.unwrap();
+        // The builder should not flush here, it should flush on the *next* add.
+        assert_eq!(builder.current_size, max_size);
+        assert!(rx.try_recv().is_err());
+
+        builder.add_frame(frame2.clone()).await.unwrap();
+
+        // Now frame1 should have been flushed.
+        let packet1 = rx.recv().await.unwrap();
+        assert_eq!(packet1, vec![frame1]);
+
+        builder.flush().await.unwrap();
+        let packet2 = rx.recv().await.unwrap();
+        assert_eq!(packet2, vec![frame2]);
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_packet_builder_frame_larger_than_max_size() {
+        let (tx, mut rx) = mpsc::channel(10);
+        let sender = |frames: Vec<Frame>| {
+            let tx = tx.clone();
+            async move {
+                tx.send(frames).await.unwrap();
+                Ok(())
+            }
+        };
+
+        let max_size = 100;
+        let mut builder = PacketBuilder::new(max_size, sender);
+        let large_frame = dummy_push_frame(200); // 219 > 100
+
+        builder.add_frame(large_frame.clone()).await.unwrap();
+        // The builder should contain the large frame, but not flush until the next one is added or flush() is called.
+        assert_eq!(builder.current_size, large_frame.encoded_size());
+        assert!(rx.try_recv().is_err());
+
+        builder.flush().await.unwrap();
+        let packet = rx.recv().await.unwrap();
+        assert_eq!(packet, vec![large_frame]);
+
+        assert!(rx.try_recv().is_err());
     }
 } 
