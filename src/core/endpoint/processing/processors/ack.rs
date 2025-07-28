@@ -9,7 +9,7 @@
 
 use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::AckFrame};
 use crate::{
-    error::Result,
+    error::{Result, ProcessorErrorContext},
     packet::{frame::Frame, sack::decode_sack_ranges},
     socket::AsyncUdpSocket,
 };
@@ -20,6 +20,7 @@ use async_trait::async_trait;
 
 use crate::core::endpoint::Endpoint;
 use crate::core::endpoint::types::state::ConnectionState;
+use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
 
 /// ACK 帧处理器
 /// ACK frame processor
@@ -65,7 +66,12 @@ impl AckProcessor {
         now: Instant,
     ) -> Result<()> {
         let Frame::Ack { header, payload } = frame else {
-            return Err(crate::error::Error::InvalidFrame("Expected ACK frame".into()));
+            let error_context = Self::create_error_context(endpoint, src_addr, now);
+            return Err(crate::error::Error::FrameTypeMismatch {
+                expected: "ACK frame".to_string(),
+                actual: format!("{:?}", std::mem::discriminant(&frame)),
+                context: error_context,
+            });
         };
 
         let context = FrameProcessingContext::new(endpoint, src_addr, now);
@@ -141,6 +147,22 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for AckProcessor {
 
 
 impl AckProcessor {
+    /// 创建处理器错误上下文
+    /// Create processor error context
+    fn create_error_context<S: AsyncUdpSocket>(
+        endpoint: &Endpoint<S>,
+        src_addr: SocketAddr,
+        now: Instant,
+    ) -> ProcessorErrorContext {
+        ProcessorErrorContext::new(
+            "AckProcessor",
+            endpoint.local_cid(),
+            src_addr,
+            format!("{:?}", endpoint.lifecycle_manager().current_state()),
+            now,
+        )
+    }
+
     /// 处理 ACK 帧的通用逻辑
     /// Common logic for processing ACK frames
     async fn process_ack_common<S: AsyncUdpSocket>(

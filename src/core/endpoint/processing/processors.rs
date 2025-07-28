@@ -367,9 +367,18 @@ impl<S: AsyncUdpSocket> FrameProcessorRegistry<S> {
 
         // 没有找到合适的处理器
         // No suitable processor found
-        Err(crate::error::Error::InvalidFrame(
-            format!("No processor found for frame type: {:?}", frame)
-        ))
+        let error_context = crate::error::ProcessorErrorContext::new(
+            "FrameProcessorRegistry",
+            endpoint.local_cid(),
+            src_addr,
+            format!("{:?}", endpoint.lifecycle_manager().current_state()),
+            now,
+        );
+        Err(crate::error::Error::FrameTypeMismatch {
+            expected: "supported frame type".to_string(),
+            actual: format!("{:?}", std::mem::discriminant(&frame)),
+            context: error_context,
+        })
     }
 }
 

@@ -10,7 +10,7 @@
 
 use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::PushFrame};
 use crate::{
-    error::Result,
+    error::{Result, ProcessorErrorContext},
     packet::frame::Frame,
     socket::AsyncUdpSocket,
 };
@@ -21,6 +21,7 @@ use async_trait::async_trait;
 
 use crate::core::endpoint::Endpoint;
 use crate::core::endpoint::types::state::ConnectionState;
+use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
 
 /// PUSH 帧处理器
 /// PUSH frame processor
@@ -123,7 +124,12 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for PushProcessor {
         now: Instant,
     ) -> Result<()> {
         let Frame::Push { header, payload } = frame else {
-            return Err(crate::error::Error::InvalidFrame("Expected PUSH frame".into()));
+            let error_context = Self::create_error_context(endpoint, src_addr, now);
+            return Err(crate::error::Error::FrameTypeMismatch {
+                expected: "PUSH frame".to_string(),
+                actual: format!("{:?}", std::mem::discriminant(&frame)),
+                context: error_context,
+            });
         };
 
         let context = FrameProcessingContext::new(endpoint, src_addr, now);
@@ -172,6 +178,22 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for PushProcessor {
 
 
 impl PushProcessor {
+    /// 创建处理器错误上下文
+    /// Create processor error context
+    fn create_error_context<S: AsyncUdpSocket>(
+        endpoint: &Endpoint<S>,
+        src_addr: SocketAddr,
+        now: Instant,
+    ) -> ProcessorErrorContext {
+        ProcessorErrorContext::new(
+            "PushProcessor",
+            endpoint.local_cid(),
+            src_addr,
+            format!("{:?}", endpoint.lifecycle_manager().current_state()),
+            now,
+        )
+    }
+
     /// 在 SynReceived 状态下处理 PUSH 帧
     /// Handle PUSH frame in SynReceived state
     async fn handle_push_in_syn_received<S: AsyncUdpSocket>(

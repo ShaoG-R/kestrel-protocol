@@ -10,7 +10,7 @@
 
 use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::PathFrame};
 use crate::{
-    error::Result,
+    error::{Result, ProcessorErrorContext},
     packet::frame::Frame,
     socket::{AsyncUdpSocket, SocketActorCommand},
 };
@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use crate::core::endpoint::core::frame::create_path_response_frame;
 use crate::core::endpoint::Endpoint;
 use crate::core::endpoint::types::state::ConnectionState;
+use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
 
 /// 路径验证帧处理器
 /// Path validation frame processor
@@ -82,9 +83,20 @@ impl PathProcessor {
                 Self::handle_path_response_frame(endpoint, header, challenge_data, context)
                     .await
             }
-            _ => Err(crate::error::Error::InvalidFrame(
-                "Expected path validation frame".into()
-            ))
+            _ => {
+                let error_context = ProcessorErrorContext::new(
+                    "PathProcessor",
+                    endpoint.local_cid(),
+                    src_addr,
+                    format!("{:?}", endpoint.lifecycle_manager().current_state()),
+                    now,
+                );
+                Err(crate::error::Error::FrameTypeMismatch {
+                    expected: "path validation frame (PathChallenge or PathResponse)".to_string(),
+                    actual: format!("{:?}", std::mem::discriminant(&frame)),
+                    context: error_context,
+                })
+            }
         }
     }
 }

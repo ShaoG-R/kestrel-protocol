@@ -2,6 +2,81 @@
 //! Defines all possible error types in the library.
 
 use thiserror::Error;
+use std::net::SocketAddr;
+use tokio::time::Instant;
+
+/// 帧处理器错误上下文，包含错误发生时的详细信息
+/// Frame processor error context containing detailed information when error occurs
+#[derive(Debug, Clone)]
+pub struct ProcessorErrorContext {
+    /// 处理器名称
+    /// Processor name
+    pub processor_name: &'static str,
+    
+    /// 连接ID
+    /// Connection ID
+    pub connection_id: u32,
+    
+    /// 源地址
+    /// Source address
+    pub src_addr: SocketAddr,
+    
+    /// 连接状态（发生错误时）
+    /// Connection state (when error occurred)
+    pub connection_state: String,
+    
+    /// 时间戳
+    /// Timestamp
+    pub timestamp: Instant,
+    
+    /// 额外的上下文信息
+    /// Additional context information
+    pub additional_info: Option<String>,
+}
+
+impl ProcessorErrorContext {
+    /// 创建新的处理器错误上下文
+    /// Create new processor error context
+    pub fn new(
+        processor_name: &'static str,
+        connection_id: u32,
+        src_addr: SocketAddr,
+        connection_state: String,
+        timestamp: Instant,
+    ) -> Self {
+        Self {
+            processor_name,
+            connection_id,
+            src_addr,
+            connection_state,
+            timestamp,
+            additional_info: None,
+        }
+    }
+    
+    /// 添加额外的上下文信息
+    /// Add additional context information
+    pub fn with_info<S: Into<String>>(mut self, info: S) -> Self {
+        self.additional_info = Some(info.into());
+        self
+    }
+}
+
+impl std::fmt::Display for ProcessorErrorContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Processor: {}, CID: {}, Addr: {}, State: {}",
+            self.processor_name, self.connection_id, self.src_addr, self.connection_state
+        )?;
+        
+        if let Some(ref info) = self.additional_info {
+            write!(f, ", Info: {}", info)?;
+        }
+        
+        Ok(())
+    }
+}
 
 /// The primary error type for the reliable UDP protocol library.
 /// 可靠UDP协议库的主要错误类型。
@@ -26,6 +101,17 @@ pub enum Error {
     /// 接收到的帧无效或意外。
     #[error("Invalid frame: {0}")]
     InvalidFrame(String),
+
+
+    /// 帧类型不匹配错误
+    /// Frame type mismatch error
+    #[error("Frame type mismatch: expected {expected}, got {actual}")]
+    FrameTypeMismatch {
+        expected: String,
+        actual: String,
+        context: ProcessorErrorContext,
+    },
+
 
     /// The connection was closed by the peer.
     /// 连接被对端关闭。
@@ -87,6 +173,7 @@ impl From<Error> for std::io::Error {
             Error::PathValidationTimeout => ErrorKind::TimedOut.into(),
             Error::InvalidPacket => ErrorKind::InvalidData.into(),
             Error::InvalidFrame(_) => ErrorKind::InvalidData.into(),
+            Error::FrameTypeMismatch { .. } => ErrorKind::InvalidData.into(),
             Error::ChannelClosed => ErrorKind::BrokenPipe.into(),
             Error::MessageTooLarge => ErrorKind::InvalidInput.into(),
             Error::NotConnected => ErrorKind::NotConnected.into(),

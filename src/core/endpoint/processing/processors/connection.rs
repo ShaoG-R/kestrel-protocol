@@ -10,7 +10,7 @@
 
 use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::ConnectionFrame};
 use crate::{
-    error::Result,
+    error::{Result, ProcessorErrorContext},
     packet::frame::Frame,
     socket::AsyncUdpSocket,
 };
@@ -78,9 +78,20 @@ impl ConnectionProcessor {
             Frame::Fin { header } => {
                 Self::handle_fin_frame(endpoint, header, context).await
             }
-            _ => Err(crate::error::Error::InvalidFrame(
-                "Expected connection management frame".into()
-            ))
+            _ => {
+                let error_context = ProcessorErrorContext::new(
+                    "ConnectionProcessor",
+                    endpoint.local_cid(),
+                    src_addr,
+                    format!("{:?}", endpoint.lifecycle_manager().current_state()),
+                    now,
+                );
+                Err(crate::error::Error::FrameTypeMismatch {
+                    expected: "connection management frame (SYN, SYN-ACK, or FIN)".to_string(),
+                    actual: format!("{:?}", std::mem::discriminant(&frame)),
+                    context: error_context,
+                })
+            }
         }
     }
 }
