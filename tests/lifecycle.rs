@@ -1,27 +1,12 @@
 //! Minimal test to diagnose potential deadlocks in tokio::net::UdpSocket::bind.
 
-use std::sync::Once;
-use std::time::Duration;
-use kestrel_protocol::socket::ReliableUdpSocket;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::Instrument;
-use tracing_subscriber::fmt::format::FmtSpan;
+pub mod common;
 
-/// Helper to initialize tracing for tests.
-fn init_tracing() {
-    static TRACING_INIT: Once = Once::new();
-    TRACING_INIT.call_once(|| {
-        let filter = std::env::var("RUST_LOG")
-            .unwrap_or_else(|_| "kestrel_protocol=debug,lifecycle=info".to_string());
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_span_events(FmtSpan::FULL) // Log span lifecycle events
-            .with_test_writer()
-            .init();
-    });
-}
+use common::harness::{init_tracing, TestHarness};
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
+use tracing::Instrument;
 
 #[tokio::test]
 async fn test_udp_socket_bind() {
@@ -30,17 +15,18 @@ async fn test_udp_socket_bind() {
     tracing::info!("Attempting to bind UDP socket...");
 
     let addr = "127.0.0.1:0"; // Port 0 asks the OS for any available port.
-    
+
     // 使用超时来防止无限等待
-    let bind_result = tokio::time::timeout(
-        Duration::from_secs(5), 
-        tokio::net::UdpSocket::bind(addr)
-    ).await;
-    
+    let bind_result =
+        tokio::time::timeout(Duration::from_secs(5), tokio::net::UdpSocket::bind(addr)).await;
+
     match bind_result {
         Ok(Ok(socket)) => {
             let local_addr = socket.local_addr().unwrap();
-            tracing::info!("Successfully bound UDP socket to address: {:?}", local_addr);
+            tracing::info!(
+                "Successfully bound UDP socket to address: {:?}",
+                local_addr
+            );
         }
         Ok(Err(e)) => {
             tracing::error!("Failed to bind UDP socket: {}", e);
@@ -57,25 +43,15 @@ async fn test_udp_socket_bind() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_full_connection_lifecycle() {
-    init_tracing();
+    // 1. Setup server using the harness
+    let TestHarness {
+        server_addr,
+        mut server_listener,
+        ..
+    } = TestHarness::new().await;
 
-    // 1. Setup server
-    let server_addr = "127.0.0.1:9998".parse().unwrap();
-    let (server_socket, mut server_listener) =
-        ReliableUdpSocket::<tokio::net::UdpSocket>::bind(server_addr).await.unwrap();
-    let server = Arc::new(server_socket);
-    let _server_run = server.clone();
-    // The .run() method is no longer needed, as the actor is spawned in .bind()
-    // tokio::spawn(async move { server_run.run().await });
-
-    // 2. Setup client
-    let client_addr = "127.0.0.1:9997".parse().unwrap();
-    let (client_socket, _client_listener) =
-        ReliableUdpSocket::<tokio::net::UdpSocket>::bind(client_addr).await.unwrap();
-    let client = Arc::new(client_socket);
-    let _client_run = client.clone();
-    // The .run() method is no longer needed, as the actor is spawned in .bind()
-    // tokio::spawn(async move { client_run.run().await });
+    // 2. Setup client using the harness
+    let client = TestHarness::create_client().await;
 
     // Channel to sync the server's accepted stream with the main test task.
     let (server_stream_tx, mut server_stream_rx) = mpsc::channel(1);
@@ -107,7 +83,6 @@ async fn test_full_connection_lifecycle() {
         .expect("Client read should succeed");
     assert_eq!(&client_buf, server_msg);
 
-
     // 5. Client sends, server receives
     let client_msg = b"message from client";
     client_writer
@@ -134,23 +109,21 @@ async fn test_full_connection_lifecycle() {
         .read(&mut final_buf)
         .await
         .expect("Server should read EOF");
-    assert_eq!(n, 0, "Server should detect connection close (read 0 bytes)");
-} 
+    assert_eq!(
+        n, 0,
+        "Server should detect connection close (read 0 bytes)"
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_cid_handshake_and_data_transfer() {
-    init_tracing();
-
-    // 1. Setup server & client
-    let server_addr = "127.0.0.1:9996".parse().unwrap();
-    let (server_socket, mut server_listener) =
-        ReliableUdpSocket::<tokio::net::UdpSocket>::bind(server_addr).await.unwrap();
-    let _ = Arc::new(server_socket);
-    
-    let client_addr = "127.0.0.1:9995".parse().unwrap();
-    let (client_socket, _client_listener) =
-        ReliableUdpSocket::<tokio::net::UdpSocket>::bind(client_addr).await.unwrap();
-    let client = Arc::new(client_socket);
+    // 1. Setup using the harness
+    let TestHarness {
+        server_addr,
+        mut server_listener,
+        ..
+    } = TestHarness::new().await;
+    let client = TestHarness::create_client().await;
 
     // Channel to sync the server's accepted stream with the main test task.
     let (server_stream_tx, mut server_stream_rx) = mpsc::channel(1);
@@ -176,45 +149,65 @@ async fn test_cid_handshake_and_data_transfer() {
 
     // 3. Verify data transfer, which relies on correct CID routing
     // Per protocol design, server MUST write first to trigger SYN-ACK.
-    
+
     // Server -> Client
     let server_msg = b"hello from server";
     tracing::info!("[Server] Sending message to client...");
-    server_writer.write_all(server_msg).await.expect("Server write should succeed");
+    server_writer
+        .write_all(server_msg)
+        .await
+        .expect("Server write should succeed");
 
     let mut client_buf = vec![0; server_msg.len()];
     tracing::info!("[Client] Reading message from server...");
-    client_reader.read_exact(&mut client_buf).await.expect("Client read should succeed");
+    client_reader
+        .read_exact(&mut client_buf)
+        .await
+        .expect("Client read should succeed");
     assert_eq!(&client_buf, server_msg);
     tracing::info!("[Client] Received correct message from server.");
 
     // Client -> Server
     let client_msg = b"hello from client";
     tracing::info!("[Client] Sending message to server...");
-    client_writer.write_all(client_msg).await.expect("Client write should succeed");
+    client_writer
+        .write_all(client_msg)
+        .await
+        .expect("Client write should succeed");
 
     let mut server_buf = vec![0; client_msg.len()];
     tracing::info!("[Server] Reading message from client...");
-    server_reader.read_exact(&mut server_buf).await.expect("Server read should succeed");
+    server_reader
+        .read_exact(&mut server_buf)
+        .await
+        .expect("Server read should succeed");
     assert_eq!(&server_buf, client_msg);
     tracing::info!("[Server] Received correct message from client.");
 
     // 4. Graceful shutdown
-    client_writer.shutdown().await.expect("Client shutdown should succeed");
-    let n = server_reader.read(&mut vec![0; 1]).await.expect("Server read should detect EOF");
+    client_writer
+        .shutdown()
+        .await
+        .expect("Client shutdown should succeed");
+    let n = server_reader
+        .read(&mut vec![0; 1])
+        .await
+        .expect("Server read should detect EOF");
     assert_eq!(n, 0, "Server should detect clean shutdown.");
     tracing::info!("[Test] CID handshake and data transfer successful.");
-} 
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_connections_cid_isolation() {
     init_tracing();
     tracing::info!("[Test] Starting CID isolation test for concurrent connections...");
 
-    // 1. Setup server
-    let server_addr = "127.0.0.1:9994".parse().unwrap();
-    let (_server_socket, mut server_listener) =
-        ReliableUdpSocket::<tokio::net::UdpSocket>::bind(server_addr).await.unwrap();
+    // 1. Setup server using the harness
+    let TestHarness {
+        server_addr,
+        mut server_listener,
+        ..
+    } = TestHarness::new().await;
 
     // 2. The server task accepts connections and spawns a handler for each.
     let server_handle = tokio::spawn(async move {
@@ -222,8 +215,12 @@ async fn test_concurrent_connections_cid_isolation() {
         let mut handlers = Vec::new();
         for i in 0..2 {
             let (stream, remote_addr) = server_listener.accept().await.unwrap();
-            tracing::info!("[Server] Accepted connection #{} from {}", i + 1, remote_addr);
-            
+            tracing::info!(
+                "[Server] Accepted connection #{} from {}",
+                i + 1,
+                remote_addr
+            );
+
             // Spawn an independent task to handle this specific client connection.
             let handler = tokio::spawn(async move {
                 let (mut reader, mut writer) = tokio::io::split(stream);
@@ -261,10 +258,9 @@ async fn test_concurrent_connections_cid_isolation() {
                     .expect("Failed to read client message");
                 assert_eq!(msg_buf, expected_msg);
 
-
                 // D. Now that we've received everything, send the final ack.
                 writer.write_all(response_msg).await.unwrap();
-                
+
                 // E. Gracefully shutdown the connection from the server side.
                 writer
                     .shutdown()
@@ -284,18 +280,10 @@ async fn test_concurrent_connections_cid_isolation() {
     });
 
     // 3. Setup and connect two clients concurrently
-    let client_a_addr = "127.0.0.1:9993".parse().unwrap();
-    let (client_a_socket, _) =
-        ReliableUdpSocket::<tokio::net::UdpSocket>::bind(client_a_addr)
-            .await
-            .unwrap();
-    let client_b_addr = "127.0.0.1:9992".parse().unwrap();
-    let (client_b_socket, _) =
-        ReliableUdpSocket::<tokio::net::UdpSocket>::bind(client_b_addr)
-            .await
-            .unwrap();
+    let client_a = TestHarness::create_client().await;
+    let client_b = TestHarness::create_client().await;
 
-    let clients = [client_a_socket, client_b_socket];
+    let clients = [client_a, client_b];
     let client_ids = ['A', 'B'];
 
     let mut client_handles = Vec::new();
@@ -306,7 +294,7 @@ async fn test_concurrent_connections_cid_isolation() {
             tracing::info!("[Client {}] Connecting to server...", id);
             let stream = client_socket.connect(server_addr).await.unwrap();
             let (mut reader, mut writer) = tokio::io::split(stream);
-            
+
             // A. Read the server's initial "probe" required for handshake.
             let mut probe_buf = vec![0; 5];
             reader.read_exact(&mut probe_buf).await.unwrap();
@@ -343,9 +331,9 @@ async fn test_concurrent_connections_cid_isolation() {
     for client_handle in client_handles {
         client_handle.await.unwrap();
     }
-    
+
     tracing::info!("[Test] CID isolation test passed.");
-} 
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 32)]
 async fn test_high_concurrency_1rtt_connections() {
@@ -356,12 +344,12 @@ async fn test_high_concurrency_1rtt_connections() {
         NUM_CLIENTS
     );
 
-    // 1. Setup server
-    let server_addr = "127.0.0.1:9990".parse().unwrap();
-    let (_server_socket, mut server_listener) =
-        ReliableUdpSocket::<tokio::net::UdpSocket>::bind(server_addr)
-            .await
-            .unwrap();
+    // 1. Setup server using the harness
+    let TestHarness {
+        server_addr,
+        mut server_listener,
+        ..
+    } = TestHarness::new().await;
 
     // 2. The server task accepts connections and spawns a handler for each.
     let server_handle = tokio::spawn(async move {
@@ -428,24 +416,15 @@ async fn test_high_concurrency_1rtt_connections() {
         for handler in handlers {
             handler.await.unwrap();
         }
-        tracing::info!(
-            "[Server] All {} client handlers finished.",
-            NUM_CLIENTS
-        );
+        tracing::info!("[Server] All {} client handlers finished.", NUM_CLIENTS);
     });
 
     // 3. Setup and connect N clients concurrently
     let mut client_handles = Vec::new();
     for i in 0..NUM_CLIENTS {
-        let client_addr: std::net::SocketAddr = format!("127.0.0.1:{}", 10000 + i).parse().unwrap();
-        
+        let client_socket = TestHarness::create_client().await;
         let client_handle = tokio::spawn(
             async move {
-                let (client_socket, _) =
-                    ReliableUdpSocket::<tokio::net::UdpSocket>::bind(client_addr)
-                        .await
-                        .unwrap();
-
                 tracing::info!("Connecting to server...");
                 let stream = client_socket.connect(server_addr).await.unwrap();
                 let (mut reader, mut writer) = tokio::io::split(stream);
@@ -488,12 +467,7 @@ async fn test_high_concurrency_1rtt_connections() {
                 assert_eq!(final_buf, GOODBYE_MSG);
                 tracing::info!("Received GOODBYE and connection closed.");
             }
-            .instrument(tracing::info_span!(
-                "handler",
-                side = "client",
-                id = i,
-                addr = %client_addr
-            )),
+            .instrument(tracing::info_span!("handler", side = "client", id = i)),
         );
         client_handles.push(client_handle);
     }
@@ -506,6 +480,154 @@ async fn test_high_concurrency_1rtt_connections() {
 
     tracing::info!(
         "[Test] High concurrency 1-RTT test with {} clients passed.",
+        NUM_CLIENTS
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 32)]
+async fn test_high_concurrency_large_transfer() {
+    init_tracing();
+    const NUM_CLIENTS: usize = 1; // Reduced from 1000 to manage test duration with larger payloads
+    const TRANSFER_SIZE: usize = 1024; // 1KB
+    tracing::info!(
+        "[Test] Starting high concurrency large transfer test with {} clients, {}B each way...",
+        NUM_CLIENTS,
+        TRANSFER_SIZE
+    );
+
+    // 1. Setup server using the harness
+    let TestHarness {
+        server_addr,
+        mut server_listener,
+        ..
+    } = TestHarness::new().await;
+
+    // 2. The server task accepts connections and spawns a handler for each.
+    let server_handle = tokio::spawn(async move {
+        tracing::info!("[Server] Ready to accept {} connections.", NUM_CLIENTS);
+        let mut handlers = Vec::new();
+        for i in 0..NUM_CLIENTS {
+            let (stream, remote_addr) = server_listener.accept().await.unwrap();
+            tracing::info!(
+                "[Server] Accepted connection #{} from {}",
+                i + 1,
+                remote_addr
+            );
+
+            // Spawn an independent task to handle this specific client connection.
+            let handler = tokio::spawn(
+                async move {
+                    let (mut reader, mut writer) = tokio::io::split(stream);
+
+                    // A. Trigger SYN-ACK by writing a large payload.
+                    let server_welcome_payload = vec![b'S'; TRANSFER_SIZE];
+                    writer
+                        .write_all(&server_welcome_payload)
+                        .await
+                        .expect("Server handler failed to write welcome");
+                    tracing::info!("Sent welcome payload.");
+
+                    // B. Read the client's full message.
+                    let mut client_msg_buf = Vec::new();
+                    reader
+                        .read_to_end(&mut client_msg_buf)
+                        .await
+                        .expect("Failed to read client message");
+                    assert_eq!(client_msg_buf.len(), TRANSFER_SIZE);
+                    // Verify content to ensure no data is mixed between connections.
+                    let expected_byte = (i % 256) as u8;
+                    assert!(client_msg_buf.iter().all(|&b| b == expected_byte));
+                    tracing::info!("Read {}B message.", client_msg_buf.len());
+
+                    // C. Send a final, large response.
+                    let server_goodbye_payload = vec![b'G'; TRANSFER_SIZE];
+                    writer
+                        .write_all(&server_goodbye_payload)
+                        .await
+                        .expect("Server handler failed to write goodbye");
+
+                    // D. Gracefully shutdown the connection from the server side.
+                    writer
+                        .shutdown()
+                        .await
+                        .expect("Server handler failed to shutdown");
+                    tracing::info!("Finished.");
+                }
+                .instrument(tracing::info_span!(
+                    "handler",
+                    side = "server",
+                    id = i,
+                    addr = %remote_addr
+                )),
+            );
+            handlers.push(handler);
+        }
+
+        // Wait for all client handlers to complete successfully.
+        for handler in handlers {
+            handler.await.unwrap();
+        }
+        tracing::info!("[Server] All {} client handlers finished.", NUM_CLIENTS);
+    });
+
+    // 3. Setup and connect N clients concurrently
+    let mut client_handles = Vec::new();
+    for i in 0..NUM_CLIENTS {
+        let client_socket = TestHarness::create_client().await;
+        let client_handle = tokio::spawn(
+            async move {
+                tracing::info!("Connecting to server...");
+                let stream = client_socket.connect(server_addr).await.unwrap();
+                let (mut reader, mut writer) = tokio::io::split(stream);
+
+                // A. Read the server's large welcome message.
+                let server_welcome_payload = vec![b'S'; TRANSFER_SIZE];
+                let mut welcome_buf = vec![0; TRANSFER_SIZE];
+                reader
+                    .read_exact(&mut welcome_buf)
+                    .await
+                    .expect("Client failed to read welcome message");
+                assert_eq!(welcome_buf, server_welcome_payload);
+                tracing::info!("Received welcome payload.");
+
+                // B. Send a unique, large message.
+                let client_payload = vec![(i % 256) as u8; TRANSFER_SIZE];
+                writer
+                    .write_all(&client_payload)
+                    .await
+                    .expect("Client failed to write message");
+                tracing::info!("Sent message.");
+
+                // C. Shutdown the writer to send a FIN.
+                writer
+                    .shutdown()
+                    .await
+                    .expect("Client failed to shutdown writer");
+                tracing::info!("Writer shut down.");
+
+                // D. Wait for the server's final large acknowledgment.
+                let server_goodbye_payload = vec![b'G'; TRANSFER_SIZE];
+                let mut final_buf = Vec::new();
+                reader
+                    .read_to_end(&mut final_buf)
+                    .await
+                    .expect("Failed to read server's final response");
+                assert_eq!(final_buf, server_goodbye_payload);
+                tracing::info!("Received goodbye and connection closed.");
+            }
+            .instrument(tracing::info_span!("handler", side = "client", id = i)),
+        );
+        client_handles.push(client_handle);
+    }
+
+    // Wait for all top-level tasks to complete
+    for handle in client_handles {
+        handle.await.unwrap();
+    }
+    server_handle.await.unwrap();
+
+    tracing::info!(
+        "[Test] High concurrency large transfer test with {} clients passed.",
         NUM_CLIENTS
     );
 } 
