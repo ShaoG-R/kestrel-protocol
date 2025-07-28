@@ -7,6 +7,7 @@ pub mod processing;
 pub mod lifecycle;
 pub mod builder;
 pub mod types;
+pub mod operations;
 
 #[cfg(test)]
 mod tests;
@@ -27,6 +28,8 @@ use tokio::{
 };
 use tracing::trace;
 use types::state::ConnectionState;
+
+
 
 /// A guard that ensures the connection is cleaned up in the `SocketActor`
 /// when the `Endpoint` is dropped.
