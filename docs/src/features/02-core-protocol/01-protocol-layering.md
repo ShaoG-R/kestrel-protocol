@@ -63,13 +63,15 @@ graph TD
     RELIABILITY <-->|窗口调整| VEGAS
     RELIABILITY <-->|发送/接收包| UDP
 
-    %% 样式
-    classDef l4 fill:#e1f5fe
-    classDef l3 fill:#f3e5f5
-    classDef l2 fill:#e8f5e8
-    classDef l1 fill:#fff3e0
-    classDef network fill:#fafafa
+    %% 样式定义 (深色主题)
+    classDef l4 fill:#2C3E50,color:#ECF0F1,stroke:#BDC3C7
+    classDef l3 fill:#34495E,color:#ECF0F1,stroke:#BDC3C7
+    classDef l2 fill:#16A085,color:#FFFFFF,stroke:#BDC3C7
+    classDef l1 fill:#27AE60,color:#FFFFFF,stroke:#BDC3C7
+    classDef network fill:#7F8C8D,color:#FFFFFF,stroke:#BDC3C7
+    classDef default fill:#34495E,color:#ECF0F1,stroke:#BDC3C7
 
+    class APP default
     class STREAM l4
     class ENDPOINT l3
     class RELIABILITY l2
@@ -82,6 +84,7 @@ graph TD
 端点层作为协议的核心编排器，内部采用了高度模块化的设计。下图展示了Endpoint内部各组件的详细结构和交互关系：
 
 ```mermaid
+
 graph TD
     subgraph "Endpoint内部架构"
         subgraph "生命周期管理"
@@ -130,12 +133,12 @@ graph TD
     
     LM -.->|状态通知| LOGIC
     
-    %% 样式
-    classDef lifecycle fill:#e1f5fe
-    classDef event fill:#f3e5f5
-    classDef processor fill:#e8f5e8
-    classDef logic fill:#fff3e0
-    classDef interface fill:#fafafa
+    %% 样式定义 (深色主题)
+    classDef lifecycle fill:#2C3E50,color:#ECF0F1,stroke:#BDC3C7
+    classDef event fill:#34495E,color:#ECF0F1,stroke:#BDC3C7
+    classDef processor fill:#16A085,color:#FFFFFF,stroke:#BDC3C7
+    classDef logic fill:#27AE60,color:#FFFFFF,stroke:#BDC3C7
+    classDef interface fill:#7F8C8D,color:#FFFFFF,stroke:#BDC3C7
 
     class LM lifecycle
     class ED event
