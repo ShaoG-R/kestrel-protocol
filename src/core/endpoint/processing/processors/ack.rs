@@ -7,7 +7,7 @@
 //! This module specifically handles ACK frames, including SACK information parsing,
 //! RTT calculation, congestion control updates, etc.
 
-use super::{FrameProcessingContext, FrameProcessor, FrameProcessorStatic};
+use super::{FrameProcessingContext, FrameProcessor, FrameProcessorStatic, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::AckFrame};
 use crate::{
     error::Result,
     packet::{frame::Frame, sack::decode_sack_ranges},
@@ -16,6 +16,7 @@ use crate::{
 use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, trace, warn};
+use async_trait::async_trait;
 
 use crate::core::endpoint::Endpoint;
 use crate::core::endpoint::types::state::ConnectionState;
@@ -24,14 +25,45 @@ use crate::core::endpoint::types::state::ConnectionState;
 /// ACK frame processor
 pub struct AckProcessor;
 
-impl<S: AsyncUdpSocket> FrameProcessor<S> for AckProcessor {
-    fn process_frame(
+// 最新的类型安全处理器接口实现
+// Latest type-safe processor interface implementation
+#[async_trait]
+impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for AckProcessor {
+    type FrameTypeMarker = AckFrame;
+
+    fn name() -> &'static str {
+        "AckProcessor"
+    }
+
+    async fn process_frame(
         endpoint: &mut Endpoint<S>,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
-    ) -> impl std::future::Future<Output = Result<()>> + Send {
-        async move {
+    ) -> Result<()> {
+        // 类型安全验证：编译时保证只能处理ACK帧
+        // Type-safe validation: compile-time guarantee that only ACK frames can be processed
+        <Self as TypeSafeFrameValidator>::validate_frame_type(&frame)?;
+
+        Self::process_ack_frame_internal(endpoint, frame, src_addr, now).await
+    }
+}
+
+// 实现类型安全验证接口
+// Implement type-safe validation interface
+impl TypeSafeFrameValidator for AckProcessor {
+    type FrameTypeMarker = AckFrame;
+}
+
+impl AckProcessor {
+    /// 内部ACK帧处理方法，供所有接口实现调用
+    /// Internal ACK frame processing method, called by all interface implementations
+    async fn process_ack_frame_internal<S: AsyncUdpSocket>(
+        endpoint: &mut Endpoint<S>,
+        frame: Frame,
+        src_addr: SocketAddr,
+        now: Instant,
+    ) -> Result<()> {
         let Frame::Ack { header, payload } = frame else {
             return Err(crate::error::Error::InvalidFrame("Expected ACK frame".into()));
         };
@@ -77,7 +109,45 @@ impl<S: AsyncUdpSocket> FrameProcessor<S> for AckProcessor {
                 Ok(())
             }
         }
+    }
+}
+
+// 为了向后兼容，保留旧接口实现
+// Keep old interface implementation for backward compatibility
+impl<S: AsyncUdpSocket> FrameProcessor<S> for AckProcessor {
+    fn process_frame(
+        endpoint: &mut Endpoint<S>,
+        frame: Frame,
+        src_addr: SocketAddr,
+        now: Instant,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move {
+            Self::process_ack_frame_internal(endpoint, frame, src_addr, now).await
         }
+    }
+}
+
+// 统一接口实现
+// Unified interface implementation
+#[async_trait]
+impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for AckProcessor {
+    type FrameType = AckFrame;
+
+    fn can_handle(frame: &Frame) -> bool {
+        matches!(frame, Frame::Ack { .. })
+    }
+
+    fn name() -> &'static str {
+        "AckProcessor"
+    }
+
+    async fn process_frame(
+        endpoint: &mut Endpoint<S>,
+        frame: Frame,
+        src_addr: SocketAddr,
+        now: Instant,
+    ) -> Result<()> {
+        Self::process_ack_frame_internal(endpoint, frame, src_addr, now).await
     }
 }
 

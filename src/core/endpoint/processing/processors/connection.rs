@@ -8,7 +8,7 @@
 //! including connection establishment, connection acknowledgment,
 //! connection termination, etc.
 
-use super::{FrameProcessingContext, FrameProcessor, FrameProcessorStatic};
+use super::{FrameProcessingContext, FrameProcessor, FrameProcessorStatic, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::ConnectionFrame};
 use crate::{
     error::Result,
     packet::frame::Frame,
@@ -17,6 +17,7 @@ use crate::{
 use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
+use async_trait::async_trait;
 
 use crate::core::endpoint::Endpoint;
 use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
@@ -26,14 +27,45 @@ use crate::core::endpoint::types::state::ConnectionState;
 /// Connection management frame processor
 pub struct ConnectionProcessor;
 
-impl<S: AsyncUdpSocket> FrameProcessor<S> for ConnectionProcessor {
-    fn process_frame(
+// 最新的类型安全处理器接口实现
+// Latest type-safe processor interface implementation
+#[async_trait]
+impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for ConnectionProcessor {
+    type FrameTypeMarker = ConnectionFrame;
+
+    fn name() -> &'static str {
+        "ConnectionProcessor"
+    }
+
+    async fn process_frame(
         endpoint: &mut Endpoint<S>,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
-    ) -> impl std::future::Future<Output = Result<()>> + Send {
-        async move {
+    ) -> Result<()> {
+        // 类型安全验证：编译时保证只能处理连接管理帧
+        // Type-safe validation: compile-time guarantee that only connection management frames can be processed
+        <Self as TypeSafeFrameValidator>::validate_frame_type(&frame)?;
+
+        Self::process_connection_frame_internal(endpoint, frame, src_addr, now).await
+    }
+}
+
+// 实现类型安全验证接口
+// Implement type-safe validation interface
+impl TypeSafeFrameValidator for ConnectionProcessor {
+    type FrameTypeMarker = ConnectionFrame;
+}
+
+impl ConnectionProcessor {
+    /// 内部连接管理帧处理方法，供所有接口实现调用
+    /// Internal connection management frame processing method, called by all interface implementations
+    async fn process_connection_frame_internal<S: AsyncUdpSocket>(
+        endpoint: &mut Endpoint<S>,
+        frame: Frame,
+        src_addr: SocketAddr,
+        now: Instant,
+    ) -> Result<()> {
         let context = FrameProcessingContext::new(endpoint, src_addr, now);
         
         match frame {
@@ -48,8 +80,50 @@ impl<S: AsyncUdpSocket> FrameProcessor<S> for ConnectionProcessor {
             }
             _ => Err(crate::error::Error::InvalidFrame(
                 "Expected connection management frame".into()
-            )),
+            ))
         }
+    }
+}
+
+// 统一接口实现
+// Unified interface implementation
+#[async_trait]
+impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for ConnectionProcessor {
+    type FrameType = ConnectionFrame;
+
+    fn can_handle(frame: &Frame) -> bool {
+        matches!(frame, 
+            Frame::Syn { .. } |
+            Frame::SynAck { .. } |
+            Frame::Fin { .. }
+        )
+    }
+
+    fn name() -> &'static str {
+        "ConnectionProcessor"
+    }
+
+    async fn process_frame(
+        endpoint: &mut Endpoint<S>,
+        frame: Frame,
+        src_addr: SocketAddr,
+        now: Instant,
+    ) -> Result<()> {
+        Self::process_connection_frame_internal(endpoint, frame, src_addr, now).await
+    }
+}
+
+// 为了向后兼容，保留旧接口实现
+// Keep old interface implementation for backward compatibility
+impl<S: AsyncUdpSocket> FrameProcessor<S> for ConnectionProcessor {
+    fn process_frame(
+        endpoint: &mut Endpoint<S>,
+        frame: Frame,
+        src_addr: SocketAddr,
+        now: Instant,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move {
+            Self::process_connection_frame_internal(endpoint, frame, src_addr, now).await
         }
     }
 }

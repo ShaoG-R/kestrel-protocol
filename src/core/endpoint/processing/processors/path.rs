@@ -8,7 +8,7 @@
 //! related frames, including path challenges, path responses,
 //! address validation, etc.
 
-use super::{FrameProcessingContext, FrameProcessor, FrameProcessorStatic};
+use super::{FrameProcessingContext, FrameProcessor, FrameProcessorStatic, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::PathFrame};
 use crate::{
     error::{Error, Result},
     packet::frame::Frame,
@@ -17,6 +17,7 @@ use crate::{
 use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
+use async_trait::async_trait;
 use crate::core::endpoint::core::frame::create_path_response_frame;
 use crate::core::endpoint::Endpoint;
 use crate::core::endpoint::types::state::ConnectionState;
@@ -25,6 +26,98 @@ use crate::core::endpoint::types::state::ConnectionState;
 /// Path validation frame processor
 pub struct PathProcessor;
 
+// 最新的类型安全处理器接口实现
+// Latest type-safe processor interface implementation
+#[async_trait]
+impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for PathProcessor {
+    type FrameTypeMarker = PathFrame;
+
+    fn name() -> &'static str {
+        "PathProcessor"
+    }
+
+    async fn process_frame(
+        endpoint: &mut Endpoint<S>,
+        frame: Frame,
+        src_addr: SocketAddr,
+        now: Instant,
+    ) -> Result<()> {
+        // 类型安全验证：编译时保证只能处理路径验证帧
+        // Type-safe validation: compile-time guarantee that only path validation frames can be processed
+        <Self as TypeSafeFrameValidator>::validate_frame_type(&frame)?;
+
+        Self::process_path_frame_internal(endpoint, frame, src_addr, now).await
+    }
+}
+
+// 实现类型安全验证接口
+// Implement type-safe validation interface
+impl TypeSafeFrameValidator for PathProcessor {
+    type FrameTypeMarker = PathFrame;
+}
+
+impl PathProcessor {
+    /// 内部路径验证帧处理方法，供所有接口实现调用
+    /// Internal path validation frame processing method, called by all interface implementations
+    async fn process_path_frame_internal<S: AsyncUdpSocket>(
+        endpoint: &mut Endpoint<S>,
+        frame: Frame,
+        src_addr: SocketAddr,
+        now: Instant,
+    ) -> Result<()> {
+        let context = FrameProcessingContext::new(endpoint, src_addr, now);
+
+        match frame {
+            Frame::PathChallenge {
+                header,
+                challenge_data,
+            } => {
+                Self::handle_path_challenge_frame(endpoint, header, challenge_data, context)
+                    .await
+            }
+            Frame::PathResponse {
+                header,
+                challenge_data,
+            } => {
+                Self::handle_path_response_frame(endpoint, header, challenge_data, context)
+                    .await
+            }
+            _ => Err(crate::error::Error::InvalidFrame(
+                "Expected path validation frame".into()
+            ))
+        }
+    }
+}
+
+// 统一接口实现
+// Unified interface implementation
+#[async_trait]
+impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for PathProcessor {
+    type FrameType = PathFrame;
+
+    fn can_handle(frame: &Frame) -> bool {
+        matches!(frame, 
+            Frame::PathChallenge { .. } |
+            Frame::PathResponse { .. }
+        )
+    }
+
+    fn name() -> &'static str {
+        "PathProcessor"
+    }
+
+    async fn process_frame(
+        endpoint: &mut Endpoint<S>,
+        frame: Frame,
+        src_addr: SocketAddr,
+        now: Instant,
+    ) -> Result<()> {
+        Self::process_path_frame_internal(endpoint, frame, src_addr, now).await
+    }
+}
+
+// 为了向后兼容，保留旧接口实现
+// Keep old interface implementation for backward compatibility
 impl<S: AsyncUdpSocket> FrameProcessor<S> for PathProcessor {
     fn process_frame(
         endpoint: &mut Endpoint<S>,
@@ -33,25 +126,7 @@ impl<S: AsyncUdpSocket> FrameProcessor<S> for PathProcessor {
         now: Instant,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
         async move {
-            let context = FrameProcessingContext::new(endpoint, src_addr, now);
-
-            match frame {
-                Frame::PathChallenge {
-                    header,
-                    challenge_data,
-                } => {
-                    Self::handle_path_challenge_frame(endpoint, header, challenge_data, context)
-                        .await
-                }
-                Frame::PathResponse {
-                    header,
-                    challenge_data,
-                } => {
-                    Self::handle_path_response_frame(endpoint, header, challenge_data, context)
-                        .await
-                }
-                _ => Err(Error::InvalidFrame("Expected path validation frame".into())),
-            }
+            Self::process_path_frame_internal(endpoint, frame, src_addr, now).await
         }
     }
 }
