@@ -1,3 +1,4 @@
 mod sender;
-mod logic;
 pub mod frame;
+pub mod event_loop;
+pub mod handlers;
