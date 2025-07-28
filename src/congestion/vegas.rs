@@ -20,25 +20,13 @@ pub(crate) enum State {
 /// 一个类Vegas的拥塞控制器。
 #[derive(Debug)]
 pub struct Vegas {
-    #[cfg(test)]
-    pub(crate) congestion_window: u32,
-    #[cfg(not(test))]
-    congestion_window: u32,
+    pub(super) congestion_window: u32,
 
-    #[cfg(test)]
-    pub(crate) slow_start_threshold: u32,
-    #[cfg(not(test))]
-    slow_start_threshold: u32,
+    pub(super) slow_start_threshold: u32,
 
-    #[cfg(test)]
-    pub(crate) state: State,
-    #[cfg(not(test))]
-    state: State,
+    pub(super) state: State,
 
-    #[cfg(test)]
-    pub(crate) min_rtt: Duration,
-    #[cfg(not(test))]
-    min_rtt: Duration,
+    pub(super) min_rtt: Duration,
 
     /// The last measured RTT. Used to help determine the nature of packet loss.
     last_rtt: Duration,
