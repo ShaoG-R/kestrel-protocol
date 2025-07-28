@@ -36,7 +36,7 @@ graph TD
         STREAM[Stream<br/>AsyncRead/AsyncWrite]
     end
 
-    %% L3: 端点层  
+    %% L3: 端点层
     subgraph "L3: 端点层 (Endpoint Layer)"
         ENDPOINT[Endpoint<br/>连接编排器]
     end
@@ -57,7 +57,7 @@ graph TD
     end
 
     %% 垂直数据流
-    APP -.->|read()/write()| STREAM
+    APP-. "read()/write()" .->STREAM
     STREAM <-->|StreamCommand| ENDPOINT
     ENDPOINT <-->|指令/数据| RELIABILITY
     RELIABILITY <-->|窗口调整| VEGAS
@@ -65,7 +65,7 @@ graph TD
 
     %% 样式
     classDef l4 fill:#e1f5fe
-    classDef l3 fill:#f3e5f5  
+    classDef l3 fill:#f3e5f5
     classDef l2 fill:#e8f5e8
     classDef l1 fill:#fff3e0
     classDef network fill:#fafafa
