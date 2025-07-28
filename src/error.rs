@@ -22,6 +22,11 @@ pub enum Error {
     #[error("Invalid packet received")]
     InvalidPacket,
 
+    /// A received frame was invalid or unexpected.
+    /// 接收到的帧无效或意外。
+    #[error("Invalid frame: {0}")]
+    InvalidFrame(String),
+
     /// The connection was closed by the peer.
     /// 连接被对端关闭。
     #[error("Connection closed by peer")]
@@ -81,6 +86,7 @@ impl From<Error> for std::io::Error {
             Error::ConnectionTimeout => ErrorKind::TimedOut.into(),
             Error::PathValidationTimeout => ErrorKind::TimedOut.into(),
             Error::InvalidPacket => ErrorKind::InvalidData.into(),
+            Error::InvalidFrame(_) => ErrorKind::InvalidData.into(),
             Error::ChannelClosed => ErrorKind::BrokenPipe.into(),
             Error::MessageTooLarge => ErrorKind::InvalidInput.into(),
             Error::NotConnected => ErrorKind::NotConnected.into(),

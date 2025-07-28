@@ -159,7 +159,17 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                 tokio::spawn(async move {
                     info!(addr = %remote_addr, cid = %local_cid, "Spawning new endpoint task for outbound connection");
                     if let Err(e) = endpoint.run().await {
-                        error!(addr = %remote_addr, cid = %local_cid, "Endpoint closed with error: {}", e);
+                        // Connection timeouts are expected in certain scenarios (e.g., connection replacement),
+                        // so we log them at a lower level to reduce noise.
+                        // 连接超时在某些场景下是预期的（例如连接替换），所以我们以较低级别记录以减少噪音。
+                        match e {
+                            crate::error::Error::ConnectionTimeout => {
+                                debug!(addr = %remote_addr, cid = %local_cid, "Endpoint closed due to timeout: {}", e);
+                            }
+                            _ => {
+                                error!(addr = %remote_addr, cid = %local_cid, "Endpoint closed with error: {}", e);
+                            }
+                        }
                     }
                 });
 
@@ -348,7 +358,17 @@ impl<S: BindableUdpSocket> SocketActor<S> {
             tokio::spawn(async move {
                 info!(addr = %remote_addr, cid = %local_cid, "Spawning new endpoint task for inbound connection");
                 if let Err(e) = endpoint.run().await {
-                    error!(addr = %remote_addr, cid = %local_cid, "Endpoint closed with error: {}", e);
+                    // Connection timeouts are expected in certain scenarios (e.g., connection replacement),
+                    // so we log them at a lower level to reduce noise.
+                    // 连接超时在某些场景下是预期的（例如连接替换），所以我们以较低级别记录以减少噪音。
+                    match e {
+                        crate::error::Error::ConnectionTimeout => {
+                            debug!(addr = %remote_addr, cid = %local_cid, "Endpoint closed due to timeout: {}", e);
+                        }
+                        _ => {
+                            error!(addr = %remote_addr, cid = %local_cid, "Endpoint closed with error: {}", e);
+                        }
+                    }
                 }
             });
 

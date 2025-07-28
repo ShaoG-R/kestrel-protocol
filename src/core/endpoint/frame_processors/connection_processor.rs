@@ -1,0 +1,374 @@
+//! 连接管理帧处理器 - 处理 SYN、SYN-ACK、FIN 帧
+//! Connection Management Frame Processor - Handles SYN, SYN-ACK, FIN frames
+//!
+//! 该模块专门处理连接生命周期管理相关的帧，包括连接建立、
+//! 连接确认、连接关闭等逻辑。
+//!
+//! This module specifically handles connection lifecycle management related frames,
+//! including connection establishment, connection acknowledgment,
+//! connection termination, etc.
+
+use super::{FrameProcessor, FrameProcessorStatic, FrameProcessingContext};
+use crate::{
+    error::Result,
+    packet::frame::Frame,
+    socket::AsyncUdpSocket,
+};
+use std::net::SocketAddr;
+use tokio::time::Instant;
+use tracing::{debug, info, trace, warn};
+
+use crate::core::endpoint::{Endpoint, state::ConnectionState};
+
+/// 连接管理帧处理器
+/// Connection management frame processor
+pub struct ConnectionProcessor;
+
+impl<S: AsyncUdpSocket> FrameProcessor<S> for ConnectionProcessor {
+    fn process_frame(
+        endpoint: &mut Endpoint<S>,
+        frame: Frame,
+        src_addr: SocketAddr,
+        now: Instant,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move {
+        let context = FrameProcessingContext::new(endpoint, src_addr, now);
+        
+        match frame {
+            Frame::Syn { header } => {
+                Self::handle_syn_frame(endpoint, header, context).await
+            }
+            Frame::SynAck { header } => {
+                Self::handle_syn_ack_frame(endpoint, header, context).await
+            }
+            Frame::Fin { header } => {
+                Self::handle_fin_frame(endpoint, header, context).await
+            }
+            _ => Err(crate::error::Error::InvalidFrame(
+                "Expected connection management frame".into()
+            )),
+        }
+        }
+    }
+}
+
+impl FrameProcessorStatic for ConnectionProcessor {
+    fn can_handle(frame: &Frame) -> bool {
+        matches!(frame, Frame::Syn { .. } | Frame::SynAck { .. } | Frame::Fin { .. })
+    }
+
+    fn name() -> &'static str {
+        "ConnectionProcessor"
+    }
+}
+
+impl ConnectionProcessor {
+    /// 处理 SYN 帧
+    /// Handle SYN frame
+    async fn handle_syn_frame<S: AsyncUdpSocket>(
+        endpoint: &mut Endpoint<S>,
+        header: crate::packet::header::LongHeader,
+        context: FrameProcessingContext,
+    ) -> Result<()> {
+        trace!(
+            cid = context.local_cid,
+            peer_cid = header.source_cid,
+            state = ?context.connection_state,
+            "Processing SYN frame"
+        );
+
+        match context.connection_state {
+            ConnectionState::SynReceived => {
+                // 这主要由 Socket 创建 Endpoint 时处理。
+                // 如果我们收到另一个 SYN，可能是客户端的重传，
+                // 因为它还没有收到我们的 SYN-ACK。
+                // This is now primarily handled by the Socket creating the Endpoint.
+                // If we receive another SYN, it might be a retransmission from the client
+                // because it hasn't received our SYN-ACK yet.
+                info!(cid = context.local_cid, "Received duplicate SYN, ignoring.");
+                
+                // 如果我们已经被触发发送 SYN-ACK（即发送缓冲区中有数据），
+                // 我们可以重新发送它。
+                // If we have already been triggered to send a SYN-ACK (i.e., data is in the
+                // send buffer), we can resend it.
+                if !endpoint.reliability().is_send_buffer_empty() {
+                    endpoint.send_syn_ack().await?;
+                }
+                Ok(())
+            }
+            _ => {
+                warn!(
+                    cid = context.local_cid,
+                    state = ?context.connection_state,
+                    "Ignoring SYN frame in unexpected state"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// 处理 SYN-ACK 帧
+    /// Handle SYN-ACK frame
+    async fn handle_syn_ack_frame<S: AsyncUdpSocket>(
+        endpoint: &mut Endpoint<S>,
+        header: crate::packet::header::LongHeader,
+        context: FrameProcessingContext,
+    ) -> Result<()> {
+        debug!(
+            cid = context.local_cid,
+            peer_cid = header.source_cid,
+            state = ?context.connection_state,
+            "Processing SYN-ACK frame"
+        );
+
+        match context.connection_state {
+            ConnectionState::Connecting => {
+                // 处理连接建立
+                // Handle connection establishment
+                endpoint.state_manager_mut()
+                    .handle_connection_established(header.source_cid)?;
+                endpoint.set_peer_cid(header.source_cid);
+
+                // 确认 SYN-ACK，如果用户已经调用了 write()，
+                // 可能会捎带数据
+                // Acknowledge the SYN-ACK, potentially with piggybacked data if the
+                // user has already called write()
+                if !endpoint.reliability().is_send_buffer_empty() {
+                    endpoint.packetize_and_send().await?;
+                } else {
+                    endpoint.send_standalone_ack().await?;
+                }
+                
+                info!(
+                    cid = context.local_cid,
+                    peer_cid = header.source_cid,
+                    "Connection established"
+                );
+                Ok(())
+            }
+            _ => {
+                warn!(
+                    cid = context.local_cid,
+                    state = ?context.connection_state,
+                    "Ignoring SYN-ACK frame in unexpected state"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// 处理 FIN 帧
+    /// Handle FIN frame
+    async fn handle_fin_frame<S: AsyncUdpSocket>(
+        endpoint: &mut Endpoint<S>,
+        header: crate::packet::header::ShortHeader,
+        context: FrameProcessingContext,
+    ) -> Result<()> {
+        debug!(
+            cid = context.local_cid,
+            seq = header.sequence_number,
+            state = ?context.connection_state,
+            "Processing FIN frame"
+        );
+
+        match context.connection_state {
+            ConnectionState::SynReceived => {
+                Self::handle_fin_in_syn_received(endpoint, header).await
+            }
+            ConnectionState::Established => {
+                Self::handle_fin_in_established(endpoint, header).await
+            }
+            ConnectionState::ValidatingPath { .. } => {
+                Self::handle_fin_in_validating_path(endpoint, header).await
+            }
+            ConnectionState::FinWait => {
+                Self::handle_fin_in_fin_wait(endpoint, header).await
+            }
+            ConnectionState::Closing => {
+                Self::handle_fin_in_closing(endpoint, header).await
+            }
+            _ => {
+                warn!(
+                    cid = context.local_cid,
+                    state = ?context.connection_state,
+                    "Ignoring FIN frame in unexpected state"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// 在 SynReceived 状态下处理 FIN 帧
+    /// Handle FIN frame in SynReceived state
+    async fn handle_fin_in_syn_received<S: AsyncUdpSocket>(
+        endpoint: &mut Endpoint<S>,
+        header: crate::packet::header::ShortHeader,
+    ) -> Result<()> {
+        debug!(
+            cid = endpoint.local_cid(),
+            seq = header.sequence_number,
+            "Handling FIN in SynReceived state (0-RTT close)"
+        );
+
+        // 即使在 SynReceived 状态下也处理 FIN - 这可能发生在 0-RTT 中，
+        // 客户端发送数据后立即关闭
+        // Handle FIN even in SynReceived state - this can happen with 0-RTT
+        // where client sends data and immediately closes
+        if endpoint.reliability_mut().receive_fin(header.sequence_number) {
+            endpoint.send_standalone_ack().await?;
+            let _ = endpoint.state_manager_mut().handle_fin_received();
+        }
+        Ok(())
+    }
+
+    /// 在 Established 状态下处理 FIN 帧
+    /// Handle FIN frame in Established state
+    async fn handle_fin_in_established<S: AsyncUdpSocket>(
+        endpoint: &mut Endpoint<S>,
+        header: crate::packet::header::ShortHeader,
+    ) -> Result<()> {
+        trace!(
+            cid = endpoint.local_cid(),
+            seq = header.sequence_number,
+            "Handling FIN in Established state"
+        );
+
+        // 只是接收 FIN 并确认它。不要在这里改变状态。
+        // 到 FinWait 的状态转换由主循环中的 `reassemble` 方法驱动，
+        // 这是唯一的真实来源。
+        // Just receive the FIN and ACK it. Do NOT change state here.
+        // The state transition to FinWait is driven by the `reassemble`
+        // method in the main loop, which is the single source of truth.
+        if endpoint.reliability_mut().receive_fin(header.sequence_number) {
+            endpoint.send_standalone_ack().await?;
+        }
+        Ok(())
+    }
+
+    /// 在 ValidatingPath 状态下处理 FIN 帧
+    /// Handle FIN frame in ValidatingPath state
+    async fn handle_fin_in_validating_path<S: AsyncUdpSocket>(
+        endpoint: &mut Endpoint<S>,
+        header: crate::packet::header::ShortHeader,
+    ) -> Result<()> {
+        debug!(
+            cid = endpoint.local_cid(),
+            seq = header.sequence_number,
+            "Handling FIN during path validation"
+        );
+
+        if endpoint.reliability_mut().receive_fin(header.sequence_number) {
+            endpoint.send_standalone_ack().await?;
+            let _ = endpoint.state_manager_mut().handle_fin_received();
+        }
+        Ok(())
+    }
+
+    /// 在 FinWait 状态下处理 FIN 帧
+    /// Handle FIN frame in FinWait state
+    async fn handle_fin_in_fin_wait<S: AsyncUdpSocket>(
+        endpoint: &mut Endpoint<S>,
+        header: crate::packet::header::ShortHeader,
+    ) -> Result<()> {
+        debug!(
+            cid = endpoint.local_cid(),
+            seq = header.sequence_number,
+            "Handling FIN in FinWait state (retransmitted FIN)"
+        );
+
+        // 这是来自对端的重传 FIN。只需再次确认它。
+        // 不要在这里改变状态。状态应该只在本地应用程序调用 `shutdown()` 时
+        // 转换到 `Closing`。
+        // This is a retransmitted FIN from the peer. Just acknowledge it again.
+        // Do NOT change state here. The state should only transition to `Closing`
+        // when the local application calls `shutdown()`.
+        if endpoint.reliability_mut().receive_fin(header.sequence_number) {
+            endpoint.send_standalone_ack().await?;
+        }
+        Ok(())
+    }
+
+    /// 在 Closing 状态下处理 FIN 帧
+    /// Handle FIN frame in Closing state
+    async fn handle_fin_in_closing<S: AsyncUdpSocket>(
+        endpoint: &mut Endpoint<S>,
+        header: crate::packet::header::ShortHeader,
+    ) -> Result<()> {
+        debug!(
+            cid = endpoint.local_cid(),
+            seq = header.sequence_number,
+            "Handling FIN in Closing state"
+        );
+
+        if endpoint.reliability_mut().receive_fin(header.sequence_number) {
+            endpoint.send_standalone_ack().await?;
+            let _ = endpoint.state_manager_mut().handle_fin_received();
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::packet::frame::Frame;
+    use crate::packet::header::{LongHeader, ShortHeader};
+    use crate::packet::command::Command;
+
+    #[test]
+    fn test_connection_processor_can_handle() {
+        let syn_frame = Frame::Syn {
+            header: LongHeader {
+                command: Command::Syn,
+                protocol_version: 1,
+                destination_cid: 0,
+                source_cid: 123,
+            },
+        };
+
+        let syn_ack_frame = Frame::SynAck {
+            header: LongHeader {
+                command: Command::SynAck,
+                protocol_version: 1,
+                destination_cid: 123,
+                source_cid: 456,
+            },
+        };
+
+        let fin_frame = Frame::Fin {
+            header: ShortHeader {
+                command: Command::Fin,
+                connection_id: 456,
+                payload_length: 0,
+                recv_window_size: 100,
+                timestamp: 1000,
+                sequence_number: 10,
+                recv_next_sequence: 5,
+            },
+        };
+
+        assert!(<ConnectionProcessor as FrameProcessorStatic>::can_handle(&syn_frame));
+        assert!(<ConnectionProcessor as FrameProcessorStatic>::can_handle(&syn_ack_frame));
+        assert!(<ConnectionProcessor as FrameProcessorStatic>::can_handle(&fin_frame));
+
+        let push_frame = Frame::Push {
+            header: ShortHeader {
+                command: Command::Push,
+                connection_id: 1,
+                payload_length: 10,
+                recv_window_size: 100,
+                timestamp: 1000,
+                sequence_number: 1,
+                recv_next_sequence: 0,
+            },
+            payload: bytes::Bytes::from("test data"),
+        };
+
+        assert!(!<ConnectionProcessor as FrameProcessorStatic>::can_handle(&push_frame));
+    }
+
+    #[test]
+    fn test_processor_name() {
+        assert_eq!(<ConnectionProcessor as FrameProcessorStatic>::name(), "ConnectionProcessor");
+    }
+}

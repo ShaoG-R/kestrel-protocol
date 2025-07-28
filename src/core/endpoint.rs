@@ -6,6 +6,7 @@ mod command;
 mod constructors;
 mod event_dispatcher;
 pub mod frame_factory;
+pub mod frame_processors;
 mod logic;
 mod sending;
 pub mod state;
@@ -74,12 +75,7 @@ pub struct Endpoint<S: AsyncUdpSocket> {
 }
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
-    /// Sets the peer's connection ID.
-    /// This is primarily used for testing setups where CIDs are pre-determined.
-    #[cfg(test)]
-    pub fn set_peer_cid(&mut self, peer_cid: u32) {
-        self.peer_cid = peer_cid;
-    }
+
 
     /// 获取本地连接ID
     /// Gets the local connection ID
@@ -87,10 +83,28 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         self.local_cid
     }
 
+    /// 获取对端连接ID
+    /// Gets the peer connection ID
+    pub fn peer_cid(&self) -> u32 {
+        self.peer_cid
+    }
+
+    /// 设置对端连接ID
+    /// Sets the peer connection ID
+    pub fn set_peer_cid(&mut self, peer_cid: u32) {
+        self.peer_cid = peer_cid;
+    }
+
     /// 获取当前连接状态
     /// Gets the current connection state
     pub fn state(&self) -> &ConnectionState {
         self.state_manager.current_state()
+    }
+
+    /// 获取状态管理器的引用
+    /// Gets a reference to the state manager
+    pub fn state_manager(&self) -> &StateManager {
+        &self.state_manager
     }
 
     /// 获取状态管理器的可变引用
@@ -103,5 +117,41 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// Updates the last receive time
     pub fn update_last_recv_time(&mut self, time: Instant) {
         self.last_recv_time = time;
+    }
+
+    /// 获取连接开始时间
+    /// Gets the connection start time
+    pub fn start_time(&self) -> Instant {
+        self.start_time
+    }
+
+    /// 获取远程地址
+    /// Gets the remote address
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
+    }
+
+    /// 设置远程地址
+    /// Sets the remote address
+    pub fn set_remote_addr(&mut self, addr: SocketAddr) {
+        self.remote_addr = addr;
+    }
+
+    /// 获取命令发送器
+    /// Gets the command sender
+    pub fn command_tx(&self) -> &mpsc::Sender<SocketActorCommand> {
+        &self.command_tx
+    }
+
+    /// 获取可靠性层的可变引用
+    /// Gets a mutable reference to the reliability layer
+    pub fn reliability_mut(&mut self) -> &mut ReliabilityLayer {
+        &mut self.reliability
+    }
+
+    /// 获取可靠性层的引用
+    /// Gets a reference to the reliability layer
+    pub fn reliability(&self) -> &ReliabilityLayer {
+        &self.reliability
     }
 }

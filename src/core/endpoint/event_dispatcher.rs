@@ -1,7 +1,7 @@
 //! 事件分发器 - 负责将不同类型的事件路由到相应的处理器
 //! Event Dispatcher - Routes different types of events to appropriate handlers
 
-use super::{command::StreamCommand, state::ConnectionState, Endpoint};
+use super::{command::StreamCommand, frame_processors::FrameProcessorRouter, Endpoint};
 use crate::{
     error::Result,
     packet::frame::Frame,
@@ -16,46 +16,18 @@ use tracing::trace;
 pub struct EventDispatcher;
 
 impl EventDispatcher {
-    /// 分发网络帧事件到对应的状态处理器
-    /// Dispatches network frame events to the corresponding state handlers
+    /// 分发网络帧事件到对应的帧处理器
+    /// Dispatches network frame events to the corresponding frame processors
     pub async fn dispatch_frame<S: AsyncUdpSocket>(
         endpoint: &mut Endpoint<S>,
         frame: Frame,
         src_addr: SocketAddr,
     ) -> Result<()> {
         trace!(local_cid = endpoint.local_cid(), ?frame, "Processing incoming frame");
-        endpoint.update_last_recv_time(Instant::now());
-
-        // 检查路径迁移
-        // Check for path migration
-        endpoint.check_path_migration(src_addr).await?;
-
-        // 根据当前状态分发帧处理
-        // Dispatch frame handling based on current state
-        match endpoint.state() {
-            ConnectionState::Connecting => {
-                endpoint.handle_frame_connecting(frame, src_addr).await
-            }
-            ConnectionState::SynReceived => {
-                endpoint.handle_frame_syn_received(frame, src_addr).await
-            }
-            ConnectionState::Established => {
-                endpoint.handle_frame_established(frame, src_addr).await
-            }
-            ConnectionState::ValidatingPath { .. } => {
-                endpoint.handle_frame_validating_path(frame, src_addr).await
-            }
-            ConnectionState::Closing => endpoint.handle_frame_closing(frame, src_addr).await,
-            ConnectionState::FinWait => endpoint.handle_frame_fin_wait(frame, src_addr).await,
-            ConnectionState::ClosingWait => {
-                endpoint.handle_frame_closing_wait(frame, src_addr).await
-            }
-            ConnectionState::Closed => {
-                // 已关闭的连接不处理任何帧
-                // Closed connections don't handle any frames
-                Ok(())
-            }
-        }
+        
+        // 使用帧处理器路由器来处理帧
+        // Use frame processor router to handle the frame
+        FrameProcessorRouter::route_frame(endpoint, frame, src_addr, Instant::now()).await
     }
 
     /// 分发流命令事件
