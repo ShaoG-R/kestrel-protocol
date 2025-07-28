@@ -20,7 +20,7 @@ use tracing::{debug, trace};
 use async_trait::async_trait;
 
 use crate::core::endpoint::types::state::ConnectionState;
-use super::super::traits::EndpointOperations;
+use super::super::traits::ProcessorOperations;
 
 /// PUSH 帧处理器
 /// PUSH frame processor
@@ -37,7 +37,7 @@ impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for PushProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -117,7 +117,7 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for PushProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -180,7 +180,7 @@ impl PushProcessor {
     /// 创建处理器错误上下文
     /// Create processor error context
     fn create_error_context(
-        endpoint: &dyn EndpointOperations,
+        endpoint: &dyn ProcessorOperations,
         src_addr: SocketAddr,
         now: Instant,
     ) -> ProcessorErrorContext {
@@ -196,7 +196,7 @@ impl PushProcessor {
     /// 在 SynReceived 状态下处理 PUSH 帧
     /// Handle PUSH frame in SynReceived state
     async fn handle_push_in_syn_received(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
     ) -> Result<()> {
@@ -218,7 +218,7 @@ impl PushProcessor {
     /// 在 Established 状态下处理 PUSH 帧
     /// Handle PUSH frame in Established state
     async fn handle_push_in_established(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
     ) -> Result<()> {
@@ -229,11 +229,9 @@ impl PushProcessor {
             "Handling PUSH in Established state"
         );
 
-        // 接收数据并检查是否需要立即发送 ACK
-        // Receive data and check if immediate ACK is needed
-        if endpoint.reliability_mut().receive_push(header.sequence_number, payload) {
-            endpoint.send_standalone_ack_frame().await?;
-        }
+        // 使用高级接口接收数据并自动发送 ACK（如果需要）
+        // Use high-level interface to receive data and automatically send ACK if needed
+        endpoint.receive_data_and_maybe_ack(header.sequence_number, payload).await?;
         
         Ok(())
     }
@@ -241,7 +239,7 @@ impl PushProcessor {
     /// 在 ValidatingPath 状态下处理 PUSH 帧
     /// Handle PUSH frame in ValidatingPath state
     async fn handle_push_in_validating_path(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
     ) -> Result<()> {
@@ -251,11 +249,9 @@ impl PushProcessor {
             "Handling PUSH during path validation"
         );
 
-        // 在路径验证期间继续处理数据帧
-        // Continue processing data frames during path validation
-        if endpoint.reliability_mut().receive_push(header.sequence_number, payload) {
-            endpoint.send_standalone_ack_frame().await?;
-        }
+        // 在路径验证期间继续处理数据帧，使用高级接口
+        // Continue processing data frames during path validation using high-level interface
+        endpoint.receive_data_and_maybe_ack(header.sequence_number, payload).await?;
         
         Ok(())
     }
@@ -263,7 +259,7 @@ impl PushProcessor {
     /// 在 FinWait 状态下处理 PUSH 帧
     /// Handle PUSH frame in FinWait state
     async fn handle_push_in_fin_wait(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
     ) -> Result<()> {
@@ -273,11 +269,9 @@ impl PushProcessor {
             "Handling PUSH in FinWait state"
         );
 
-        // 即使在 FinWait 状态下也要处理数据，因为对端可能还在发送数据
-        // Process data even in FinWait state as peer might still be sending data
-        if endpoint.reliability_mut().receive_push(header.sequence_number, payload) {
-            endpoint.send_standalone_ack_frame().await?;
-        }
+        // 即使在 FinWait 状态下也要处理数据，使用高级接口
+        // Process data even in FinWait state using high-level interface
+        endpoint.receive_data_and_maybe_ack(header.sequence_number, payload).await?;
         
         Ok(())
     }
@@ -285,7 +279,7 @@ impl PushProcessor {
     /// 在 Closing 状态下处理 PUSH 帧
     /// Handle PUSH frame in Closing state
     async fn handle_push_in_closing(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
     ) -> Result<()> {
@@ -295,12 +289,9 @@ impl PushProcessor {
             "Handling PUSH in Closing state"
         );
 
-        // 在关闭过程中仍可能收到数据，因为对端可能在收到我们的 FIN 之前发送了数据
-        // It's possible to receive data during closing as the peer might have
-        // sent it before receiving our FIN
-        if endpoint.reliability_mut().receive_push(header.sequence_number, payload) {
-            endpoint.send_standalone_ack_frame().await?;
-        }
+        // 在关闭过程中仍可能收到数据，使用高级接口处理
+        // Process data during closing using high-level interface
+        endpoint.receive_data_and_maybe_ack(header.sequence_number, payload).await?;
         
         Ok(())
     }

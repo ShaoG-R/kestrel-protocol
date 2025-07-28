@@ -20,7 +20,7 @@ use tracing::{debug, info, trace, warn};
 use async_trait::async_trait;
 
 use crate::core::endpoint::types::state::ConnectionState;
-use super::super::traits::EndpointOperations;
+use super::super::traits::ProcessorOperations;
 
 /// 连接管理帧处理器
 /// Connection management frame processor
@@ -37,7 +37,7 @@ impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for ConnectionProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -60,7 +60,7 @@ impl ConnectionProcessor {
     /// 内部连接管理帧处理方法，供所有接口实现调用
     /// Internal connection management frame processing method, called by all interface implementations
     async fn process_connection_frame_internal(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -114,7 +114,7 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for ConnectionProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -129,7 +129,7 @@ impl ConnectionProcessor {
     /// 处理 SYN 帧
     /// Handle SYN frame
     async fn handle_syn_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::LongHeader,
         context: FrameProcessingContext,
     ) -> Result<()> {
@@ -173,7 +173,7 @@ impl ConnectionProcessor {
     /// 处理 SYN-ACK 帧
     /// Handle SYN-ACK frame
     async fn handle_syn_ack_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::LongHeader,
         context: FrameProcessingContext,
     ) -> Result<()> {
@@ -222,7 +222,7 @@ impl ConnectionProcessor {
     /// 处理 FIN 帧
     /// Handle FIN frame
     async fn handle_fin_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         context: FrameProcessingContext,
     ) -> Result<()> {
@@ -263,7 +263,7 @@ impl ConnectionProcessor {
     /// 在 SynReceived 状态下处理 FIN 帧
     /// Handle FIN frame in SynReceived state
     async fn handle_fin_in_syn_received(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
     ) -> Result<()> {
         debug!(
@@ -272,12 +272,10 @@ impl ConnectionProcessor {
             "Handling FIN in SynReceived state (0-RTT close)"
         );
 
-        // 即使在 SynReceived 状态下也处理 FIN - 这可能发生在 0-RTT 中，
-        // 客户端发送数据后立即关闭
-        // Handle FIN even in SynReceived state - this can happen with 0-RTT
-        // where client sends data and immediately closes
-        if endpoint.reliability_mut().receive_fin(header.sequence_number) {
-            endpoint.send_standalone_ack_frame().await?;
+        // 即使在 SynReceived 状态下也处理 FIN - 这可能发生在 0-RTT 中，使用高级接口
+        // Handle FIN even in SynReceived state using high-level interface
+        let fin_received = endpoint.receive_fin_and_ack(header.sequence_number).await?;
+        if fin_received {
             // 在0-RTT场景中，从SynReceived状态转换到FinWait - 使用生命周期管理器
             // In 0-RTT scenario, transition from SynReceived to FinWait - using lifecycle manager
             let _ = endpoint.transition_state(ConnectionState::FinWait);
@@ -288,7 +286,7 @@ impl ConnectionProcessor {
     /// 在 Established 状态下处理 FIN 帧
     /// Handle FIN frame in Established state
     async fn handle_fin_in_established(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
     ) -> Result<()> {
         trace!(
@@ -297,22 +295,18 @@ impl ConnectionProcessor {
             "Handling FIN in Established state"
         );
 
-        // 只是接收 FIN 并确认它。不要在这里改变状态。
-        // 到 FinWait 的状态转换由主循环中的 `reassemble` 方法驱动，
-        // 这是唯一的真实来源。
-        // Just receive the FIN and ACK it. Do NOT change state here.
-        // The state transition to FinWait is driven by the `reassemble`
-        // method in the main loop, which is the single source of truth.
-        if endpoint.reliability_mut().receive_fin(header.sequence_number) {
-            endpoint.send_standalone_ack_frame().await?;
-        }
+        // 只是接收 FIN 并确认它，使用高级接口。不要在这里改变状态。
+        // 到 FinWait 的状态转换由主循环中的 `reassemble` 方法驱动，这是唯一的真实来源。
+        // Just receive the FIN and ACK it using high-level interface. Do NOT change state here.
+        // The state transition to FinWait is driven by the `reassemble` method in the main loop.
+        endpoint.receive_fin_and_ack(header.sequence_number).await?;
         Ok(())
     }
 
     /// 在 ValidatingPath 状态下处理 FIN 帧
     /// Handle FIN frame in ValidatingPath state
     async fn handle_fin_in_validating_path(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
     ) -> Result<()> {
         debug!(
@@ -321,8 +315,8 @@ impl ConnectionProcessor {
             "Handling FIN during path validation"
         );
 
-        if endpoint.reliability_mut().receive_fin(header.sequence_number) {
-            endpoint.send_standalone_ack_frame().await?;
+        let fin_received = endpoint.receive_fin_and_ack(header.sequence_number).await?;
+        if fin_received {
             // 路径验证期间收到FIN，转换到FinWait - 使用生命周期管理器
             // Received FIN during path validation, transition to FinWait - using lifecycle manager
             let _ = endpoint.transition_state(ConnectionState::FinWait);
@@ -333,7 +327,7 @@ impl ConnectionProcessor {
     /// 在 FinWait 状态下处理 FIN 帧
     /// Handle FIN frame in FinWait state
     async fn handle_fin_in_fin_wait(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
     ) -> Result<()> {
         debug!(
@@ -342,22 +336,18 @@ impl ConnectionProcessor {
             "Handling FIN in FinWait state (retransmitted FIN)"
         );
 
-        // 这是来自对端的重传 FIN。只需再次确认它。
-        // 不要在这里改变状态。状态应该只在本地应用程序调用 `shutdown()` 时
-        // 转换到 `Closing`。
-        // This is a retransmitted FIN from the peer. Just acknowledge it again.
-        // Do NOT change state here. The state should only transition to `Closing`
-        // when the local application calls `shutdown()`.
-        if endpoint.reliability_mut().receive_fin(header.sequence_number) {
-            endpoint.send_standalone_ack_frame().await?;
-        }
+        // 这是来自对端的重传 FIN，使用高级接口处理。不要在这里改变状态。
+        // 状态应该只在本地应用程序调用 `shutdown()` 时转换到 `Closing`。
+        // This is a retransmitted FIN from the peer, handled with high-level interface.
+        // Do NOT change state here. State should only transition to `Closing` when local app calls `shutdown()`.
+        endpoint.receive_fin_and_ack(header.sequence_number).await?;
         Ok(())
     }
 
     /// 在 Closing 状态下处理 FIN 帧
     /// Handle FIN frame in Closing state
     async fn handle_fin_in_closing(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
     ) -> Result<()> {
         debug!(
@@ -366,8 +356,8 @@ impl ConnectionProcessor {
             "Handling FIN in Closing state"
         );
 
-        if endpoint.reliability_mut().receive_fin(header.sequence_number) {
-            endpoint.send_standalone_ack_frame().await?;
+        let fin_received = endpoint.receive_fin_and_ack(header.sequence_number).await?;
+        if fin_received {
             // 基于当前状态决定FIN后的状态转换 - 使用生命周期管理器
             // Determine FIN transition based on current state - using lifecycle manager
             match endpoint.current_state() {

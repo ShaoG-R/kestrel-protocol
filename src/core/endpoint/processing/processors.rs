@@ -25,7 +25,7 @@ use crate::{
     packet::frame::Frame,
     socket::AsyncUdpSocket,
 };
-use super::traits::EndpointOperations;
+use super::traits::ProcessorOperations;
 use std::net::SocketAddr;
 use tokio::time::Instant;
 use crate::core::endpoint::types::state::ConnectionState;
@@ -155,7 +155,7 @@ pub trait TypeSafeFrameProcessor<S: AsyncUdpSocket> {
     /// 使用 EndpointOperations trait 对象实现解耦
     /// Uses EndpointOperations trait object to achieve decoupling
     async fn process_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -214,7 +214,7 @@ pub trait UnifiedFrameProcessor<S: AsyncUdpSocket> {
     /// 使用 EndpointOperations trait 对象实现解耦
     /// Uses EndpointOperations trait object to achieve decoupling
     async fn process_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -263,7 +263,7 @@ pub trait DynamicFrameProcessor<S: AsyncUdpSocket>: Send + Sync {
     /// Uses EndpointOperations trait object to achieve decoupling
     async fn process_frame(
         &self,
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -300,7 +300,7 @@ where
     
     async fn process_frame(
         &self,
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -345,7 +345,7 @@ impl<S: AsyncUdpSocket> FrameProcessorRegistry<S> {
     /// Uses EndpointOperations trait object to achieve decoupling
     pub async fn route_frame(
         &self,
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -428,7 +428,7 @@ impl FrameProcessingContext {
     /// 创建新的帧处理上下文
     /// Create a new frame processing context
     pub fn new(
-        endpoint: &dyn EndpointOperations,
+        endpoint: &dyn ProcessorOperations,
         src_addr: SocketAddr,
         now: Instant,
     ) -> Self {

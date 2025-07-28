@@ -19,7 +19,7 @@ use tracing::{debug, trace, warn};
 use async_trait::async_trait;
 
 use crate::core::endpoint::types::state::ConnectionState;
-use super::super::traits::EndpointOperations;
+use super::super::traits::{ProcessorOperations};
 
 /// ACK 帧处理器
 /// ACK frame processor
@@ -36,7 +36,7 @@ impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for AckProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -59,7 +59,7 @@ impl AckProcessor {
     /// 内部ACK帧处理方法，供所有接口实现调用
     /// Internal ACK frame processing method, called by all interface implementations
     async fn process_ack_frame_internal(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -134,7 +134,7 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for AckProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -149,7 +149,7 @@ impl AckProcessor {
     /// 创建处理器错误上下文
     /// Create processor error context
     fn create_error_context(
-        endpoint: &dyn EndpointOperations,
+        endpoint: &dyn ProcessorOperations,
         src_addr: SocketAddr,
         now: Instant,
     ) -> ProcessorErrorContext {
@@ -165,7 +165,7 @@ impl AckProcessor {
     /// 处理 ACK 帧的通用逻辑
     /// Common logic for processing ACK frames
     async fn process_ack_common(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
         now: Instant,
@@ -186,13 +186,17 @@ impl AckProcessor {
             "Processing ACK with SACK ranges"
         );
 
-        // 处理 ACK 并获取需要重传的帧
-        // Process ACK and get frames that need retransmission
-        let frames_to_retx = endpoint.reliability_mut().handle_ack(
+        // 使用高级接口处理 ACK 并获取需要重传的帧
+        // Use high-level interface to process ACK and get frames that need retransmission
+        let sack_tuples: Vec<(u32, u32)> = sack_ranges.into_iter()
+            .map(|range| (range.start, range.end))
+            .collect();
+
+        let frames_to_retx = endpoint.process_ack_and_get_retx_frames(
             header.recv_next_sequence,
-            sack_ranges,
+            sack_tuples,
             now,
-        );
+        ).await?;
 
         // 如果有需要重传的帧，立即发送
         // If there are frames to retransmit, send them immediately
@@ -211,7 +215,7 @@ impl AckProcessor {
     /// 在 SynReceived 状态下处理 ACK 帧
     /// Handle ACK frame in SynReceived state
     async fn handle_ack_in_syn_received(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
         now: Instant,
@@ -227,7 +231,7 @@ impl AckProcessor {
     /// 在 Established 状态下处理 ACK 帧
     /// Handle ACK frame in Established state
     async fn handle_ack_in_established(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
         now: Instant,
@@ -243,7 +247,7 @@ impl AckProcessor {
     /// 在 ValidatingPath 状态下处理 ACK 帧
     /// Handle ACK frame in ValidatingPath state
     async fn handle_ack_in_validating_path(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
         now: Instant,
@@ -259,7 +263,7 @@ impl AckProcessor {
     /// 在 FinWait 状态下处理 ACK 帧
     /// Handle ACK frame in FinWait state
     async fn handle_ack_in_fin_wait(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
         now: Instant,
@@ -275,7 +279,7 @@ impl AckProcessor {
     /// 在 Closing 状态下处理 ACK 帧
     /// Handle ACK frame in Closing state
     async fn handle_ack_in_closing(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
         now: Instant,
@@ -291,7 +295,7 @@ impl AckProcessor {
     /// 在 ClosingWait 状态下处理 ACK 帧
     /// Handle ACK frame in ClosingWait state
     async fn handle_ack_in_closing_wait(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
         now: Instant,

@@ -7,7 +7,7 @@ use crate::{
     packet::frame::Frame,
     socket::AsyncUdpSocket,
 };
-use super::traits::EndpointOperations;
+use super::traits::ProcessorOperations;
 use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::trace;
@@ -21,9 +21,6 @@ pub struct EventDispatcher;
 impl EventDispatcher {
     /// 分发网络帧事件到对应的帧处理器
     /// Dispatches network frame events to the corresponding frame processors
-    /// 
-    /// 这个方法使用解耦的设计，通过 EndpointOperations trait 与端点交互
-    /// This method uses a decoupled design, interacting with endpoints through the EndpointOperations trait
     pub async fn dispatch_frame<S: AsyncUdpSocket>(
         endpoint: &mut Endpoint<S>,
         frame: Frame,
@@ -39,7 +36,7 @@ impl EventDispatcher {
         
         // 将具体的 Endpoint 转换为 trait 对象以实现解耦
         // Convert concrete Endpoint to trait object to achieve decoupling
-        registry.route_frame(endpoint as &mut dyn EndpointOperations, frame, src_addr, Instant::now()).await
+        registry.route_frame(endpoint as &mut dyn ProcessorOperations, frame, src_addr, Instant::now()).await
     }
 
     /// 分发流命令事件

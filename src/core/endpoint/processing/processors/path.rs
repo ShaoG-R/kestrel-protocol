@@ -18,9 +18,8 @@ use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 use async_trait::async_trait;
-use crate::core::endpoint::core::frame::create_path_response_frame;
 use crate::core::endpoint::types::state::ConnectionState;
-use super::super::traits::EndpointOperations;
+use super::super::traits::ProcessorOperations;
 
 /// 路径验证帧处理器
 /// Path validation frame processor
@@ -37,7 +36,7 @@ impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for PathProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -60,7 +59,7 @@ impl PathProcessor {
     /// 内部路径验证帧处理方法，供所有接口实现调用
     /// Internal path validation frame processing method, called by all interface implementations
     async fn process_path_frame_internal(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -118,7 +117,7 @@ impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for PathProcessor {
     }
 
     async fn process_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
         now: Instant,
@@ -133,7 +132,7 @@ impl PathProcessor {
     /// 处理 PathChallenge 帧
     /// Handle PathChallenge frame
     async fn handle_path_challenge_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         challenge_data: u64,
         context: FrameProcessingContext,
@@ -168,7 +167,7 @@ impl PathProcessor {
     /// 处理 PathResponse 帧
     /// Handle PathResponse frame
     async fn handle_path_response_frame(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         challenge_data: u64,
         context: FrameProcessingContext,
@@ -214,7 +213,7 @@ impl PathProcessor {
     /// 发送路径响应
     /// Send path response
     async fn send_path_response(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         header: crate::packet::header::ShortHeader,
         challenge_data: u64,
         src_addr: SocketAddr,
@@ -226,16 +225,9 @@ impl PathProcessor {
             "Sending PathResponse"
         );
 
-        let response_frame = create_path_response_frame(
-            endpoint.peer_cid(),
-            header.sequence_number, // Echo the sequence number
-            endpoint.start_time(),
-            challenge_data,
-        );
-
-        // 响应必须发送回质询来源的地址
-        // The response MUST be sent back to the address the challenge came from
-        endpoint.send_frame_to_addr(response_frame, src_addr).await?;
+        // 使用高级接口发送路径响应
+        // Use high-level interface to send path response
+        endpoint.send_path_response(header.sequence_number, challenge_data, src_addr).await?;
 
         Ok(())
     }
@@ -243,7 +235,7 @@ impl PathProcessor {
     /// 处理路径验证响应
     /// Handle path validation response
     async fn handle_path_validation_response(
-        endpoint: &mut dyn EndpointOperations,
+        endpoint: &mut dyn ProcessorOperations,
         src_addr: SocketAddr,
         expected_addr: SocketAddr,
         received_challenge: u64,
