@@ -2,95 +2,128 @@
 
 **功能描述:**
 
-项目遵循现代网络协议栈的设计思想，实现了一套清晰、解耦的垂直分层架构。这种架构将不同的职责分离到独立的组件中，极大地提高了代码的可维护性、可测试性和可扩展性。
-
-**实现位置:**
-
-- **顶层 - `Endpoint`**: `src/core/endpoint.rs`
-- **中层 - `ReliabilityLayer`**: `src/core/reliability.rs`
-- **底层 - `CongestionControl` Trait**: `src/congestion.rs`
+项目遵循现代网络协议栈的设计思想，实现了一套清晰、解耦的垂直分层架构。这种架构将不同的职责分离到独立的组件中，极大地提高了代码的可维护性、可测试性和可扩展性。它将复杂的协议逻辑分解为一系列内聚且可独立测试的层次。
 
 ### 1. 架构概览
 
-协议的核心逻辑被划分为三个层次：
+协议栈从上到下可以分为四个逻辑层次，其核心设计思想是 **“编排与实现分离”**。
 
-1.  **`Endpoint` (连接端点层)**: 作为协议的“大脑”，负责管理单个连接的完整生命周期（握手、通信、关闭）、处理用户API的命令 (`StreamCommand`) 以及与底层Socket的任务进行通信。它**拥有**一个 `ReliabilityLayer` 实例。
+1.  **L4: API层 (`Stream`)**:
+    *   **职责**: 为用户提供符合人体工程学的 `AsyncRead`/`AsyncWrite` 字节流接口，隐藏所有底层包的细节。并将用户的读写操作转换为命令，通过MPSC通道发送给对应的 `Endpoint` 任务进行处理。
 
-2.  **`ReliabilityLayer` (可靠性层)**: 负责所有与可靠传输相关的核心算法。这包括数据包的序列化、基于SACK的确认、RTO（重传超时）计算、快速重传以及乱序重组。它是一个纯粹的逻辑层，不执行任何I/O操作。它**拥有**一个实现了 `CongestionControl` trait 的实例。
+2.  **L3: 端点层 (`Endpoint`)**:
+    *   **职责**: 作为连接的“大脑”和中央编排器，负责管理单个连接的完整生命周期（握手、通信、连接迁移、关闭），并根据状态向下层的 `ReliabilityLayer` 发出明确指令。它处理来自API层和网络层的所有事件，但不实现具体的可靠性算法。
 
-3.  **`CongestionControl` (拥塞控制层)**: 这是一个Trait（接口），定义了拥塞控制算法所需满足的契约。具体的算法（如 `Vegas`）作为该Trait的实现。这使得拥塞控制算法可以被轻松替换，而无需改动上层逻辑。
+3.  **L2: 可靠性层 (`ReliabilityLayer`)**:
+    *   **职责**: 这是一个综合性的功能实现层，封装了所有与“可靠”和“有序”相关的复杂机制。它对上层 `Endpoint` 隐藏了这些细节，只暴露高级接口。
+    *   **内部组件**:
+        *   `RetransmissionManager`: 统一的重传管理器，内部包含SACK和简单重传逻辑。
+        *   `CongestionControl` Trait: 可插拔的拥塞控制器（如Vegas）。
+        *   `FlowControl`: 实现滑动窗口流量控制。
+        *   `SendBuffer`/`RecvBuffer`: 管理待发送和已接收的数据。
 
-### 2. 交互流程与设计模式
+4.  **L1: 套接字/帧层 (`Socket` & `Framing`)**:
+    *   **职责**:
+        *   **`SocketActor`**: 拥有唯一的 `UdpSocket`，负责所有网络IO。它在一个独立的任务中运行，充当了所有连接的IO网关，并通过解复用（Demultiplexing）将收到的包分发给正确的`Endpoint`。
+        *   **`Framing`**: 提供协议中所有 `Frame` 的定义，以及它们与原始字节之间的序列化和反序列化逻辑。
 
-这种分层结构采用了典型的**策略模式 (Strategy Pattern)** 和**委托模式 (Delegation Pattern)**。
+### 2. 架构设计图
 
 ```mermaid
 graph TD
-    subgraph "Endpoint 层"
-        A[连接逻辑]
+    subgraph "用户空间 (User Space)"
+        UserApp[用户应用]
     end
 
-    subgraph "Reliability 层"
-        B[ARQ, SACK, RTO 逻辑]
+    subgraph "协议栈 (Protocol Stack)"
+        subgraph "L4: API层 (Stream API)"
+            Stream["Stream (AsyncRead/AsyncWrite)"]
+        end
+
+        subgraph "L3: 端点层 (Endpoint Layer)"
+            Endpoint["Endpoint (Connection State Machine)"]
+        end
+
+        subgraph "L2: 可靠性层 (Reliability Layer)"
+            Reliability["ReliabilityLayer"]
+            subgraph "内部组件"
+                direction LR
+                RetxManager["RetransmissionManager"]
+                CongestionControl["Box<dyn CongestionControl>"]
+                FlowControl["Flow Control"]
+                SendBuffer[SendBuffer]
+                RecvBuffer[RecvBuffer]
+            end
+        end
+
+        subgraph "L1: 套接字/帧层 (Socket & Framing Layer)"
+            SocketActor["SocketActor (Demux & I/O)"]
+            Framing["帧处理 (Serialization)"]
+            UdpSocket["tokio::net::UdpSocket"]
+        end
     end
 
-    subgraph "Congestion 控制层"
-        C["Congestion 算法 (例如, Vegas)"]
+    subgraph "网络 (Network)"
+        RemotePeer[远程端点]
     end
 
-    A -- "委托 Reliability 任务" --> B
-    B -- "通知网络事件 (ACK, 丢失)" --> C
-    C -- "提供 Congestion 窗口 (cwnd)" --> B
+    %% -- 数据流和控制流 (Data & Control Flow) --
 
+    %% 写路径 (Write Path)
+    UserApp -- "write(data)" --> Stream
+    Stream -- "Cmd::SendData" --> Endpoint
+    Endpoint -- "指令: 发送数据" --> Reliability
+    Reliability -- "步骤1: 拥塞/流量控制检查" --> CongestionControl & FlowControl
+    Reliability -- "步骤2: 打包数据" --> SendBuffer
+    Reliability -- "步骤3: 追踪待确认帧" --> RetxManager
+    Reliability -- "待发送帧" --> Endpoint
+    Endpoint -- "FramesToSend" --> SocketActor
+    SocketActor -- "序列化" --> Framing
+    SocketActor -- "send_to" --> UdpSocket
+    UdpSocket -- "UDP Datagram" --> RemotePeer
 
+    %% 读路径 (Read Path)
+    RemotePeer -- "UDP Datagram" --> UdpSocket
+    UdpSocket -- "recv_from" --> SocketActor
+    SocketActor -- "反序列化" --> Framing
+    SocketActor -- "分发(Frame)" --> Endpoint
+    Endpoint -- "指令: 处理帧" --> Reliability
+
+    Reliability -- "处理ACK/SACK -> 更新RTT/CWND" --> RetxManager & CongestionControl
+
+    Reliability -- "处理PUSH -> 存入并排序" --> RecvBuffer
+    RecvBuffer -- "有序数据" --> Endpoint
+    Endpoint -- "通知有数据可读" --> Stream
+    Stream -- "read(buffer)" --> UserApp
+
+    %% 层级关系 (Layer Relationships)
+    Stream -.->|Cmd Channel| Endpoint
+    Endpoint -- "拥有并编排" --> Reliability
+    Reliability -- "拥有并使用" --> RetxManager
+    Reliability -- "拥有并使用" --> CongestionControl
+    SocketActor -.->|Frame Channel| Endpoint
 ```
 
-- **`Endpoint` -> `ReliabilityLayer`**: `Endpoint` 将所有需要可靠传输的数据块和收到的ACK信息全部委托给 `ReliabilityLayer` 处理。
+### 3. 数据流与交互流程
 
-- **`ReliabilityLayer` <-> `CongestionControl`**:
-    - **事件通知**: 当 `ReliabilityLayer` 收到ACK或检测到丢包时，它会调用 `CongestionControl` trait 的 `on_ack()` 或 `on_packet_loss()` 方法，将网络事件通知给拥塞控制算法。
-    - **获取许可**: 当 `ReliabilityLayer` 准备发送数据时，它会调用 `CongestionControl` trait 的 `congestion_window()` 方法来获取当前允许发送的数据量（拥塞窗口大小），以判断自己是否可以继续发送。
+#### 写路径 (Write Path)
 
-### 3. 代码实现
+1.  `UserApp` 调用 `Stream::write`。
+2.  `Stream` 将数据通过 `Cmd::SendData` 命令发送给 `Endpoint`。
+3.  `Endpoint` 指令 `ReliabilityLayer` 发送数据。
+4.  `ReliabilityLayer` 依次执行：检查拥塞和流量控制许可 -> 将数据打包成 `PUSH` 帧 -> 交由 `RetransmissionManager` 追踪。
+5.  `Endpoint` 收集所有待发送帧（包括数据帧和可能的ACK帧），交给 `SocketActor`。
+6.  `SocketActor` 序列化帧并通过 `UdpSocket` 发出。
 
-**`Endpoint` 持有 `ReliabilityLayer`:**
+#### 读路径 (Read Path)
 
-```rust
-// 位于 src/core/endpoint.rs
-pub struct Endpoint<S: AsyncUdpSocket> {
-    // ... 其他字段
-    reliability: ReliabilityLayer,
-    // ... 其他字段
-}
-```
-
-**`ReliabilityLayer` 持有 `CongestionControl` Trait 对象:**
-
-```rust
-// 位于 src/core/reliability.rs
-pub struct ReliabilityLayer {
-    // ... 其他字段
-    congestion_control: Box<dyn CongestionControl>,
-    // ... 其他字段
-}
-
-impl ReliabilityLayer {
-    pub fn new(config: Config, congestion_control: Box<dyn CongestionControl>) -> Self {
-        // ...
-    }
-    
-    pub fn handle_ack(/* ... */) {
-        // ...
-        self.congestion_control.on_ack(rtt_sample);
-        // ...
-    }
-    
-    pub fn can_send_more(&self, peer_recv_window: u32) -> bool {
-        // ...
-        let cwnd = self.congestion_control.congestion_window();
-        // ...
-    }
-}
-```
+1.  `SocketActor` 从 `UdpSocket` 接收数据报，反序列化成帧。
+2.  `SocketActor` 根据连接ID将帧分发给对应的 `Endpoint`。
+3.  `Endpoint` 指令 `ReliabilityLayer` 处理该帧。
+4.  `ReliabilityLayer` 进行分派：
+    *   **`PUSH` 帧**: 存入 `RecvBuffer` 进行排序。
+    *   **`ACK`/`SACK` 帧**: 交由 `RetransmissionManager` 处理，后者会更新RTT估算和拥塞窗口。
+5.  当 `RecvBuffer` 中有有序数据准备好后，`Endpoint` 会通知 `Stream`。
+6.  `UserApp` 调用 `Stream::read` 获取数据。
 
 这种设计是整个协议库能够保持高度模块化和灵活性的基石。 
