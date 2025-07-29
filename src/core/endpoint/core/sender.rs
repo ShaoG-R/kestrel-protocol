@@ -84,7 +84,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         // 1. 收集所有需要发送的帧，这些操作不需要 &mut self。
         let peer_recv_window = self.transport.peer_recv_window();
         let mut frames_to_send = self.transport.reliability_mut().packetize_stream_data(
-            self.peer_cid,
+            self.identity.peer_cid(),
             peer_recv_window,
             now,
             self.start_time,
@@ -97,7 +97,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             && !self.transport.reliability().has_fin_in_flight()
         {
             let fin_frame = create_fin_frame(
-                self.peer_cid,
+                self.identity.peer_cid(),
                 self.transport.reliability_mut().next_sequence_number(),
                 &self.transport.reliability(),
                 self.start_time,
@@ -125,12 +125,12 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         let now = Instant::now();
         let mut frames_to_send = Vec::new();
 
-        let syn_frame = create_syn_frame(&self.config, self.local_cid);
+        let syn_frame = create_syn_frame(&self.config, self.identity.local_cid());
         frames_to_send.push(syn_frame);
 
         let peer_recv_window = self.transport.peer_recv_window();
         let push_frames = self.transport.reliability_mut().packetize_stream_data(
-            self.peer_cid,
+            self.identity.peer_cid(),
             peer_recv_window,
             now,
             self.start_time,
@@ -154,7 +154,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// Sends a SYN-ACK frame. This is a high-priority control frame and is sent immediately.
     /// 发送一个SYN-ACK帧。这是一个高优先级的控制帧，会被立即发送。
     pub(in crate::core::endpoint) async fn send_syn_ack(&mut self) -> Result<()> {
-        let frame = create_syn_ack_frame(&self.config, self.peer_cid, self.local_cid);
+        let frame = create_syn_ack_frame(&self.config, self.identity.peer_cid(), self.identity.local_cid());
         self.send_raw_frames(vec![frame]).await
     }
 
@@ -162,7 +162,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         if !self.transport.reliability().is_ack_pending() {
             return Ok(());
         }
-        let frame = create_ack_frame(self.peer_cid, self.transport.reliability_mut(), self.start_time);
+        let frame = create_ack_frame(self.identity.peer_cid(), self.transport.reliability_mut(), self.start_time);
         self.transport.reliability_mut().on_ack_sent(); // This requires &mut self
 
         // Since we've mutated self, we can now send the frame.
@@ -183,8 +183,8 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         // 添加调试信息
         if !frames.is_empty() {
             tracing::debug!(
-                cid = self.local_cid,
-                remote_addr = %self.remote_addr,
+                cid = self.identity.local_cid(),
+                remote_addr = %self.identity.remote_addr(),
                 frame_count = frames.len(),
                 first_frame = ?frames[0],
                 "Sending frames to remote address"
@@ -192,7 +192,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         }
         
         let cmd = SendCommand {
-            remote_addr: self.remote_addr,
+            remote_addr: self.identity.remote_addr(),
             frames,
         };
         self.sender

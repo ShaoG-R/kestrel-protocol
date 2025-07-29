@@ -21,7 +21,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     // handle_frame method has been replaced by EventDispatcher
 
     pub async fn check_path_migration(&mut self, src_addr: std::net::SocketAddr) -> Result<()> {
-        if src_addr != self.remote_addr
+        if src_addr != self.identity.remote_addr()
             && *self.lifecycle_manager.current_state() == ConnectionState::Established
         {
             // Address has changed, initiate path validation.
@@ -29,7 +29,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             let (tx, _rx) = tokio::sync::oneshot::channel();
             self.start_path_validation(src_addr, challenge_data, tx)?;
             let challenge_frame = create_path_challenge_frame(
-                self.peer_cid,
+                self.identity.peer_cid(),
                 self.transport.reliability_mut().next_sequence_number(),
                 self.start_time,
                 challenge_data,
@@ -49,7 +49,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         match frame {
             Frame::SynAck { header } => {
                 self.transition_state(ConnectionState::Established)?;
-                self.peer_cid = header.source_cid;
+                self.identity.set_peer_cid(header.source_cid);
 
                 // Acknowledge the SYN-ACK, potentially with piggybacked data if the
                 // user has already called write().
@@ -68,7 +68,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             }
             _ => {
                 trace!(
-                    cid = self.local_cid,
+                    cid = self.identity.local_cid(),
                     ?frame,
                     "Ignoring unexpected frame in Connecting state"
                 );
@@ -87,7 +87,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 // This is now primarily handled by the Socket creating the Endpoint.
                 // If we receive another SYN, it might be a retransmission from the client
                 // because it hasn't received our SYN-ACK yet.
-                info!(cid = self.local_cid, "Received duplicate SYN, ignoring.");
+                info!(cid = self.identity.local_cid(), "Received duplicate SYN, ignoring.");
                 // If we have already been triggered to send a SYN-ACK (i.e., data is in the
                 // send buffer), we can resend it.
                 if !self.transport.reliability().is_send_buffer_empty() {
@@ -122,7 +122,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             }
             _ => {
                 trace!(
-                    cid = self.local_cid,
+                    cid = self.identity.local_cid(),
                     ?frame,
                     "Ignoring unexpected frame in SynReceived state"
                 );
@@ -165,7 +165,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             }
             _ => {
                 trace!(
-                    cid = self.local_cid,
+                    cid = self.identity.local_cid(),
                     ?frame,
                     "Ignoring unexpected frame in Established state"
                 );
@@ -193,13 +193,13 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     if src_addr == new_addr && challenge_data == expected_challenge {
                         // Path validation successful!
                         info!(
-                            cid = self.local_cid,
-                            old_addr = %self.remote_addr,
+                            cid = self.identity.local_cid(),
+                            old_addr = %self.identity.remote_addr(),
                             new_addr = %new_addr,
                             "Path validation successful, updating remote address"
                         );
                         self.complete_path_validation(true)?;
-                        self.remote_addr = new_addr;
+                        self.identity.set_remote_addr(new_addr);
 
                         // Notify the caller of migrate() if there is one
                         if let Some(notifier) = notifier {
@@ -210,14 +210,14 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                         let _ = self
                             .command_tx
                             .send(SocketActorCommand::UpdateAddr {
-                                cid: self.local_cid,
+                                cid: self.identity.local_cid(),
                                 new_addr,
                             })
                             .await;
                     } else {
                         // Invalid path response, ignore it.
                         info!(
-                            cid = self.local_cid,
+                            cid = self.identity.local_cid(),
                             "Received invalid PathResponse, ignoring."
                         );
                     }
@@ -252,7 +252,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             }
             _ => {
                 trace!(
-                    cid = self.local_cid,
+                    cid = self.identity.local_cid(),
                     ?frame,
                     "Ignoring unexpected frame in ValidatingPath state"
                 );
@@ -297,7 +297,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             }
             _ => {
                 trace!(
-                    cid = self.local_cid,
+                    cid = self.identity.local_cid(),
                     ?frame,
                     "Ignoring unexpected frame in Closing state"
                 );
@@ -324,7 +324,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             }
             _ => {
                 trace!(
-                    cid = self.local_cid,
+                    cid = self.identity.local_cid(),
                     ?frame,
                     "Ignoring unexpected frame in ClosingWait state"
                 );
@@ -367,7 +367,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             }
             _ => {
                 trace!(
-                    cid = self.local_cid,
+                    cid = self.identity.local_cid(),
                     ?frame,
                     "Ignoring unexpected frame in FinWait state"
                 );
@@ -400,7 +400,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         src_addr: std::net::SocketAddr,
     ) -> Result<()> {
         let response_frame = create_path_response_frame(
-            self.peer_cid,
+            self.identity.peer_cid(),
             header.sequence_number, // Echo the sequence number
             self.start_time,
             challenge_data,
@@ -423,14 +423,14 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
                     // 2. Create the payload-less SYN-ACK frame.
                     let syn_ack_frame =
-                        create_syn_ack_frame(&self.config, self.peer_cid, self.local_cid);
+                        create_syn_ack_frame(&self.config, self.identity.peer_cid(), self.identity.local_cid());
 
                     // 3. Packetize the stream data into PUSH frames. This will correctly
                     //    assign sequence numbers starting from 0.
                     let now = Instant::now();
                     let peer_recv_window = self.transport.peer_recv_window();
                     let frames_to_send = self.transport.reliability_mut().packetize_stream_data(
-                        self.peer_cid,
+                        self.identity.peer_cid(),
                         peer_recv_window,
                         now,
                         self.start_time,
@@ -454,7 +454,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 }
             }
             StreamCommand::Migrate { new_addr, notifier } => {
-                info!(cid = self.local_cid, new_addr = %new_addr, "Actively migrating to new address.");
+                info!(cid = self.identity.local_cid(), new_addr = %new_addr, "Actively migrating to new address.");
                 let challenge_data = rand::random();
 
                 if let Err(_e) = self.start_path_validation(
@@ -467,7 +467,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 }
 
                 let challenge_frame = create_path_challenge_frame(
-                    self.peer_cid,
+                    self.identity.peer_cid(),
                     self.transport.reliability_mut().next_sequence_number(),
                     self.start_time,
                     challenge_data,
@@ -477,7 +477,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             #[cfg(test)]
             StreamCommand::UpdatePeerCid(peer_cid) => {
                 // This is a test-only command to simulate the SocketActor's role.
-                self.peer_cid = peer_cid;
+                self.identity.set_peer_cid(peer_cid);
             }
         }
         Ok(())

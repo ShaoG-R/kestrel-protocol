@@ -53,12 +53,6 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             identity: ConnectionIdentity::new(local_cid, 0, remote_addr),
             timing: TimingManager::new(),
             transport: TransportManager::new(reliability),
-            // 保留原有字段（过渡期）
-            // Keep original fields (transition period)
-            remote_addr,
-            local_cid,
-            peer_cid: 0,
-
             lifecycle_manager,
             start_time: now,
             config,
@@ -101,12 +95,6 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             identity: ConnectionIdentity::new(local_cid, peer_cid, remote_addr),
             timing: TimingManager::new(),
             transport: TransportManager::new(reliability),
-            // 保留原有字段（过渡期）
-            // Keep original fields (transition period)
-            remote_addr,
-            local_cid,
-            peer_cid,
-
             lifecycle_manager,
             start_time: now,
             config,

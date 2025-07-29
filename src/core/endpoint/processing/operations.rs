@@ -30,15 +30,15 @@ impl<S: AsyncUdpSocket> EndpointOperations for Endpoint<S> {
     // ========== 基础信息获取 (Basic Information Access) ==========
     
     fn local_cid(&self) -> u32 {
-        self.local_cid
+        self.identity.local_cid()
     }
     
     fn peer_cid(&self) -> u32 {
-        self.peer_cid
+        self.identity.peer_cid()
     }
     
     fn remote_addr(&self) -> SocketAddr {
-        self.remote_addr
+        self.identity.remote_addr()
     }
     
     fn start_time(&self) -> Instant {
@@ -65,11 +65,11 @@ impl<S: AsyncUdpSocket> EndpointOperations for Endpoint<S> {
     }
     
     fn set_peer_cid(&mut self, peer_cid: u32) {
-        self.peer_cid = peer_cid;
+        self.identity.set_peer_cid(peer_cid);
     }
     
     fn set_remote_addr(&mut self, addr: SocketAddr) {
-        self.remote_addr = addr;
+        self.identity.set_remote_addr(addr);
     }
     
     fn complete_path_validation(&mut self, success: bool) -> Result<()> {
@@ -178,7 +178,7 @@ impl<S: AsyncUdpSocket> ProcessorOperations for Endpoint<S> {
     async fn receive_fin_and_ack(&mut self, seq: u32) -> Result<bool> {
         // 接收 FIN 并处理相应逻辑，返回是否成功接收了 FIN
         // Receive FIN and handle corresponding logic, return whether FIN was successfully received
-        let fin_received = self.reliability_mut().receive_fin(seq);
+        let fin_received = self.transport.reliability_mut().receive_fin(seq);
         if fin_received {
             self.send_standalone_ack().await?;
         }

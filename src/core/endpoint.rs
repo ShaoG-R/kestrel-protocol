@@ -70,12 +70,6 @@ pub struct Endpoint<S: AsyncUdpSocket> {
     /// 新的传输层管理器 (逐步迁移中)
     /// New transport manager (migrating gradually)
     transport: TransportManager,
-    
-    // 原有字段（过渡期保留）
-    // Original fields (kept during transition)
-    remote_addr: SocketAddr,
-    local_cid: u32,
-    peer_cid: u32,
 
     lifecycle_manager: DefaultLifecycleManager,
     start_time: Instant,
@@ -177,7 +171,6 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         // 同时更新新旧字段
         // Update both new and old fields
         self.identity.set_peer_cid(peer_cid);
-        self.peer_cid = peer_cid;
     }
 
     /// 获取当前连接状态
@@ -211,21 +204,13 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// 获取远程地址
     /// Gets the remote address
     pub fn remote_addr(&self) -> SocketAddr {
-        // 逐步迁移：使用新的identity字段
-        // Gradual migration: use new identity field
         self.identity.remote_addr()
-        // 保留原有字段同步
-        // Keep original field in sync
-        // self.remote_addr
     }
 
     /// 设置远程地址
     /// Sets the remote address
     pub fn set_remote_addr(&mut self, addr: SocketAddr) {
-        // 同时更新新旧字段
-        // Update both new and old fields
         self.identity.set_remote_addr(addr);
-        self.remote_addr = addr;
     }
 
     /// 获取命令发送器

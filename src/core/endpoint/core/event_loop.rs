@@ -18,7 +18,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// Runs the endpoint's main event loop.
     pub async fn run(&mut self) -> Result<()> {
         let _cleaner = ConnectionCleaner::<S> {
-            cid: self.local_cid,
+            cid: self.identity.local_cid(),
             command_tx: self.command_tx.clone(),
             _marker: std::marker::PhantomData,
         };
@@ -39,7 +39,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     .unwrap_or_else(|| Instant::now() + self.config.connection.idle_timeout)
             };
 
-            trace!(cid = self.local_cid, state = ?self.lifecycle_manager.current_state(), "Main loop waiting for event.");
+            trace!(cid = self.identity.local_cid(), state = ?self.lifecycle_manager.current_state(), "Main loop waiting for event.");
             tokio::select! {
                 biased; // Prioritize incoming packets and user commands
 
@@ -75,7 +75,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
             // After handling all immediate events, perform follow-up actions.
             trace!(
-                cid = self.local_cid,
+                cid = self.identity.local_cid(),
                 "Event handled, performing follow-up actions."
             );
 
@@ -89,7 +89,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             if let Some(data_vec) = data_to_send {
                 if !data_vec.is_empty() {
                     trace!(
-                        cid = self.local_cid,
+                        cid = self.identity.local_cid(),
                         count = data_vec.len(),
                         "Reassembled data, sending to stream."
                     );
@@ -142,7 +142,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             if self.fin_pending_eof && self.transport.reliability().is_recv_buffer_empty() {
                 if let Some(tx) = self.tx_to_stream.take() {
                     trace!(
-                        cid = self.local_cid,
+                        cid = self.identity.local_cid(),
                         "All data drained after FIN, closing user stream (sending EOF)."
                     );
                     drop(tx); // This closes the channel, signaling EOF.
