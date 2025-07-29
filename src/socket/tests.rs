@@ -12,6 +12,7 @@ use crate::{
     error::{Error, Result},
     packet::frame::Frame,
 };
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
@@ -24,7 +25,7 @@ use tokio::{
 /// This version uses tokio::sync::Mutex to be Send-safe across .await points.
 #[derive(Debug)]
 struct MockTransport {
-    local_addr: SocketAddr,
+    local_addr: ArcSwap<SocketAddr>,
     packet_rx: Arc<Mutex<mpsc::Receiver<ReceivedDatagram>>>,
     sent_packets: Arc<Mutex<Vec<FrameBatch>>>,
 }
@@ -33,7 +34,7 @@ impl MockTransport {
     fn new(local_addr: SocketAddr) -> (Self, mpsc::Sender<ReceivedDatagram>) {
         let (packet_tx, packet_rx) = mpsc::channel(128);
         let transport = Self {
-            local_addr,
+            local_addr: ArcSwap::from_pointee(local_addr),
             packet_rx: Arc::new(Mutex::new(packet_rx)),
             sent_packets: Arc::new(Mutex::new(Vec::new())),
         };
@@ -62,7 +63,7 @@ impl Transport for MockTransport {
     }
 
     fn local_addr(&self) -> Result<SocketAddr> {
-        Ok(self.local_addr)
+        Ok(**self.local_addr.load())
     }
 }
 
@@ -72,8 +73,8 @@ impl BindableTransport for MockTransport {
         unreachable!("MockTransport is created manually for tests")
     }
 
-    async fn rebind(&mut self, new_addr: SocketAddr) -> Result<()> {
-        self.local_addr = new_addr;
+    async fn rebind(&self, new_addr: SocketAddr) -> Result<()> {
+        self.local_addr.store(Arc::new(new_addr));
         Ok(())
     }
 }

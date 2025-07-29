@@ -104,5 +104,5 @@ pub trait BindableTransport: Transport + Sized {
     /// Rebinds the transport to a new local address.
     ///
     /// 将传输重新绑定到新的本地地址。
-    async fn rebind(&mut self, new_addr: SocketAddr) -> Result<()>;
+    async fn rebind(&self, new_addr: SocketAddr) -> Result<()>;
 }

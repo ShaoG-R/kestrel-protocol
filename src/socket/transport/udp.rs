@@ -1,6 +1,6 @@
-//! UDP-based transport implementation using actor model.
+//! UDP-based transport implementation using an actor model and a buffered receiver.
 //!
-//! 使用actor模型的UDP传输实现。
+//! 使用actor模型和带缓冲接收器的UDP传输实现。
 
 use super::{BindableTransport, FrameBatch, ReceivedDatagram, Transport};
 use crate::{error::Result, packet::frame::Frame};
@@ -10,13 +10,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::{
     net::UdpSocket,
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
 };
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
-/// Commands for the UDP transport actor.
+/// Commands for the UDP transport actor (send-side).
 ///
-/// UDP传输actor的命令。
+/// UDP传输actor的命令 (发送侧)。
 #[derive(Debug)]
 enum UdpTransportCommand {
     /// Send frames to a remote address.
@@ -36,35 +36,50 @@ enum UdpTransportCommand {
         new_addr: SocketAddr,
         response_tx: oneshot::Sender<Result<SocketAddr>>,
     },
-    /// Shutdown the actor gracefully.
-    /// 优雅地关闭actor。
-    Shutdown,
 }
 
-/// UDP-based transport implementation using actor model.
+/// UDP-based transport implementation.
 ///
-/// This transport uses an actor pattern for send operations and direct
-/// socket access for receive operations to avoid deadlocks.
+/// This design uses three main components for full decoupling:
+/// 1.  **Send Actor (`UdpTransportSendActor`)**: Manages all send operations and socket rebinding
+///     via a command channel. This serializes write access to the socket.
+/// 2.  **Receive Task (`receiver_task`)**: A dedicated asynchronous task that continuously polls
+///     the UDP socket for incoming datagrams and pushes them into a lock-free queue.
+/// 3.  **Shared Socket (`Arc<ArcSwap<UdpSocket>>`)**: Allows both the send actor and receive task
+///     to safely access the underlying `UdpSocket` and allows it to be atomically replaced
+///     during a rebind operation without locks.
 ///
 /// 使用actor模式的基于UDP的传输实现。
 ///
-/// 此传输对发送操作使用actor模式，对接收操作使用直接套接字访问以避免死锁。
+/// 此设计使用三个主要组件实现完全解耦：
+/// 1. **发送Actor (`UdpTransportSendActor`)**: 通过命令通道管理所有发送操作和套接字重绑定。
+/// 2. **接收任务 (`receiver_task`)**: 一个专用的异步任务，持续轮询UDP套接字以获取传入的数据报，并将其推入无锁队列。
+/// 3. **共享套接字 (`Arc<ArcSwap<UdpSocket>>`)**: 允许发送actor和接收任务安全地访问底层`UdpSocket`，并允许在重绑定操作期间原子地替换它，而无需锁。
 #[derive(Debug)]
 pub struct UdpTransport {
     send_command_tx: mpsc::Sender<UdpTransportCommand>,
-    // Shared socket using ArcSwap for lock-free atomic updates
-    shared_socket: Arc<ArcSwap<UdpSocket>>,
-    // Cache local address for immediate access, updated on rebind
-    local_addr: SocketAddr,
+    // The receiving end of the datagram buffer.
+    // 数据报缓冲区的接收端。
+    datagram_rx: async_channel::Receiver<ReceivedDatagram>,
+    // A watch channel to signal shutdown to the receiver task.
+    // 用于向接收器任务发送关闭信号的watch通道。
+    shutdown_tx: Arc<watch::Sender<()>>,
+    // Cache local address for immediate access, updated on rebind.
+    // 缓存本地地址以便立即访问，在重绑定时更新。
+    local_addr: Arc<ArcSwap<SocketAddr>>,
 }
 
 /// Actor that manages the UDP socket send operations.
 ///
 /// 管理UDP套接字发送操作的actor。
 struct UdpTransportSendActor {
-    // Reference to the same ArcSwap used by UdpTransport
+    // Reference to the same ArcSwap used by UdpTransport's receiver.
+    // UdpTransport接收器使用的相同ArcSwap的引用。
     shared_socket: Arc<ArcSwap<UdpSocket>>,
     command_rx: mpsc::Receiver<UdpTransportCommand>,
+    // A reference to the cached local address to update it on rebind.
+    // 对缓存的本地地址的引用，以便在重绑定时更新它。
+    local_addr: Arc<ArcSwap<SocketAddr>>,
 }
 
 impl UdpTransportSendActor {
@@ -72,6 +87,7 @@ impl UdpTransportSendActor {
     ///
     /// 运行actor的主事件循环。
     async fn run(mut self) {
+        debug!("UDP transport send actor started");
         while let Some(command) = self.command_rx.recv().await {
             match command {
                 UdpTransportCommand::Send { batch, response_tx } => {
@@ -79,8 +95,7 @@ impl UdpTransportSendActor {
                     let _ = response_tx.send(result);
                 }
                 UdpTransportCommand::GetLocalAddr { response_tx } => {
-                    let socket = self.shared_socket.load();
-                    let result = socket.local_addr().map_err(Into::into);
+                    let result = self.shared_socket.load().local_addr().map_err(Into::into);
                     let _ = response_tx.send(result);
                 }
                 UdpTransportCommand::Rebind {
@@ -90,13 +105,9 @@ impl UdpTransportSendActor {
                     let result = self.handle_rebind(new_addr).await;
                     let _ = response_tx.send(result);
                 }
-                UdpTransportCommand::Shutdown => {
-                    debug!("UDP transport actor shutting down gracefully");
-                    break;
-                }
             }
         }
-        debug!("UDP transport actor has shut down");
+        debug!("UDP transport send actor has shut down");
     }
 
     /// Handles sending frames.
@@ -108,9 +119,10 @@ impl UdpTransportSendActor {
         }
 
         // Load current socket atomically - no locks!
+        // 原子加载当前套接字 - 无锁！
         let socket = self.shared_socket.load();
         let buffer = Self::serialize_frames(&batch.frames);
-        
+
         debug!(
             addr = %batch.remote_addr,
             frame_count = batch.frames.len(),
@@ -126,12 +138,18 @@ impl UdpTransportSendActor {
     ///
     /// 处理重新绑定到新地址。
     async fn handle_rebind(&self, new_addr: SocketAddr) -> Result<SocketAddr> {
+        debug!(?new_addr, "Attempting to rebind UDP socket");
         let new_socket = UdpSocket::bind(new_addr).await?;
         let actual_addr = new_socket.local_addr()?;
-        
-        // Atomically replace the socket - this is the key operation!
+
+        // Atomically replace the socket. The receiver task will pick this up on its next loop.
+        // 原子地替换套接字。接收任务将在其下一个循环中获取此更新。
         self.shared_socket.store(Arc::new(new_socket));
-        
+
+        // Atomically update the cached local address.
+        // 原子地更新缓存的本地地址。
+        self.local_addr.store(Arc::new(actual_addr));
+
         debug!(addr = %actual_addr, "UDP socket rebound to new address");
         Ok(actual_addr)
     }
@@ -149,6 +167,100 @@ impl UdpTransportSendActor {
     }
 }
 
+/// The dedicated receiver task.
+///
+/// 专用的接收器任务。
+async fn receiver_task(
+    shared_socket: Arc<ArcSwap<UdpSocket>>,
+    datagram_tx: async_channel::Sender<ReceivedDatagram>,
+    mut shutdown_rx: watch::Receiver<()>,
+) {
+    debug!("UDP transport receiver task started");
+    let mut buffer = [0u8; 2048]; // Max UDP packet size
+
+    loop {
+        // Load the current socket on each iteration to handle rebinds.
+        // 在每次迭代时加载当前套接字以处理重绑定。
+        let socket = shared_socket.load_full();
+
+        tokio::select! {
+            // Biased select to prefer shutdown signal.
+            // 优先选择关闭信号。
+            biased;
+
+            _ = shutdown_rx.changed() => {
+                debug!("Receiver task received shutdown signal");
+                break;
+            }
+            result = socket.recv_from(&mut buffer) => {
+                match result {
+                    Ok((len, remote_addr)) => {
+                        let datagram_buf = buffer[..len].to_vec();
+                        let frames = deserialize_frames(&datagram_buf);
+
+                        debug!(
+                            addr = %remote_addr,
+                            frame_count = frames.len(),
+                            bytes = len,
+                            "Received UDP datagram and pushed to buffer"
+                        );
+
+                        let received = ReceivedDatagram { remote_addr, frames };
+
+                        // Try to send to the channel, if it's full or disconnected,
+                        // we drop the packet. This prevents the receiver from blocking.
+                        // 尝试发送到通道，如果通道已满或断开，我们丢弃数据包。这可以防止接收器阻塞。
+                        if let Err(e) = datagram_tx.try_send(received) {
+                            warn!("Failed to push received datagram to buffer, dropping packet. Reason: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        // This can happen during rebind, which is normal.
+                        // 这种情况在重绑定期间可能发生，是正常的。
+                        error!("UDP recv_from error: {}", e);
+                        // Avoid busy-looping on persistent errors.
+                        // 避免在持续错误上产生忙循环。
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }
+            }
+        }
+    }
+    debug!("UDP transport receiver task has shut down");
+}
+
+/// Deserializes frames from a received buffer.
+///
+/// 从接收的缓冲区反序列化帧。
+#[inline]
+fn deserialize_frames(buffer: &[u8]) -> Vec<Frame> {
+    let mut frames = Vec::new();
+    let mut cursor = buffer;
+    let original_len = buffer.len();
+
+    while !cursor.is_empty() {
+        let remaining_before = cursor.len();
+        match Frame::decode(&mut cursor) {
+            Some(frame) => {
+                frames.push(frame);
+            }
+            None => {
+                let consumed = remaining_before - cursor.len();
+                warn!(
+                    total_bytes = original_len,
+                    consumed_bytes = original_len - remaining_before,
+                    failed_at_byte = consumed,
+                    remaining_bytes = cursor.len(),
+                    "Failed to decode frame from buffer, stopping deserialization"
+                );
+                break;
+            }
+        }
+    }
+
+    frames
+}
+
 impl UdpTransport {
     /// Creates a new UDP transport from an existing socket.
     ///
@@ -156,26 +268,33 @@ impl UdpTransport {
     pub fn from_socket(socket: UdpSocket) -> Result<Self> {
         let local_addr = socket.local_addr()?;
 
-        // Create command channel for the send actor
+        // --- Channels and Shared State ---
         let (send_command_tx, command_rx) = mpsc::channel(1024);
+        let (datagram_tx, datagram_rx) = async_channel::unbounded();
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
 
-        // Create shared socket using ArcSwap - no additional Arc wrapper needed!
-        let shared_socket = ArcSwap::from_pointee(socket);
-        let shared_socket = Arc::new(shared_socket);
+        let shared_socket = Arc::new(ArcSwap::new(Arc::new(socket)));
+        let cached_local_addr = Arc::new(ArcSwap::new(Arc::new(local_addr)));
 
-        let actor = UdpTransportSendActor {
+        // --- Start Actor and Tasks ---
+        let send_actor = UdpTransportSendActor {
             shared_socket: shared_socket.clone(),
             command_rx,
+            local_addr: cached_local_addr.clone(),
         };
+        tokio::spawn(send_actor.run());
 
-        tokio::spawn(async move {
-            actor.run().await;
-        });
+        tokio::spawn(receiver_task(
+            shared_socket,
+            datagram_tx,
+            shutdown_rx,
+        ));
 
         Ok(Self {
             send_command_tx,
-            shared_socket,
-            local_addr,
+            datagram_rx,
+            shutdown_tx: Arc::new(shutdown_tx),
+            local_addr: cached_local_addr,
         })
     }
 
@@ -187,46 +306,16 @@ impl UdpTransport {
         Self::from_socket(socket)
     }
 
-    /// Shuts down the transport actor gracefully.
+    /// Shuts down the transport actor and receiver task gracefully.
     ///
-    /// 优雅地关闭传输actor。
-    pub async fn shutdown(&self) {
-        let _ = self
-            .send_command_tx
-            .send(UdpTransportCommand::Shutdown)
-            .await;
-    }
-
-    /// Deserializes frames from a received buffer.
-    ///
-    /// 从接收的缓冲区反序列化帧。
-    #[inline]
-    fn deserialize_frames(buffer: &[u8]) -> Vec<Frame> {
-        let mut frames = Vec::new();
-        let mut cursor = buffer;
-        let original_len = buffer.len();
-
-        while !cursor.is_empty() {
-            let remaining_before = cursor.len();
-            match Frame::decode(&mut cursor) {
-                Some(frame) => {
-                    frames.push(frame);
-                }
-                None => {
-                    let consumed = remaining_before - cursor.len();
-                    warn!(
-                        total_bytes = original_len,
-                        consumed_bytes = original_len - remaining_before,
-                        failed_at_byte = consumed,
-                        remaining_bytes = cursor.len(),
-                        "Failed to decode frame from buffer, stopping deserialization"
-                    );
-                    break;
-                }
-            }
-        }
-
-        frames
+    /// 优雅地关闭传输actor和接收器任务。
+    pub fn shutdown(&self) {
+        // The receiver will get this signal and shut down.
+        // 接收器将收到此信号并关闭。
+        let _ = self.shutdown_tx.send(());
+        // The sender actor will shut down when the UdpTransport is dropped and
+        // the send_command_tx channel closes.
+        // 当UdpTransport被丢弃且send_command_tx通道关闭时，发送actor将关闭。
     }
 }
 
@@ -234,10 +323,9 @@ impl UdpTransport {
 impl Transport for UdpTransport {
     async fn send_frames(&self, batch: FrameBatch) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();
-
         let command = UdpTransportCommand::Send { batch, response_tx };
 
-        if let Err(_) = self.send_command_tx.send(command).await {
+        if self.send_command_tx.send(command).await.is_err() {
             return Err(crate::error::Error::ChannelClosed);
         }
 
@@ -246,34 +334,20 @@ impl Transport for UdpTransport {
             .map_err(|_| crate::error::Error::ChannelClosed)?
     }
 
+    /// Asynchronously receives a datagram from the internal buffer.
+    /// This method only requires an immutable reference `&self`.
+    ///
+    /// 从内部缓冲区异步接收数据报。
+    /// 此方法仅需要不可变引用`&self`。
     async fn recv_frames(&self) -> Result<ReceivedDatagram> {
-        // Load current socket atomically - always gets the latest socket!
-        let socket = self.shared_socket.load();
-        
-        let mut buffer = [0u8; 2048]; // Max UDP packet size
-        let (len, remote_addr) = socket.recv_from(&mut buffer).await?;
-
-        // Create an owned copy of the received data
-        let datagram_buf = buffer[..len].to_vec();
-        let frames = Self::deserialize_frames(&datagram_buf);
-
-        debug!(
-            addr = %remote_addr,
-            frame_count = frames.len(),
-            bytes = len,
-            "Received UDP datagram"
-        );
-
-        Ok(ReceivedDatagram {
-            remote_addr,
-            frames,
-        })
+        match self.datagram_rx.recv().await {
+            Ok(datagram) => Ok(datagram),
+            Err(_) => Err(crate::error::Error::ChannelClosed),
+        }
     }
 
     fn local_addr(&self) -> Result<SocketAddr> {
-        // Return cached local address for immediate access
-        // 返回缓存的本地地址以便立即访问
-        Ok(self.local_addr)
+        Ok(**self.local_addr.load())
     }
 }
 
@@ -284,30 +358,28 @@ impl BindableTransport for UdpTransport {
         Self::from_socket(socket)
     }
 
-    async fn rebind(&mut self, new_addr: SocketAddr) -> Result<()> {
+    /// Rebinds the transport to a new address. This can be called concurrently
+    /// with `send_frames` and `recv_frames`.
+    ///
+    /// 将传输重新绑定到新地址。这可以与`send_frames`和`recv_frames`并发调用。
+    async fn rebind(&self, new_addr: SocketAddr) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();
-
         let command = UdpTransportCommand::Rebind {
             new_addr,
             response_tx,
         };
 
-        if let Err(_) = self.send_command_tx.send(command).await {
+        if self.send_command_tx.send(command).await.is_err() {
             return Err(crate::error::Error::ChannelClosed);
         }
 
-        let actual_addr = response_rx
+        // Wait for the rebind to complete in the actor.
+        // The actor will update the shared socket and the cached address.
+        // 等待actor中的重绑定完成。
+        // actor将更新共享套接字和缓存的地址。
+        response_rx
             .await
             .map_err(|_| crate::error::Error::ChannelClosed)??;
-
-        // Update cached local address with the actual bound address
-        // 使用实际绑定的地址更新缓存的本地地址
-        self.local_addr = actual_addr;
-
-        // Note: shared_socket has already been atomically updated in the actor
-        // recv operations will automatically use the new socket
-        // 注意：shared_socket已经在actor中原子更新了
-        // 接收操作会自动使用新的socket
 
         Ok(())
     }
@@ -315,9 +387,7 @@ impl BindableTransport for UdpTransport {
 
 impl Drop for UdpTransport {
     fn drop(&mut self) {
-        // Send shutdown command in a non-blocking way
-        // 以非阻塞方式发送关闭命令
-        let _ = self.send_command_tx.try_send(UdpTransportCommand::Shutdown);
+        self.shutdown();
     }
 }
 
@@ -325,258 +395,147 @@ impl Drop for UdpTransport {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use bytes::Bytes;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_send_and_recv_decoupled() {
+        let transport1_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let transport1 = UdpTransport::new(transport1_addr).await.unwrap();
+        let addr1 = transport1.local_addr().unwrap();
+
+        let transport2_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let transport2 = UdpTransport::new(transport2_addr).await.unwrap();
+        let addr2 = transport2.local_addr().unwrap();
+
+        // Transport 1 sends a packet to Transport 2
+        let frame1 = Frame::new_push(1, 1, 0, 1024, 0, Bytes::from_static(b"hello 2"));
+        let batch1 = FrameBatch {
+            remote_addr: addr2,
+            frames: vec![frame1],
+        };
+        transport1.send_frames(batch1).await.unwrap();
+
+        // Transport 2 sends a packet to Transport 1
+        let frame2 = Frame::new_push(2, 2, 0, 1024, 0, Bytes::from_static(b"hello 1"));
+        let batch2 = FrameBatch {
+            remote_addr: addr1,
+            frames: vec![frame2],
+        };
+        transport2.send_frames(batch2).await.unwrap();
+
+        // Concurrently receive on both transports
+        let recv1 = transport1.recv_frames();
+        let recv2 = transport2.recv_frames();
+
+        let (res1, res2) = tokio::join!(recv1, recv2);
+        
+        // Check transport 1 received from 2
+        let received1 = res1.unwrap();
+        assert_eq!(received1.remote_addr, addr2);
+        assert_eq!(received1.frames.len(), 1);
+
+        // Check transport 2 received from 1
+        let received2 = res2.unwrap();
+        assert_eq!(received2.remote_addr, addr1);
+        assert_eq!(received2.frames.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_concurrent_send_recv_with_rebind() {
-        // Test that send and recv operations work correctly during rebind
-        let initial_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let mut transport = UdpTransport::new(initial_addr).await.unwrap();
+        // Transport that will be the sender and will be rebound
+        let transport = UdpTransport::new("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let original_addr = transport.local_addr().unwrap();
 
-        // Test basic send functionality
-        let peer_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-        let test_frame = Frame::new_push(123, 1, 0, 1024, 0, bytes::Bytes::from("test data"));
-        let batch = FrameBatch {
-            remote_addr: peer_addr,
-            frames: vec![test_frame],
-        };
+        // The peer that will receive packets
+        let peer_transport = UdpTransport::new("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let peer_addr = peer_transport.local_addr().unwrap();
 
-        // Send should work before rebind
-        let _ = transport.send_frames(batch.clone()).await;
+        // Put both into Arcs to share with tasks
+        let transport_arc = Arc::new(transport);
+        let peer_transport_arc = Arc::new(peer_transport);
 
-        // Perform a rebind
-        let new_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        transport.rebind(new_addr).await.unwrap();
-
-        // Send should still work after rebind
-        let _ = transport.send_frames(batch).await;
-
-        // Verify the transport address changed
-        let final_addr = transport.local_addr().unwrap();
-        assert_ne!(original_addr, final_addr, "Address should have changed after rebind");
-
-        // Verify socket consistency
-        let socket1 = transport.shared_socket.load();
-        let socket2 = transport.shared_socket.load();
-        assert_eq!(
-            socket1.local_addr().unwrap(),
-            socket2.local_addr().unwrap(),
-            "Multiple loads should return the same socket"
-        );
-
-        transport.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn test_socket_consistency_during_rebind() {
-        // Test that send and recv operations use the same socket after rebind
-        let initial_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let mut transport = UdpTransport::new(initial_addr).await.unwrap();
-
-        // Get initial socket reference
-        let initial_socket = transport.shared_socket.load();
-        let initial_local_addr = initial_socket.local_addr().unwrap();
-
-        // Perform rebind
-        let new_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        transport.rebind(new_addr).await.unwrap();
-
-        // Get new socket reference
-        let new_socket = transport.shared_socket.load();
-        let new_local_addr = new_socket.local_addr().unwrap();
-
-        // Verify socket has changed
-        assert_ne!(
-            initial_local_addr, new_local_addr,
-            "Socket address should change after rebind"
-        );
-
-        // Verify both send and recv operations use the same socket
-        let send_socket = transport.shared_socket.load();
-        let recv_socket = transport.shared_socket.load();
-        
-        assert_eq!(
-            send_socket.local_addr().unwrap(),
-            recv_socket.local_addr().unwrap(),
-            "Send and recv should use the same socket"
-        );
-
-        transport.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn test_multiple_concurrent_rebinds() {
-        // Test that multiple concurrent rebind operations are handled correctly
-        let initial_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let mut transport = UdpTransport::new(initial_addr).await.unwrap();
-
-        // Perform sequential rebinds since we can't have multiple mutable references
-        let mut success_count = 0;
-        for i in 0..5 {
-            let new_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            match transport.rebind(new_addr).await {
-                Ok(()) => {
-                    println!("Rebind {} succeeded", i);
-                    success_count += 1;
-                }
-                Err(e) => {
-                    println!("Rebind {} failed: {:?}", i, e);
-                }
-            }
-            
-            // Small delay between rebinds
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        // All rebinds should succeed in sequential execution
-        assert!(success_count > 0, "At least one rebind should succeed");
-
-        // Verify transport is still functional
-        let final_addr = transport.local_addr().unwrap();
-        println!("Final address: {}", final_addr);
-
-        transport.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn test_concurrent_socket_operations() {
-        // Test concurrent socket operations through the actor system
-        let initial_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let transport = UdpTransport::new(initial_addr).await.unwrap();
-        let peer_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-
-        // Create Arc wrapper for shared access
-        let transport = Arc::new(transport);
-        
-        // Spawn multiple tasks that send frames concurrently
-        let mut send_handles = Vec::new();
-        for i in 0..10 {
-            let transport_clone = transport.clone();
-            let handle = tokio::spawn(async move {
-                let frame = Frame::new_push(123, i, 0, 1024, 0, bytes::Bytes::from(format!("concurrent_{}", i)));
-                let batch = FrameBatch {
-                    remote_addr: peer_addr,
-                    frames: vec![frame],
-                };
-                
-                // This should not panic even if socket is being updated
-                let _ = transport_clone.send_frames(batch).await;
-            });
-            send_handles.push(handle);
-        }
-
-        // Spawn tasks that read the current socket
-        let mut read_handles = Vec::new();
-        for i in 0..5 {
-            let shared_socket = transport.shared_socket.clone();
-            let handle = tokio::spawn(async move {
-                for _ in 0..20 {
-                    let socket = shared_socket.load();
-                    let addr = socket.local_addr().unwrap();
-                    assert!(addr.port() > 0, "Reader {}: Invalid socket", i);
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-            });
-            read_handles.push(handle);
-        }
-
-        // Wait for all operations to complete
-        for handle in send_handles {
-            handle.await.unwrap();
-        }
-        for handle in read_handles {
-            handle.await.unwrap();
-        }
-
-        transport.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn test_arcswap_atomic_updates() {
-        // Test that ArcSwap provides atomic updates without intermediate states
-        let initial_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let transport = UdpTransport::new(initial_addr).await.unwrap();
-
-        // Spawn multiple readers that continuously check socket consistency
-        let mut reader_handles = Vec::new();
-        for i in 0..3 {
-            let shared_socket = transport.shared_socket.clone();
-            let handle = tokio::spawn(async move {
-                for _ in 0..100 {
-                    let socket = shared_socket.load();
-                    let addr = socket.local_addr().unwrap();
-                    
-                    // Verify the socket is always valid
-                    assert!(addr.port() > 0, "Reader {}: Invalid socket address", i);
-                    
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-            });
-            reader_handles.push(handle);
-        }
-
-        // Spawn a writer that updates the socket
-        let writer_handle = {
-            let shared_socket = transport.shared_socket.clone();
+        // Task to send frames FROM transport_arc TO peer_transport_arc
+        let send_task = {
+            let transport = transport_arc.clone();
             tokio::spawn(async move {
-                for _ in 0..10 {
-                    let new_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-                    shared_socket.store(Arc::new(new_socket));
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+                for i in 0..10 {
+                    let frame = Frame::new_push(i as u32, 1, 0, 1024, 0, Bytes::from(format!("data {}", i)));
+                    let batch = FrameBatch { remote_addr: peer_addr, frames: vec![frame] };
+                    if let Err(e) = transport.send_frames(batch).await {
+                        error!("Send failed: {}", e);
+                        break; // Stop sending on error
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
         };
 
-        // Wait for all operations to complete
-        writer_handle.await.unwrap();
-        for handle in reader_handles {
-            handle.await.unwrap();
-        }
+        // Task to receive frames on peer_transport_arc
+        let recv_task = {
+            let peer_transport = peer_transport_arc.clone();
+            tokio::spawn(async move {
+                let mut received_count = 0;
+                loop {
+                    // Use a timeout to stop the loop gracefully
+                    match tokio::time::timeout(Duration::from_secs(1), peer_transport.recv_frames()).await {
+                        Ok(Ok(_)) => received_count += 1,
+                        _ => break, // Break on error or timeout
+                    }
+                }
+                received_count
+            })
+        };
 
-        transport.shutdown().await;
+        // Let some packets fly before rebinding
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        
+        // Rebind the sender transport while sends are ongoing.
+        // This now works because rebind takes &self and can be called on an Arc.
+        let new_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        transport_arc.rebind(new_addr).await.unwrap();
+        
+        let final_addr = transport_arc.local_addr().unwrap();
+        assert_ne!(original_addr, final_addr, "Address should have changed after rebind");
+        
+        // Wait for tasks to complete
+        send_task.await.unwrap();
+        let received_count = recv_task.await.unwrap();
+        
+        assert!(received_count > 0, "Should have received some packets");
+        println!("Received {} packets", received_count);
+
+        // Shutdown transports
+        transport_arc.shutdown();
+        peer_transport_arc.shutdown();
     }
 
     #[tokio::test]
-    async fn test_send_recv_during_rapid_rebinds() {
-        // Test send/recv operations during rapid rebind operations
-        let initial_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let mut transport1 = UdpTransport::new(initial_addr).await.unwrap();
-        let transport2 = UdpTransport::new(initial_addr).await.unwrap();
+    async fn test_shutdown_stops_receiver() {
+        let transport = UdpTransport::new("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let transport_arc = Arc::new(transport);
 
-        let addr1 = transport1.local_addr().unwrap();
-        let _addr2 = transport2.local_addr().unwrap();
+        let recv_handle = {
+            let transport = transport_arc.clone();
+            tokio::spawn(async move {
+                // This should eventually fail when the channel is closed after shutdown.
+                transport.recv_frames().await
+            })
+        };
 
-        // Rapid rebind on transport1
-        let rebind_handle = tokio::spawn(async move {
-            for _ in 0..10 {
-                let new_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-                let _ = transport1.rebind(new_addr).await;
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            transport1
-        });
+        // Give the receiver a moment to start
+        tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Continuous send from transport2
-        let send_handle = tokio::spawn(async move {
-            for i in 0..20 {
-                let batch = FrameBatch {
-                    remote_addr: addr1, // This might become stale, but shouldn't crash
-                    frames: vec![Frame::new_push(123, i, 0, 1024, 0, bytes::Bytes::from(format!("msg_{}", i)))],
-                };
-                
-                // Send operations should not panic even if target address is stale
-                let _ = transport2.send_frames(batch).await;
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-            transport2
-        });
+        // Shutdown the transport
+        transport_arc.shutdown();
 
-        // Wait for operations to complete
-        let transport1 = rebind_handle.await.unwrap();
-        let transport2 = send_handle.await.unwrap();
-
-        // Cleanup
-        transport1.shutdown().await;
-        transport2.shutdown().await;
+        // The recv_frames call should now unblock and return an error
+        let result = tokio::time::timeout(Duration::from_secs(1), recv_handle).await;
+        
+        assert!(result.is_ok(), "recv_frames did not unblock after shutdown");
+        let inner_result = result.unwrap();
+        assert!(inner_result.is_ok(), "Join handle failed");
+        let final_result = inner_result.unwrap();
+        assert!(final_result.is_err(), "Expected channel closed error");
+        assert!(matches!(final_result.unwrap_err(), crate::error::Error::ChannelClosed));
     }
 }
