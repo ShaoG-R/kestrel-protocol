@@ -248,7 +248,7 @@ mod tests {
                 sent_frames: Arc::new(Mutex::new(VecDeque::new())),
                 reliability: ReliabilityLayer::new(
                     crate::config::Config::default(),
-                    Box::new(crate::congestion::vegas::Vegas::new(crate::config::Config::default()))
+                    Box::new(crate::core::reliability::congestion::vegas::Vegas::new(crate::config::Config::default()))
                 ),
                 command_tx,
             };

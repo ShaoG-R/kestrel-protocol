@@ -8,5 +8,4 @@ pub mod error;
 pub mod packet;
 pub mod socket;
 
-pub mod congestion;
 pub mod core;

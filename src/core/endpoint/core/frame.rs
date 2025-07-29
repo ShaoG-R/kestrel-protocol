@@ -86,7 +86,7 @@ pub(crate) fn create_path_response_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::congestion::vegas::Vegas;
+    use crate::core::reliability::congestion::vegas::Vegas;
     use bytes::Bytes;
 
     fn create_test_reliability_layer() -> ReliabilityLayer {

@@ -13,21 +13,22 @@ pub mod packetizer;
 pub mod recv_buffer;
 pub mod retransmission;
 pub mod send_buffer;
+pub mod congestion;
 
 use self::{
     packetizer::{packetize, PacketizerContext},
     recv_buffer::ReceiveBuffer,
-    retransmission::{RetransmissionManager, rtt::RttEstimator},
+    retransmission::{rtt::RttEstimator, RetransmissionManager},
     send_buffer::SendBuffer,
 };
 use crate::{
-    congestion::CongestionControl,
     config::Config,
     packet::{frame::Frame, sack::SackRange},
 };
 use bytes::Bytes;
 use tokio::time::Instant;
 use tracing::{debug, trace};
+use congestion::CongestionControl;
 
 /// The reliability layer for a connection.
 ///

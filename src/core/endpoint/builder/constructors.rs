@@ -3,7 +3,6 @@
 use crate::core::endpoint::{Endpoint, StreamCommand};
 use crate::{
     config::Config,
-    congestion::vegas::Vegas,
     core::reliability::ReliabilityLayer,
     socket::{AsyncUdpSocket, SenderTaskCommand, SocketActorCommand},
 };
@@ -15,6 +14,7 @@ use tokio::{
 };
 use crate::core::endpoint::lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::core::endpoint::types::state::ConnectionState;
+use crate::core::reliability::congestion::vegas::Vegas;
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
     /// Creates a new `Endpoint` for the client-side.

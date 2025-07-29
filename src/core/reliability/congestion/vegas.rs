@@ -3,7 +3,7 @@
 //! 一个类Vegas、基于延迟的拥塞控制算法的实现。
 
 use crate::config::Config;
-use crate::congestion::CongestionControl;
+use crate::core::reliability::congestion::CongestionControl;
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::{debug, trace};
@@ -20,13 +20,13 @@ pub(crate) enum State {
 /// 一个类Vegas的拥塞控制器。
 #[derive(Debug)]
 pub struct Vegas {
-    pub(super) congestion_window: u32,
+    pub(crate) congestion_window: u32,
 
-    pub(super) slow_start_threshold: u32,
+    pub(crate) slow_start_threshold: u32,
 
-    pub(super) state: State,
+    pub(crate) state: State,
 
-    pub(super) min_rtt: Duration,
+    pub(crate) min_rtt: Duration,
 
     /// The last measured RTT. Used to help determine the nature of packet loss.
     last_rtt: Duration,
