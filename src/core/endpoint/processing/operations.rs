@@ -115,7 +115,7 @@ impl<S: AsyncUdpSocket> EndpointOperations for Endpoint<S> {
     // ========== 通信管道操作 (Communication Channel Operations) ==========
     
     fn command_tx(&self) -> &mpsc::Sender<SocketActorCommand> {
-        &self.command_tx
+        &self.channels.command_tx()
     }
 
     // ========== 时间管理 (Time Management) ==========

@@ -17,9 +17,8 @@ use lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::{
     config::Config,
     core::reliability::ReliabilityLayer,
-    socket::{AsyncUdpSocket, SenderTaskCommand, SocketActorCommand},
+    socket::{AsyncUdpSocket, SocketActorCommand},
 };
-use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::{
     sync::mpsc,
@@ -31,6 +30,7 @@ use types::{
     identity::ConnectionIdentity,
     timing::TimingManager,
     transport::TransportManager,
+    channels::ChannelManager,
 };
 
 
@@ -59,25 +59,27 @@ impl<S: AsyncUdpSocket> Drop for ConnectionCleaner<S> {
 
 /// Represents one end of a reliable connection.
 pub struct Endpoint<S: AsyncUdpSocket> {
-    /// 新的连接标识管理器 (逐步迁移中)
-    /// New connection identity manager (migrating gradually)
+    /// 新的连接标识管理器
+    /// New connection identity manager
     identity: ConnectionIdentity,
     
-    /// 新的时间管理器 (逐步迁移中)
-    /// New timing manager (migrating gradually)
+    /// 新的时间管理器
+    /// New timing manager
     timing: TimingManager,
     
-    /// 新的传输层管理器 (逐步迁移中)
-    /// New transport manager (migrating gradually)
+    /// 新的传输层管理器
+    /// New transport manager
     transport: TransportManager,
 
+    /// 新的通道管理器
+    /// New channel manager
+    channels: ChannelManager<S>,
+
+    /// 新的生命周期管理器
+    /// New lifecycle manager
     lifecycle_manager: DefaultLifecycleManager,
     config: Config,
-    receiver: mpsc::Receiver<(crate::packet::frame::Frame, SocketAddr)>,
-    sender: mpsc::Sender<SenderTaskCommand<S>>,
-    command_tx: mpsc::Sender<SocketActorCommand>,
-    rx_from_stream: mpsc::Receiver<StreamCommand>,
-    tx_to_stream: Option<mpsc::Sender<Vec<Bytes>>>,
+    
 }
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
@@ -203,7 +205,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// 获取命令发送器
     /// Gets the command sender
     pub fn command_tx(&self) -> &mpsc::Sender<SocketActorCommand> {
-        &self.command_tx
+        &self.channels.command_tx()
     }
 
     /// 获取可靠性层的可变引用

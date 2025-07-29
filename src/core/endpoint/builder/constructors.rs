@@ -17,6 +17,7 @@ use crate::core::endpoint::types::{
     identity::ConnectionIdentity,
     timing::TimingManager,
     transport::TransportManager,
+    channels::ChannelManager,
 };
 use crate::core::reliability::congestion::vegas::Vegas;
 
@@ -53,11 +54,13 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             transport: TransportManager::new(reliability),
             lifecycle_manager,
             config,
-            receiver,
-            sender,
-            command_tx,
-            rx_from_stream,
-            tx_to_stream: Some(tx_to_stream),
+            channels: ChannelManager::new(
+                receiver,
+                sender,
+                command_tx,
+                rx_from_stream,
+                Some(tx_to_stream),
+            ),
         };
 
         (endpoint, tx_to_endpoint, rx_from_endpoint)
@@ -91,11 +94,13 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             transport: TransportManager::new(reliability),
             lifecycle_manager,
             config,
-            receiver,
-            sender,
-            command_tx,
-            rx_from_stream,
-            tx_to_stream: Some(tx_to_stream),
+            channels: ChannelManager::new(
+                receiver,
+                sender,
+                command_tx,
+                rx_from_stream,
+                Some(tx_to_stream),
+            ),
         };
 
         (endpoint, tx_to_endpoint, rx_from_endpoint)

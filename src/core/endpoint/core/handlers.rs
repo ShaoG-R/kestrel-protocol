@@ -208,7 +208,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
                         // Notify ReliableUdpSocket to update the addr_to_cid map.
                         let _ = self
-                            .command_tx
+                            .channels.command_tx
                             .send(SocketActorCommand::UpdateAddr {
                                 cid: self.identity.local_cid(),
                                 new_addr,
@@ -530,7 +530,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             crate::core::endpoint::types::state::ConnectionState::SynReceived => {
                 // 在SynReceived状态下，连接还没有真正建立，立即关闭用户流接收器
                 // In SynReceived state, connection is not established yet, immediately close user stream receiver
-                self.tx_to_stream = None;
+                *self.channels.tx_to_stream_mut() = None;
 
                 // 尝试优雅关闭
                 if let Ok(()) = self.begin_graceful_shutdown() {
@@ -545,14 +545,14 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     if let Ok(()) = self.lifecycle_manager.transition_to(crate::core::endpoint::types::state::ConnectionState::Closed) {
                         self.transport.reliability_mut().clear_in_flight_packets();
                         // 连接直接关闭时才关闭用户流
-                        self.tx_to_stream = None;
+                        *self.channels.tx_to_stream_mut() = None;
                     }
                 } else {
                     // 有待发送数据，转换到Closing状态，继续尝试连接
                     if let Ok(()) = self.begin_graceful_shutdown() {
                         if self.lifecycle_manager.should_close() {
                             self.transport.reliability_mut().clear_in_flight_packets();
-                            self.tx_to_stream = None;
+                            *self.channels.tx_to_stream_mut() = None;
                         }
                     }
                 }
@@ -564,7 +564,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     // 只有连接完全关闭时才关闭用户流
                     if self.lifecycle_manager.should_close() {
                         self.transport.reliability_mut().clear_in_flight_packets();
-                        self.tx_to_stream = None;
+                        *self.channels.tx_to_stream_mut() = None;
                     }
                 }
             }

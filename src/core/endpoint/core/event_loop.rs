@@ -19,7 +19,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     pub async fn run(&mut self) -> Result<()> {
         let _cleaner = ConnectionCleaner::<S> {
             cid: self.identity.local_cid(),
-            command_tx: self.command_tx.clone(),
+            command_tx: self.channels.command_tx().clone(),
             _marker: std::marker::PhantomData,
         };
 
@@ -44,22 +44,22 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 biased; // Prioritize incoming packets and user commands
 
                 // 1. Handle frames from the network
-                Some((frame, src_addr)) = self.receiver.recv() => {
+                Some((frame, src_addr)) = self.channels.receiver.recv() => {
                     EventDispatcher::dispatch_frame(self, frame, src_addr).await?;
                     // After handling one frame, try to drain any other pending frames
                     // to process them in a batch.
-                    while let Ok((frame, src_addr)) = self.receiver.try_recv() {
+                    while let Ok((frame, src_addr)) = self.channels.receiver.try_recv() {
                         EventDispatcher::dispatch_frame(self, frame, src_addr).await?;
                     }
                 }
 
                 // 2. Handle commands from the user stream
-                Some(cmd) = self.rx_from_stream.recv() => {
+                Some(cmd) = self.channels.rx_from_stream.recv() => {
                     EventDispatcher::dispatch_stream_command(self, cmd).await?;
                     // After handling one command, try to drain any other pending commands
                     // to process them in a batch. This is especially useful if the user
                     // calls `write()` multiple times in quick succession.
-                    while let Ok(cmd) = self.rx_from_stream.try_recv() {
+                    while let Ok(cmd) = self.channels.rx_from_stream_mut().try_recv() {
                         EventDispatcher::dispatch_stream_command(self, cmd).await?;
                     }
                 }
@@ -93,10 +93,10 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                         count = data_vec.len(),
                         "Reassembled data, sending to stream."
                     );
-                    if let Some(tx) = self.tx_to_stream.as_ref() {
+                    if let Some(tx) = self.channels.tx_to_stream().as_ref() {
                         if tx.send(data_vec).await.is_err() {
                             // User's stream handle has been dropped. We can no longer send.
-                            self.tx_to_stream = None;
+                            *self.channels.tx_to_stream_mut() = None;
                             let _ = self.transition_state(ConnectionState::Closing);
                         }
                     }
@@ -140,7 +140,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             // This happens after a FIN has been received and all data that came before
             // the FIN has been passed to the user's stream.
             if self.timing.is_fin_pending_eof() && self.transport.reliability().is_recv_buffer_empty() {
-                if let Some(tx) = self.tx_to_stream.take() {
+                if let Some(tx) = self.channels.tx_to_stream_mut().take() {
                     trace!(
                         cid = self.identity.local_cid(),
                         "All data drained after FIN, closing user stream (sending EOF)."
@@ -172,7 +172,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 self.transport.reliability_mut().clear_in_flight_packets(); // Clean up here
                 // 连接关闭时，关闭用户流接收器
                 // Close user stream receiver when connection closes
-                self.tx_to_stream = None;
+                *self.channels.tx_to_stream_mut() = None;
                 return true;
             }
         }

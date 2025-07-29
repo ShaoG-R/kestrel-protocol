@@ -195,7 +195,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             remote_addr: self.identity.remote_addr(),
             frames,
         };
-        self.sender
+        self.channels.sender
             .send(SenderTaskCommand::Send(cmd))
             .await
             .map_err(|_| Error::ChannelClosed)
@@ -220,7 +220,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             remote_addr,
             frames: vec![frame],
         };
-        self.sender
+        self.channels.sender
             .send(SenderTaskCommand::Send(cmd))
             .await
             .map_err(|_| Error::ChannelClosed)
