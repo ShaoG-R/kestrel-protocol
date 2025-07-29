@@ -26,7 +26,11 @@ use tokio::{
     time::Instant,
 };
 use tracing::trace;
-use types::state::ConnectionState;
+use types::{
+    state::ConnectionState,
+    identity::ConnectionIdentity,
+    timing::TimingManager,
+};
 
 
 
@@ -54,6 +58,12 @@ impl<S: AsyncUdpSocket> Drop for ConnectionCleaner<S> {
 
 /// Represents one end of a reliable connection.
 pub struct Endpoint<S: AsyncUdpSocket> {
+    /// 新的连接标识管理器 (逐步迁移中)
+    /// New connection identity manager (migrating gradually)
+    identity: ConnectionIdentity,
+    
+    // 原有字段（过渡期保留）
+    // Original fields (kept during transition)
     remote_addr: SocketAddr,
     local_cid: u32,
     peer_cid: u32,
@@ -135,18 +145,31 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// 获取本地连接ID
     /// Gets the local connection ID
     pub fn local_cid(&self) -> u32 {
-        self.local_cid
+        // 逐步迁移：使用新的identity字段
+        // Gradual migration: use new identity field
+        self.identity.local_cid()
+        // 保留原有字段同步
+        // Keep original field in sync
+        // self.local_cid
     }
 
     /// 获取对端连接ID
     /// Gets the peer connection ID
     pub fn peer_cid(&self) -> u32 {
-        self.peer_cid
+        // 逐步迁移：使用新的identity字段
+        // Gradual migration: use new identity field
+        self.identity.peer_cid()
+        // 保留原有字段同步
+        // Keep original field in sync
+        // self.peer_cid
     }
 
     /// 设置对端连接ID
     /// Sets the peer connection ID
     pub fn set_peer_cid(&mut self, peer_cid: u32) {
+        // 同时更新新旧字段
+        // Update both new and old fields
+        self.identity.set_peer_cid(peer_cid);
         self.peer_cid = peer_cid;
     }
 
@@ -173,12 +196,20 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// 获取远程地址
     /// Gets the remote address
     pub fn remote_addr(&self) -> SocketAddr {
-        self.remote_addr
+        // 逐步迁移：使用新的identity字段
+        // Gradual migration: use new identity field
+        self.identity.remote_addr()
+        // 保留原有字段同步
+        // Keep original field in sync
+        // self.remote_addr
     }
 
     /// 设置远程地址
     /// Sets the remote address
     pub fn set_remote_addr(&mut self, addr: SocketAddr) {
+        // 同时更新新旧字段
+        // Update both new and old fields
+        self.identity.set_remote_addr(addr);
         self.remote_addr = addr;
     }
 

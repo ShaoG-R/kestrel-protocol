@@ -13,7 +13,10 @@ use tokio::{
     time::Instant,
 };
 use crate::core::endpoint::lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
-use crate::core::endpoint::types::state::ConnectionState;
+use crate::core::endpoint::types::{
+    state::ConnectionState,
+    identity::ConnectionIdentity,
+};
 use crate::core::reliability::congestion::vegas::Vegas;
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
@@ -45,6 +48,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         lifecycle_manager.initialize(local_cid, remote_addr).unwrap();
 
         let endpoint = Self {
+            identity: ConnectionIdentity::new(local_cid, 0, remote_addr),
+            // 保留原有字段（过渡期）
+            // Keep original fields (transition period)
             remote_addr,
             local_cid,
             peer_cid: 0,
@@ -90,6 +96,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         lifecycle_manager.initialize(local_cid, remote_addr).unwrap();
 
         let endpoint = Self {
+            identity: ConnectionIdentity::new(local_cid, peer_cid, remote_addr),
+            // 保留原有字段（过渡期）
+            // Keep original fields (transition period)
             remote_addr,
             local_cid,
             peer_cid,
