@@ -427,4 +427,27 @@ impl ReliabilityLayer {
         self.sequence_number_counter += 1;
         seq
     }
+
+    // --- Congestion control and RTT passthrough methods ---
+
+    /// Gets the current congestion window size.
+    ///
+    /// 获取当前拥塞窗口大小。
+    pub fn congestion_window(&self) -> u32 {
+        self.congestion_control.congestion_window()
+    }
+
+    /// Gets the current smoothed RTT estimate.
+    ///
+    /// 获取当前平滑的RTT估计值。
+    pub fn smoothed_rtt(&self) -> Option<std::time::Duration> {
+        self.rto_estimator.smoothed_rtt()
+    }
+
+    /// Gets the current RTT variation.
+    ///
+    /// 获取当前RTT变化值。
+    pub fn rtt_var(&self) -> Option<std::time::Duration> {
+        self.rto_estimator.rtt_var()
+    }
 } 

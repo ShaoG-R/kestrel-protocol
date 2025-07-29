@@ -80,6 +80,28 @@ impl RttEstimator {
         self.rto *= 2;
         debug!(old_rto_ms = old_rto.as_millis(), new_rto_ms = self.rto.as_millis(), "RTO backoff");
     }
+
+    /// Returns the current smoothed RTT estimate.
+    ///
+    /// 返回当前平滑的RTT估计值。
+    pub fn smoothed_rtt(&self) -> Option<Duration> {
+        if self.srtt > 0.0 {
+            Some(Duration::from_secs_f64(self.srtt))
+        } else {
+            None
+        }
+    }
+
+    /// Returns the current RTT variation.
+    ///
+    /// 返回当前RTT变化值。
+    pub fn rtt_var(&self) -> Option<Duration> {
+        if self.srtt > 0.0 {
+            Some(Duration::from_secs_f64(self.rttvar))
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
