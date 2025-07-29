@@ -270,7 +270,7 @@ impl UdpTransport {
 
         // --- Channels and Shared State ---
         let (send_command_tx, command_rx) = mpsc::channel(1024);
-        let (datagram_tx, datagram_rx) = async_channel::unbounded();
+        let (datagram_tx, datagram_rx) = async_channel::bounded(1024);
         let (shutdown_tx, shutdown_rx) = watch::channel(());
 
         let shared_socket = Arc::new(ArcSwap::new(Arc::new(socket)));
