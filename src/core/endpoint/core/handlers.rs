@@ -30,7 +30,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             self.start_path_validation(src_addr, challenge_data, tx)?;
             let challenge_frame = create_path_challenge_frame(
                 self.peer_cid,
-                self.reliability.next_sequence_number(),
+                self.transport.reliability_mut().next_sequence_number(),
                 self.start_time,
                 challenge_data,
             );
@@ -53,7 +53,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
                 // Acknowledge the SYN-ACK, potentially with piggybacked data if the
                 // user has already called write().
-                if !self.reliability.is_send_buffer_empty() {
+                if !self.transport.reliability().is_send_buffer_empty() {
                     self.packetize_and_send().await?;
                 } else {
                     self.send_standalone_ack().await?;
@@ -90,14 +90,14 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 info!(cid = self.local_cid, "Received duplicate SYN, ignoring.");
                 // If we have already been triggered to send a SYN-ACK (i.e., data is in the
                 // send buffer), we can resend it.
-                if !self.reliability.is_send_buffer_empty() {
+                if !self.transport.reliability().is_send_buffer_empty() {
                     self.send_syn_ack().await?;
                 }
             }
             Frame::Push { header, payload } => {
                 // For 0-RTT PUSH frames received during the `SynReceived` state, the ACK
                 // will be piggybacked onto the eventual SYN-ACK.
-                self.reliability
+                self.transport.reliability_mut()
                     .receive_push(header.sequence_number, payload);
             }
             Frame::Ack { header, payload } => {
@@ -106,7 +106,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             Frame::Fin { header, .. } => {
                 // Handle FIN even in SynReceived state - this can happen with 0-RTT
                 // where client sends data and immediately closes
-                if self.reliability.receive_fin(header.sequence_number) {
+                if self.transport.reliability_mut().receive_fin(header.sequence_number) {
                     self.send_standalone_ack().await?;
                     // 在0-RTT场景中，从SynReceived状态转换到FinWait - 使用生命周期管理器
                     // In 0-RTT scenario, transition from SynReceived to FinWait - using lifecycle manager
@@ -139,7 +139,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         match frame {
             Frame::Push { header, payload } => {
                 if self
-                    .reliability
+                    .transport.reliability_mut()
                     .receive_push(header.sequence_number, payload)
                 {
                     self.send_standalone_ack().await?;
@@ -152,7 +152,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 // Just receive the FIN and ACK it. Do NOT change state here.
                 // The state transition to FinWait is driven by the `reassemble`
                 // method in the main loop, which is the single source of truth.
-                if self.reliability.receive_fin(header.sequence_number) {
+                if self.transport.reliability_mut().receive_fin(header.sequence_number) {
                     self.send_standalone_ack().await?;
                 }
             }
@@ -226,7 +226,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             Frame::Push { header, payload } => {
                 // Continue processing data frames during path validation
                 if self
-                    .reliability
+                    .transport.reliability_mut()
                     .receive_push(header.sequence_number, payload)
                 {
                     self.send_standalone_ack().await?;
@@ -236,7 +236,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 self.handle_ack_frame(header, payload).await?;
             }
             Frame::Fin { header, .. } => {
-                if self.reliability.receive_fin(header.sequence_number) {
+                if self.transport.reliability_mut().receive_fin(header.sequence_number) {
                     self.send_standalone_ack().await?;
                     // 路径验证期间收到FIN，转换到FinWait - 使用生命周期管理器
                     // Received FIN during path validation, transition to FinWait - using lifecycle manager
@@ -271,7 +271,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 // It's possible to receive data after we've decided to close,
                 // as the peer might have sent it before receiving our FIN.
                 if self
-                    .reliability
+                    .transport.reliability_mut()
                     .receive_push(header.sequence_number, payload)
                 {
                     self.send_standalone_ack().await?;
@@ -281,7 +281,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 self.handle_ack_frame(header, payload).await?;
             }
             Frame::Fin { header, .. } => {
-                if self.reliability.receive_fin(header.sequence_number) {
+                if self.transport.reliability_mut().receive_fin(header.sequence_number) {
                     self.send_standalone_ack().await?;
                     // 在Closing状态收到FIN，转换到ClosingWait - 使用生命周期管理器
                     // Received FIN in Closing state, transition to ClosingWait - using lifecycle manager
@@ -341,7 +341,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         match frame {
             Frame::Push { header, payload } => {
                 if self
-                    .reliability
+                    .transport.reliability_mut()
                     .receive_push(header.sequence_number, payload)
                 {
                     self.send_standalone_ack().await?;
@@ -354,7 +354,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 // This is a retransmitted FIN from the peer. Just acknowledge it again.
                 // Do NOT change state here. The state should only transition to `Closing`
                 // when the local application calls `shutdown()`.
-                if self.reliability.receive_fin(header.sequence_number) {
+                if self.transport.reliability_mut().receive_fin(header.sequence_number) {
                     self.send_standalone_ack().await?;
                 }
             }
@@ -382,10 +382,10 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
     ) -> Result<()> {
-        self.peer_recv_window = header.recv_window_size as u32;
+        self.transport.set_peer_recv_window(header.recv_window_size as u32);
         let sack_ranges = decode_sack_ranges(payload);
         let frames_to_retx =
-            self.reliability
+            self.transport.reliability_mut()
                 .handle_ack(header.recv_next_sequence, sack_ranges, Instant::now());
         if !frames_to_retx.is_empty() {
             self.send_frames(frames_to_retx).await?;
@@ -419,7 +419,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     self.transition_state(ConnectionState::Established)?;
 
                     // 1. Queue the user's data into the reliability layer's stream buffer.
-                    self.reliability.write_to_stream(data);
+                    self.transport.reliability_mut().write_to_stream(data);
 
                     // 2. Create the payload-less SYN-ACK frame.
                     let syn_ack_frame =
@@ -428,9 +428,10 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     // 3. Packetize the stream data into PUSH frames. This will correctly
                     //    assign sequence numbers starting from 0.
                     let now = Instant::now();
-                    let frames_to_send = self.reliability.packetize_stream_data(
+                    let peer_recv_window = self.transport.peer_recv_window();
+                    let frames_to_send = self.transport.reliability_mut().packetize_stream_data(
                         self.peer_cid,
-                        self.peer_recv_window,
+                        peer_recv_window,
                         now,
                         self.start_time,
                         Some(syn_ack_frame),
@@ -442,7 +443,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     // 5. Send them all in one go.
                     self.send_frames(frames_to_send).await?;
                 } else {
-                    self.reliability.write_to_stream(data);
+                    self.transport.reliability_mut().write_to_stream(data);
                 }
             }
             StreamCommand::Close => {
@@ -467,7 +468,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
                 let challenge_frame = create_path_challenge_frame(
                     self.peer_cid,
-                    self.reliability.next_sequence_number(),
+                    self.transport.reliability_mut().next_sequence_number(),
                     self.start_time,
                     challenge_data,
                 );
@@ -483,7 +484,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     }
 
     pub async fn handle_timeout(&mut self, now: Instant) -> Result<()> {
-        let frames_to_resend = self.reliability.check_for_retransmissions(now);
+        let frames_to_resend = self.transport.reliability_mut().check_for_retransmissions(now);
         if !frames_to_resend.is_empty() {
             self.send_frames(frames_to_resend).await?;
         }
@@ -534,15 +535,15 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 // 尝试优雅关闭
                 if let Ok(()) = self.begin_graceful_shutdown() {
                     if self.lifecycle_manager.should_close() {
-                        self.reliability.clear_in_flight_packets();
+                        self.transport.reliability_mut().clear_in_flight_packets();
                     }
                 }
             }
             crate::core::endpoint::types::state::ConnectionState::Connecting => {
-                if self.reliability.is_send_buffer_empty() {
+                if self.transport.reliability().is_send_buffer_empty() {
                     // 没有待发送数据，直接关闭
                     if let Ok(()) = self.lifecycle_manager.transition_to(crate::core::endpoint::types::state::ConnectionState::Closed) {
-                        self.reliability.clear_in_flight_packets();
+                        self.transport.reliability_mut().clear_in_flight_packets();
                         // 连接直接关闭时才关闭用户流
                         self.tx_to_stream = None;
                     }
@@ -550,7 +551,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     // 有待发送数据，转换到Closing状态，继续尝试连接
                     if let Ok(()) = self.begin_graceful_shutdown() {
                         if self.lifecycle_manager.should_close() {
-                            self.reliability.clear_in_flight_packets();
+                            self.transport.reliability_mut().clear_in_flight_packets();
                             self.tx_to_stream = None;
                         }
                     }
@@ -562,7 +563,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 if let Ok(()) = self.begin_graceful_shutdown() {
                     // 只有连接完全关闭时才关闭用户流
                     if self.lifecycle_manager.should_close() {
-                        self.reliability.clear_in_flight_packets();
+                        self.transport.reliability_mut().clear_in_flight_packets();
                         self.tx_to_stream = None;
                     }
                 }

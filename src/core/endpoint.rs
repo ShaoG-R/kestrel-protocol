@@ -30,6 +30,7 @@ use types::{
     state::ConnectionState,
     identity::ConnectionIdentity,
     timing::TimingManager,
+    transport::TransportManager,
 };
 
 
@@ -62,6 +63,14 @@ pub struct Endpoint<S: AsyncUdpSocket> {
     /// New connection identity manager (migrating gradually)
     identity: ConnectionIdentity,
     
+    /// 新的时间管理器 (逐步迁移中)
+    /// New timing manager (migrating gradually)
+    timing: TimingManager,
+    
+    /// 新的传输层管理器 (逐步迁移中)
+    /// New transport manager (migrating gradually)
+    transport: TransportManager,
+    
     // 原有字段（过渡期保留）
     // Original fields (kept during transition)
     remote_addr: SocketAddr,
@@ -70,8 +79,6 @@ pub struct Endpoint<S: AsyncUdpSocket> {
 
     lifecycle_manager: DefaultLifecycleManager,
     start_time: Instant,
-    reliability: ReliabilityLayer,
-    peer_recv_window: u32,
     config: Config,
     last_recv_time: Instant,
     receiver: mpsc::Receiver<(crate::packet::frame::Frame, SocketAddr)>,
@@ -184,13 +191,21 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// 更新最后接收时间
     /// Updates the last receive time
     pub fn update_last_recv_time(&mut self, time: Instant) {
+        // 同时更新新旧字段
+        // Update both new and old fields
+        self.timing.update_last_recv_time(time);
         self.last_recv_time = time;
     }
 
     /// 获取连接开始时间
     /// Gets the connection start time
     pub fn start_time(&self) -> Instant {
-        self.start_time
+        // 逐步迁移：使用新的timing字段
+        // Gradual migration: use new timing field
+        self.timing.start_time()
+        // 保留原有字段同步
+        // Keep original field in sync
+        // self.start_time
     }
 
     /// 获取远程地址
@@ -222,12 +237,12 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// 获取可靠性层的可变引用
     /// Gets a mutable reference to the reliability layer
     pub fn reliability_mut(&mut self) -> &mut ReliabilityLayer {
-        &mut self.reliability
+        self.transport.reliability_mut()
     }
 
     /// 获取可靠性层的引用
     /// Gets a reference to the reliability layer
     pub fn reliability(&self) -> &ReliabilityLayer {
-        &self.reliability
+        self.transport.reliability()
     }
 }

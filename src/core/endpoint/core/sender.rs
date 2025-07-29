@@ -82,9 +82,10 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
         // 1. Collect all frames that need to be sent without requiring &mut self.
         // 1. 收集所有需要发送的帧，这些操作不需要 &mut self。
-        let mut frames_to_send = self.reliability.packetize_stream_data(
+        let peer_recv_window = self.transport.peer_recv_window();
+        let mut frames_to_send = self.transport.reliability_mut().packetize_stream_data(
             self.peer_cid,
-            self.peer_recv_window,
+            peer_recv_window,
             now,
             self.start_time,
             None,
@@ -93,15 +94,15 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         // 2. Perform actions that require &mut self and collect their resulting frames.
         // 2. 执行需要 &mut self 的操作，并收集它们产生的帧。
         if *self.state() == ConnectionState::Closing
-            && !self.reliability.has_fin_in_flight()
+            && !self.transport.reliability().has_fin_in_flight()
         {
             let fin_frame = create_fin_frame(
                 self.peer_cid,
-                self.reliability.next_sequence_number(),
-                &self.reliability,
+                self.transport.reliability_mut().next_sequence_number(),
+                &self.transport.reliability(),
                 self.start_time,
             );
-            self.reliability
+            self.transport.reliability_mut()
                 .track_frame_in_flight(fin_frame.clone(), now);
             frames_to_send.push(fin_frame);
         }
@@ -127,9 +128,10 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         let syn_frame = create_syn_frame(&self.config, self.local_cid);
         frames_to_send.push(syn_frame);
 
-        let push_frames = self.reliability.packetize_stream_data(
+        let peer_recv_window = self.transport.peer_recv_window();
+        let push_frames = self.transport.reliability_mut().packetize_stream_data(
             self.peer_cid,
-            self.peer_recv_window,
+            peer_recv_window,
             now,
             self.start_time,
             None,
@@ -157,11 +159,11 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     }
 
     pub(in crate::core::endpoint) async fn send_standalone_ack(&mut self) -> Result<()> {
-        if !self.reliability.is_ack_pending() {
+        if !self.transport.reliability().is_ack_pending() {
             return Ok(());
         }
-        let frame = create_ack_frame(self.peer_cid, &mut self.reliability, self.start_time);
-        self.reliability.on_ack_sent(); // This requires &mut self
+        let frame = create_ack_frame(self.peer_cid, self.transport.reliability_mut(), self.start_time);
+        self.transport.reliability_mut().on_ack_sent(); // This requires &mut self
 
         // Since we've mutated self, we can now send the frame.
         self.send_raw_frames(vec![frame]).await

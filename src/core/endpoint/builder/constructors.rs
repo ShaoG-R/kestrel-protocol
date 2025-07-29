@@ -16,6 +16,8 @@ use crate::core::endpoint::lifecycle::{ConnectionLifecycleManager, DefaultLifecy
 use crate::core::endpoint::types::{
     state::ConnectionState,
     identity::ConnectionIdentity,
+    timing::TimingManager,
+    transport::TransportManager,
 };
 use crate::core::reliability::congestion::vegas::Vegas;
 
@@ -49,6 +51,8 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
         let endpoint = Self {
             identity: ConnectionIdentity::new(local_cid, 0, remote_addr),
+            timing: TimingManager::new(),
+            transport: TransportManager::new(reliability),
             // 保留原有字段（过渡期）
             // Keep original fields (transition period)
             remote_addr,
@@ -57,8 +61,6 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
             lifecycle_manager,
             start_time: now,
-            reliability,
-            peer_recv_window: 32,
             config,
             last_recv_time: now,
             receiver,
@@ -97,6 +99,8 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
         let endpoint = Self {
             identity: ConnectionIdentity::new(local_cid, peer_cid, remote_addr),
+            timing: TimingManager::new(),
+            transport: TransportManager::new(reliability),
             // 保留原有字段（过渡期）
             // Keep original fields (transition period)
             remote_addr,
@@ -105,8 +109,6 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
             lifecycle_manager,
             start_time: now,
-            reliability,
-            peer_recv_window: 32,
             config,
             last_recv_time: now,
             receiver,

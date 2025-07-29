@@ -46,11 +46,11 @@ impl<S: AsyncUdpSocket> EndpointOperations for Endpoint<S> {
     }
     
     fn peer_recv_window(&self) -> u32 {
-        self.peer_recv_window
+        self.transport.peer_recv_window()
     }
     
     fn set_peer_recv_window(&mut self, window_size: u32) {
-        self.peer_recv_window = window_size;
+        self.transport.set_peer_recv_window(window_size);
     }
 
     // ========== 生命周期管理 (Lifecycle Management) ==========
@@ -79,11 +79,11 @@ impl<S: AsyncUdpSocket> EndpointOperations for Endpoint<S> {
     // ========== 可靠性层操作 (Reliability Layer Operations) ==========
     
     fn reliability(&self) -> &ReliabilityLayer {
-        &self.reliability
+        &self.transport.reliability()
     }
     
     fn reliability_mut(&mut self) -> &mut ReliabilityLayer {
-        &mut self.reliability
+        self.transport.reliability_mut()
     }
     
     fn is_send_buffer_empty(&self) -> bool {
@@ -154,7 +154,7 @@ impl<S: AsyncUdpSocket> ProcessorOperations for Endpoint<S> {
             .into_iter()
             .map(|(start, end)| SackRange { start, end })
             .collect();
-        let frames_to_retx = self.reliability_mut().handle_ack(
+        let frames_to_retx = self.transport.reliability_mut().handle_ack(
             recv_next_seq,
             sack_ranges_converted,
             now,
@@ -169,7 +169,7 @@ impl<S: AsyncUdpSocket> ProcessorOperations for Endpoint<S> {
     ) -> Result<()> {
         // 接收数据并检查是否需要立即发送 ACK
         // Receive data and check if immediate ACK is needed
-        if self.reliability_mut().receive_push(seq, payload) {
+        if self.transport.reliability_mut().receive_push(seq, payload) {
             self.send_standalone_ack().await?;
         }
         Ok(())

@@ -33,7 +33,8 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             {
                 Instant::now() + self.config.connection.idle_timeout // Effectively, sleep forever until a message
             } else {
-                self.reliability
+                self.transport
+                    .reliability()
                     .next_rto_deadline()
                     .unwrap_or_else(|| Instant::now() + self.config.connection.idle_timeout)
             };
@@ -79,7 +80,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             );
 
             // 5. Reassemble data and send to the user stream
-            let (data_to_send, fin_seen) = self.reliability.reassemble();
+            let (data_to_send, fin_seen) = self.transport.reliability_mut().reassemble();
             if fin_seen {
                 // The FIN has been reached in the byte stream. No more data will arrive.
                 // We can now set the flag to schedule the EOF signal for the user stream.
@@ -138,7 +139,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             // 8. Check if we need to send a deferred EOF.
             // This happens after a FIN has been received and all data that came before
             // the FIN has been passed to the user's stream.
-            if self.fin_pending_eof && self.reliability.is_recv_buffer_empty() {
+            if self.fin_pending_eof && self.transport.reliability().is_recv_buffer_empty() {
                 if let Some(tx) = self.tx_to_stream.take() {
                     trace!(
                         cid = self.local_cid,
@@ -163,12 +164,12 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         let current_state = self.lifecycle_manager.current_state();
         if (*current_state == ConnectionState::Closing
             || *current_state == ConnectionState::ClosingWait)
-            && self.reliability.is_in_flight_empty()
+            && self.transport.reliability().is_in_flight_empty()
         {
             // 所有数据已确认，转换到Closed状态 - 使用生命周期管理器
             // All data acknowledged, transition to Closed state - using lifecycle manager
             if let Ok(()) = self.transition_state(ConnectionState::Closed) {
-                self.reliability.clear_in_flight_packets(); // Clean up here
+                self.transport.reliability_mut().clear_in_flight_packets(); // Clean up here
                 // 连接关闭时，关闭用户流接收器
                 // Close user stream receiver when connection closes
                 self.tx_to_stream = None;
