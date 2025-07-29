@@ -489,15 +489,13 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             self.send_frames(frames_to_resend).await?;
         }
 
-        // Check for path validation timeout - only if still in ValidatingPath state
-        // and not already closing
+        // 使用时间管理器检查路径验证超时
+        // Use timing manager to check path validation timeout
         if matches!(
             self.lifecycle_manager.current_state(),
             ConnectionState::ValidatingPath { .. }
         ) {
-            if now.saturating_duration_since(self.timing.last_recv_time())
-                > self.config.connection.idle_timeout
-            {
+            if self.timing.check_path_validation_timeout(&self.config, now) {
                 if let ConnectionState::ValidatingPath { notifier, .. } =
                     self.lifecycle_manager.current_state().clone()
                 {
@@ -511,8 +509,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             }
         }
 
-        if now.saturating_duration_since(self.timing.last_recv_time()) > self.config.connection.idle_timeout
-        {
+        // 使用时间管理器检查空闲超时
+        // Use timing manager to check idle timeout
+        if self.timing.check_idle_timeout(&self.config, now) {
             // 连接超时，强制关闭 - 使用生命周期管理器
             // Connection timeout, force close - using lifecycle manager
             self.lifecycle_manager.force_close()?;
