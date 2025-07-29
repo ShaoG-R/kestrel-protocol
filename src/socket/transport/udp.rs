@@ -207,11 +207,15 @@ async fn receiver_task(
 
                         let received = ReceivedDatagram { remote_addr, frames };
 
-                        // Try to send to the channel, if it's full or disconnected,
-                        // we drop the packet. This prevents the receiver from blocking.
-                        // 尝试发送到通道，如果通道已满或断开，我们丢弃数据包。这可以防止接收器阻塞。
+                        // Use try_send for non-blocking behavior. If the bounded channel is full,
+                        // it returns an error immediately, and we drop the packet.
+                        // This prevents the network I/O task from blocking.
+                        //
+                        // 使用 try_send 实现非阻塞行为。如果带边界的通道已满，
+                        // 它会立即返回错误，我们丢弃该数据包。
+                        // 这可以防止网络I/O任务阻塞。
                         if let Err(e) = datagram_tx.try_send(received) {
-                            warn!("Failed to push received datagram to buffer, dropping packet. Reason: {}", e);
+                            warn!("Failed to push received datagram to buffer (likely full), dropping packet. Reason: {}", e);
                         }
                     }
                     Err(e) => {
@@ -270,6 +274,13 @@ impl UdpTransport {
 
         // --- Channels and Shared State ---
         let (send_command_tx, command_rx) = mpsc::channel(1024);
+        // This is a Single-Producer, Single-Consumer (SPSC) scenario, but async_channel
+        // is used for its high performance and convenient `try_send` API.
+        // A bounded channel is crucial for backpressure to prevent unbounded memory usage.
+        //
+        // 这是一个单生产者，单消费者（SPSC）的场景，但我们使用 async_channel
+        // 是因为它具有高性能和方便的 `try_send` API。
+        // 有界通道对于提供背压以防止无限的内存使用至关重要。
         let (datagram_tx, datagram_rx) = async_channel::bounded(1024);
         let (shutdown_tx, shutdown_rx) = watch::channel(());
 
