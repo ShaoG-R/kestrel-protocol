@@ -143,30 +143,18 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// 获取本地连接ID
     /// Gets the local connection ID
     pub fn local_cid(&self) -> u32 {
-        // 逐步迁移：使用新的identity字段
-        // Gradual migration: use new identity field
         self.identity.local_cid()
-        // 保留原有字段同步
-        // Keep original field in sync
-        // self.local_cid
     }
 
     /// 获取对端连接ID
     /// Gets the peer connection ID
     pub fn peer_cid(&self) -> u32 {
-        // 逐步迁移：使用新的identity字段
-        // Gradual migration: use new identity field
         self.identity.peer_cid()
-        // 保留原有字段同步
-        // Keep original field in sync
-        // self.peer_cid
     }
 
     /// 设置对端连接ID
     /// Sets the peer connection ID
     pub fn set_peer_cid(&mut self, peer_cid: u32) {
-        // 同时更新新旧字段
-        // Update both new and old fields
         self.identity.set_peer_cid(peer_cid);
     }
 
