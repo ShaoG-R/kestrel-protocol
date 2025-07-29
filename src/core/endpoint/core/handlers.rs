@@ -31,7 +31,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             let challenge_frame = create_path_challenge_frame(
                 self.identity.peer_cid(),
                 self.transport.reliability_mut().next_sequence_number(),
-                self.start_time,
+                self.timing.start_time(),
                 challenge_data,
             );
             self.send_frame_to(challenge_frame, src_addr).await?;
@@ -402,7 +402,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         let response_frame = create_path_response_frame(
             self.identity.peer_cid(),
             header.sequence_number, // Echo the sequence number
-            self.start_time,
+            self.timing.start_time(),
             challenge_data,
         );
         // The response MUST be sent back to the address the challenge came from.
@@ -433,7 +433,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                         self.identity.peer_cid(),
                         peer_recv_window,
                         now,
-                        self.start_time,
+                        self.timing.start_time(),
                         Some(syn_ack_frame),
                     );
 
@@ -469,7 +469,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 let challenge_frame = create_path_challenge_frame(
                     self.identity.peer_cid(),
                     self.transport.reliability_mut().next_sequence_number(),
-                    self.start_time,
+                    self.timing.start_time(),
                     challenge_data,
                 );
                 self.send_frame_to(challenge_frame, new_addr).await?;
@@ -495,7 +495,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             self.lifecycle_manager.current_state(),
             ConnectionState::ValidatingPath { .. }
         ) {
-            if now.saturating_duration_since(self.last_recv_time)
+            if now.saturating_duration_since(self.timing.last_recv_time())
                 > self.config.connection.idle_timeout
             {
                 if let ConnectionState::ValidatingPath { notifier, .. } =
@@ -511,7 +511,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             }
         }
 
-        if now.saturating_duration_since(self.last_recv_time) > self.config.connection.idle_timeout
+        if now.saturating_duration_since(self.timing.last_recv_time()) > self.config.connection.idle_timeout
         {
             // 连接超时，强制关闭 - 使用生命周期管理器
             // Connection timeout, force close - using lifecycle manager

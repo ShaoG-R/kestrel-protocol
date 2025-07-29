@@ -84,7 +84,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             if fin_seen {
                 // The FIN has been reached in the byte stream. No more data will arrive.
                 // We can now set the flag to schedule the EOF signal for the user stream.
-                self.fin_pending_eof = true;
+                self.timing.set_fin_pending_eof(true);
             }
             if let Some(data_vec) = data_to_send {
                 if !data_vec.is_empty() {
@@ -139,14 +139,14 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             // 8. Check if we need to send a deferred EOF.
             // This happens after a FIN has been received and all data that came before
             // the FIN has been passed to the user's stream.
-            if self.fin_pending_eof && self.transport.reliability().is_recv_buffer_empty() {
+            if self.timing.is_fin_pending_eof() && self.transport.reliability().is_recv_buffer_empty() {
                 if let Some(tx) = self.tx_to_stream.take() {
                     trace!(
                         cid = self.identity.local_cid(),
                         "All data drained after FIN, closing user stream (sending EOF)."
                     );
                     drop(tx); // This closes the channel, signaling EOF.
-                    self.fin_pending_eof = false; // Reset the flag.
+                    self.timing.clear_fin_pending_eof(); // Reset the flag.
                 }
             }
 

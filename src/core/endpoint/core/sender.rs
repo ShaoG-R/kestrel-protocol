@@ -87,7 +87,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             self.identity.peer_cid(),
             peer_recv_window,
             now,
-            self.start_time,
+            self.timing.start_time(),
             None,
         );
 
@@ -100,7 +100,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                 self.identity.peer_cid(),
                 self.transport.reliability_mut().next_sequence_number(),
                 &self.transport.reliability(),
-                self.start_time,
+                self.timing.start_time(),
             );
             self.transport.reliability_mut()
                 .track_frame_in_flight(fin_frame.clone(), now);
@@ -133,7 +133,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             self.identity.peer_cid(),
             peer_recv_window,
             now,
-            self.start_time,
+            self.timing.start_time(),
             None,
         );
         frames_to_send.extend(push_frames);
@@ -162,7 +162,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         if !self.transport.reliability().is_ack_pending() {
             return Ok(());
         }
-        let frame = create_ack_frame(self.identity.peer_cid(), self.transport.reliability_mut(), self.start_time);
+        let frame = create_ack_frame(self.identity.peer_cid(), self.transport.reliability_mut(), self.timing.start_time());
         self.transport.reliability_mut().on_ack_sent(); // This requires &mut self
 
         // Since we've mutated self, we can now send the frame.

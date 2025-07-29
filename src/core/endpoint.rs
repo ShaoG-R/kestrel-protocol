@@ -72,17 +72,12 @@ pub struct Endpoint<S: AsyncUdpSocket> {
     transport: TransportManager,
 
     lifecycle_manager: DefaultLifecycleManager,
-    start_time: Instant,
     config: Config,
-    last_recv_time: Instant,
     receiver: mpsc::Receiver<(crate::packet::frame::Frame, SocketAddr)>,
     sender: mpsc::Sender<SenderTaskCommand<S>>,
     command_tx: mpsc::Sender<SocketActorCommand>,
     rx_from_stream: mpsc::Receiver<StreamCommand>,
     tx_to_stream: Option<mpsc::Sender<Vec<Bytes>>>,
-    /// Set to true when a FIN is received, indicating we should close the
-    /// user stream once the receive buffer is drained.
-    fin_pending_eof: bool,
 }
 
 impl<S: AsyncUdpSocket> Endpoint<S> {
@@ -184,21 +179,13 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     /// 更新最后接收时间
     /// Updates the last receive time
     pub fn update_last_recv_time(&mut self, time: Instant) {
-        // 同时更新新旧字段
-        // Update both new and old fields
         self.timing.update_last_recv_time(time);
-        self.last_recv_time = time;
     }
 
     /// 获取连接开始时间
     /// Gets the connection start time
     pub fn start_time(&self) -> Instant {
-        // 逐步迁移：使用新的timing字段
-        // Gradual migration: use new timing field
         self.timing.start_time()
-        // 保留原有字段同步
-        // Keep original field in sync
-        // self.start_time
     }
 
     /// 获取远程地址

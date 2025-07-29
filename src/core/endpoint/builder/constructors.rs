@@ -10,7 +10,6 @@ use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::{
     sync::mpsc,
-    time::Instant,
 };
 use crate::core::endpoint::lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::core::endpoint::types::{
@@ -41,7 +40,6 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             // Immediately write the 0-RTT data to the stream buffer.
             reliability.write_to_stream(data);
         }
-        let now = Instant::now();
 
         let mut lifecycle_manager = DefaultLifecycleManager::new(
             ConnectionState::Connecting,
@@ -54,15 +52,12 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             timing: TimingManager::new(),
             transport: TransportManager::new(reliability),
             lifecycle_manager,
-            start_time: now,
             config,
-            last_recv_time: now,
             receiver,
             sender,
             command_tx,
             rx_from_stream,
             tx_to_stream: Some(tx_to_stream),
-            fin_pending_eof: false,
         };
 
         (endpoint, tx_to_endpoint, rx_from_endpoint)
@@ -83,7 +78,6 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
         let congestion_control = Box::new(Vegas::new(config.clone()));
         let reliability = ReliabilityLayer::new(config.clone(), congestion_control);
-        let now = Instant::now();
 
         let mut lifecycle_manager = DefaultLifecycleManager::new(
             ConnectionState::SynReceived,
@@ -96,15 +90,12 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             timing: TimingManager::new(),
             transport: TransportManager::new(reliability),
             lifecycle_manager,
-            start_time: now,
             config,
-            last_recv_time: now,
             receiver,
             sender,
             command_tx,
             rx_from_stream,
             tx_to_stream: Some(tx_to_stream),
-            fin_pending_eof: false,
         };
 
         (endpoint, tx_to_endpoint, rx_from_endpoint)

@@ -42,7 +42,7 @@ impl<S: AsyncUdpSocket> EndpointOperations for Endpoint<S> {
     }
     
     fn start_time(&self) -> Instant {
-        self.start_time
+        self.timing.start_time()
     }
     
     fn peer_recv_window(&self) -> u32 {
@@ -121,7 +121,7 @@ impl<S: AsyncUdpSocket> EndpointOperations for Endpoint<S> {
     // ========== 时间管理 (Time Management) ==========
     
     fn update_last_recv_time(&mut self, now: Instant) {
-        self.last_recv_time = now;
+        self.timing.update_last_recv_time(now);
     }
 
     // ========== 路径迁移操作 (Path Migration Operations) ==========
