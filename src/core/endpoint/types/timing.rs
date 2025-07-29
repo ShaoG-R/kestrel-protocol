@@ -219,20 +219,20 @@ impl TimingManager {
     /// 获取超时检查结果
     /// Get timeout check results
     ///
-    /// 该方法提供了一个统一的接口来检查各种超时情况，返回超时类型的枚举。
+    /// 该方法提供了一个统一的接口来检查各种超时情况，返回超时事件的可选值。
     ///
     /// This method provides a unified interface to check various timeout conditions,
-    /// returning an enum of timeout types.
-    pub fn check_timeouts(&self, config: &Config, now: Instant) -> TimeoutResult {
+    /// returning an optional timeout event.
+    pub fn check_timeouts(&self, config: &Config, now: Instant) -> Option<TimeoutEvent> {
         // 检查空闲超时
         // Check idle timeout
         if self.check_idle_timeout(config, now) {
-            return TimeoutResult::IdleTimeout;
+            return Some(TimeoutEvent::IdleTimeout);
         }
 
-        // 如果没有超时，返回无超时
-        // If no timeout, return no timeout
-        TimeoutResult::NoTimeout
+        // 如果没有超时，返回None
+        // If no timeout, return None
+        None
     }
 
     /// 更新最后接收时间并重置相关超时状态
@@ -274,7 +274,7 @@ impl TimingManager {
     /// This method combines timeout checking and time judgment to determine
     /// if timeout handling should be triggered in the event loop.
     pub fn should_trigger_timeout_handling(&self, config: &Config, now: Instant) -> bool {
-        !matches!(self.check_timeouts(config, now), TimeoutResult::NoTimeout)
+        self.check_timeouts(config, now).is_some()
     }
 
     /// 获取超时相关的调试信息
@@ -338,25 +338,7 @@ impl TimingManager {
     }
 }
 
-/// 超时检查结果枚举
-/// Timeout check result enum
-///
-/// 该枚举定义了各种可能的超时情况，用于统一处理不同类型的超时。
-///
-/// This enum defines various possible timeout conditions for unified handling
-/// of different types of timeouts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TimeoutResult {
-    /// 没有超时
-    /// No timeout
-    NoTimeout,
-    /// 空闲超时
-    /// Idle timeout
-    IdleTimeout,
-    /// 路径验证超时
-    /// Path validation timeout
-    PathValidationTimeout,
-}
+
 
 impl Default for TimingManager {
     fn default() -> Self {
@@ -579,17 +561,14 @@ mod tests {
 
         // 刚创建时不应该有任何超时
         // Should not have any timeout when just created
-        assert_eq!(
-            manager.check_timeouts(&config, now),
-            TimeoutResult::NoTimeout
-        );
+        assert_eq!(manager.check_timeouts(&config, now), None);
 
         // 超过idle_timeout时间后应该有空闲超时
         // Should have idle timeout after exceeding idle_timeout
         let later = now + config.connection.idle_timeout + Duration::from_millis(100);
         assert_eq!(
             manager.check_timeouts(&config, later),
-            TimeoutResult::IdleTimeout
+            Some(TimeoutEvent::IdleTimeout)
         );
     }
 
@@ -641,23 +620,7 @@ mod tests {
         assert!(remaining >= Duration::ZERO);
     }
 
-    #[test]
-    fn test_timeout_result_enum() {
-        // 测试枚举的基本功能
-        // Test basic enum functionality
-        assert_eq!(TimeoutResult::NoTimeout, TimeoutResult::NoTimeout);
-        assert_ne!(TimeoutResult::NoTimeout, TimeoutResult::IdleTimeout);
-        assert_ne!(
-            TimeoutResult::IdleTimeout,
-            TimeoutResult::PathValidationTimeout
-        );
 
-        // 测试Debug trait
-        // Test Debug trait
-        let result = TimeoutResult::IdleTimeout;
-        let debug_str = format!("{:?}", result);
-        assert!(debug_str.contains("IdleTimeout"));
-    }
 
     #[test]
     fn test_should_trigger_timeout_handling() {
