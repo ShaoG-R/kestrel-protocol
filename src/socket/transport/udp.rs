@@ -24,11 +24,6 @@ enum UdpTransportCommand {
         batch: FrameBatch,
         response_tx: oneshot::Sender<Result<()>>,
     },
-    /// Receive frames from the socket.
-    /// 从套接字接收帧。
-    Recv {
-        response_tx: oneshot::Sender<Result<ReceivedDatagram>>,
-    },
     /// Get the local address.
     /// 获取本地地址。
     GetLocalAddr {
@@ -78,11 +73,6 @@ impl UdpTransportSendActor {
                 UdpTransportCommand::Send { batch, response_tx } => {
                     let result = self.handle_send(batch).await;
                     let _ = response_tx.send(result);
-                }
-                UdpTransportCommand::Recv { response_tx: _ } => {
-                    // Recv operations are handled directly by the transport, not through the actor
-                    // 接收操作由传输直接处理，不通过actor
-                    warn!("Recv command sent to send actor, this should not happen");
                 }
                 UdpTransportCommand::GetLocalAddr { response_tx } => {
                     let result = self.socket.local_addr().map_err(Into::into);
