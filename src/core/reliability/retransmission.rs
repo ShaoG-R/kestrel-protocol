@@ -7,18 +7,19 @@
 //!
 //! 此模块提供统一接口来管理基于SACK的可靠传输和基于超时的简单重传。
 
+pub mod rtt;
 mod sack_manager;
 mod simple_retx_manager;
-pub mod rtt;
 
-use self::{
-    sack_manager::SackManager,
-    simple_retx_manager::SimpleRetransmissionManager,
-};
+use self::{sack_manager::SackManager, simple_retx_manager::SimpleRetransmissionManager};
 
 use crate::{
     config::Config,
-    packet::{frame::{Frame, ReliabilityMode}, sack::SackRange},
+    core::endpoint::types::timing::TimeoutEvent,
+    packet::{
+        frame::{Frame, ReliabilityMode},
+        sack::SackRange,
+    },
 };
 use std::time::Duration;
 use tokio::time::Instant;
@@ -75,7 +76,7 @@ impl RetransmissionManager {
     /// 将数据包添加到适当的重传跟踪。
     pub fn add_in_flight_packet(&mut self, frame: Frame, now: Instant) {
         let reliability_mode = frame.reliability_mode_with_config(&self.config);
-        
+
         match reliability_mode {
             ReliabilityMode::Reliable => {
                 trace!(
@@ -111,19 +112,23 @@ impl RetransmissionManager {
     ) -> RetransmissionProcessResult {
         // Process SACK-managed packets
         // 处理SACK管理的数据包
-        let sack_result = self.sack_manager.process_ack(recv_next_seq, sack_ranges, now);
-        
+        let sack_result = self
+            .sack_manager
+            .process_ack(recv_next_seq, sack_ranges, now);
+
         // Process simple retransmission packets
         // 处理简单重传数据包
         let mut simple_acked = self.simple_retx_manager.acknowledge_up_to(recv_next_seq);
-        let sack_acked = self.simple_retx_manager.acknowledge_sack_ranges(sack_ranges);
+        let sack_acked = self
+            .simple_retx_manager
+            .acknowledge_sack_ranges(sack_ranges);
         simple_acked.extend(sack_acked);
 
         // Combine results
         // 合并结果
         let sack_acked_count = sack_result.newly_acked_sequences.len();
         let simple_acked_count = simple_acked.len();
-        
+
         let mut all_newly_acked = sack_result.newly_acked_sequences;
         all_newly_acked.extend(simple_acked);
 
@@ -147,12 +152,12 @@ impl RetransmissionManager {
     /// 检查SACK和简单管理器中的重传。
     pub fn check_for_retransmissions(&mut self, rto: Duration, now: Instant) -> Vec<Frame> {
         let mut frames_to_retx = Vec::new();
-        
+
         // Check SACK-based retransmissions
         // 检查基于SACK的重传
         let sack_retx = self.sack_manager.check_for_rto(rto, now);
         frames_to_retx.extend(sack_retx);
-        
+
         // Check simple retransmissions
         // 检查简单重传
         let simple_retx = self.simple_retx_manager.check_for_retransmissions(now);
@@ -173,7 +178,7 @@ impl RetransmissionManager {
     pub fn next_retransmission_deadline(&self, rto: Duration) -> Option<Instant> {
         let sack_deadline = self.sack_manager.next_rto_deadline(rto);
         let simple_deadline = self.simple_retx_manager.next_retransmission_deadline();
-        
+
         match (sack_deadline, simple_deadline) {
             (Some(sack), Some(simple)) => Some(sack.min(simple)),
             (Some(sack), None) => Some(sack),
@@ -209,10 +214,10 @@ impl RetransmissionManager {
     /// Checks if a FIN frame is in flight in either manager.
     /// 检查任一管理器中是否有FIN帧在途。
     pub fn has_fin_in_flight(&self) -> bool {
-        self.sack_manager.has_fin_in_flight() || 
-        self.simple_retx_manager.has_frame_type_in_flight(|frame| {
-            matches!(frame, Frame::Fin { .. })
-        })
+        self.sack_manager.has_fin_in_flight()
+            || self
+                .simple_retx_manager
+                .has_frame_type_in_flight(|frame| matches!(frame, Frame::Fin { .. }))
     }
 
     /// Increments the ACK-eliciting packet counter (delegated to SACK manager).
@@ -253,6 +258,64 @@ impl RetransmissionManager {
         self.simple_retx_manager.clear();
         debug!("Cleared all in-flight packets from both SACK and simple retransmission managers.");
     }
+
+    // === 分层超时管理接口 Layered Timeout Management Interface ===
+
+    /// 检查重传相关超时事件
+    /// Check retransmission-related timeout events
+    ///
+    /// 该方法检查所有重传相关的超时情况，返回超时事件和需要重传的帧。
+    /// 这是分层超时管理架构中重传层的统一入口，替代直接调用 check_for_retransmissions。
+    ///
+    /// This method checks all retransmission-related timeout conditions and returns
+    /// timeout events and frames that need retransmission. This is the unified entry
+    /// point for the retransmission layer in layered timeout management, replacing
+    /// direct calls to check_for_retransmissions.
+    pub fn check_retransmission_timeouts(
+        &mut self,
+        rto: Duration,
+        now: Instant,
+    ) -> (Vec<TimeoutEvent>, Vec<Frame>) {
+        let mut events = Vec::new();
+        let mut frames_to_retx = Vec::new();
+
+        // 检查SACK-based重传
+        // Check SACK-based retransmissions
+        let sack_retx = self.sack_manager.check_for_rto(rto, now);
+        frames_to_retx.extend(sack_retx);
+
+        // 检查简单重传
+        // Check simple retransmissions
+        let simple_retx = self.simple_retx_manager.check_for_retransmissions(now);
+        frames_to_retx.extend(simple_retx);
+
+        // 如果有需要重传的帧，添加重传超时事件
+        // If there are frames to retransmit, add retransmission timeout event
+        if !frames_to_retx.is_empty() {
+            events.push(TimeoutEvent::RetransmissionTimeout);
+            debug!(
+                retx_count = frames_to_retx.len(),
+                "Retransmission timeout detected by unified manager"
+            );
+        }
+
+        (events, frames_to_retx)
+    }
+
+    /// 获取下一个重传超时的截止时间
+    /// Get the deadline for the next retransmission timeout
+    ///
+    /// 该方法计算所有重传相关超时中最早的截止时间，用于事件循环的等待时间优化。
+    /// 这是分层超时管理架构中重传层的截止时间计算接口。
+    ///
+    /// This method calculates the earliest deadline among all retransmission-related
+    /// timeouts, used for optimizing event loop wait times. This is the deadline
+    /// calculation interface for the retransmission layer in layered timeout management.
+    pub fn next_retransmission_timeout_deadline(&self, rto: Duration) -> Option<Instant> {
+        // 委托给现有的方法
+        // Delegate to existing method
+        self.next_retransmission_deadline(rto)
+    }
 }
 
 #[cfg(test)]
@@ -266,7 +329,14 @@ mod tests {
     }
 
     fn create_handshake_push_frame(seq: u32) -> Frame {
-        Frame::new_push(1, seq, 0, 1024, 0, Bytes::from(format!("handshake-{}", seq)))
+        Frame::new_push(
+            1,
+            seq,
+            0,
+            1024,
+            0,
+            Bytes::from(format!("handshake-{}", seq)),
+        )
     }
 
     fn create_regular_push_frame(seq: u32) -> Frame {
@@ -345,7 +415,7 @@ mod tests {
     fn test_layered_retransmission_disabled() {
         let mut config = create_test_config();
         config.reliability.enable_layered_retransmission = false;
-        
+
         let mut manager = RetransmissionManager::new(config);
         let now = Instant::now();
 
@@ -364,7 +434,11 @@ mod tests {
         let now = Instant::now();
 
         // No packets - no deadline
-        assert!(manager.next_retransmission_deadline(Duration::from_secs(1)).is_none());
+        assert!(
+            manager
+                .next_retransmission_deadline(Duration::from_secs(1))
+                .is_none()
+        );
 
         // Add packets to both managers
         manager.add_in_flight_packet(create_syn_frame(), now);
@@ -389,5 +463,100 @@ mod tests {
         manager.clear();
         assert_eq!(manager.total_in_flight_count(), 0);
         assert!(manager.is_all_in_flight_empty());
+    }
+
+    // === 分层超时管理接口测试 Layered Timeout Management Interface Tests ===
+
+    #[test]
+    fn test_check_retransmission_timeouts_no_timeout() {
+        let mut manager = RetransmissionManager::new(create_test_config());
+        let now = Instant::now();
+
+        // Add some packets
+        manager.add_in_flight_packet(create_fin_frame(1), now);
+        manager.add_in_flight_packet(create_regular_push_frame(10), now);
+
+        // Check immediately - no timeouts yet
+        let (events, frames) = manager.check_retransmission_timeouts(Duration::from_secs(1), now);
+        assert!(events.is_empty());
+        assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn test_check_retransmission_timeouts_with_timeout() {
+        let mut manager = RetransmissionManager::new(create_test_config());
+        let now = Instant::now();
+
+        // Add packets that will timeout
+        manager.add_in_flight_packet(create_fin_frame(1), now);
+        manager.add_in_flight_packet(create_regular_push_frame(10), now);
+
+        // Check after timeout period
+        let later = now + Duration::from_secs(2);
+        let (events, frames) = manager.check_retransmission_timeouts(Duration::from_secs(1), later);
+
+        // Should have retransmission timeout event
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], TimeoutEvent::RetransmissionTimeout);
+
+        // Should have frames to retransmit
+        assert_eq!(frames.len(), 2);
+    }
+
+    #[test]
+    fn test_next_retransmission_timeout_deadline() {
+        let mut manager = RetransmissionManager::new(create_test_config());
+        let now = Instant::now();
+
+        // No packets - no deadline
+        assert!(
+            manager
+                .next_retransmission_timeout_deadline(Duration::from_secs(1))
+                .is_none()
+        );
+
+        // Add packets
+        manager.add_in_flight_packet(create_fin_frame(1), now);
+        manager.add_in_flight_packet(create_regular_push_frame(10), now);
+
+        // Should have a deadline
+        let deadline = manager.next_retransmission_timeout_deadline(Duration::from_secs(1));
+        assert!(deadline.is_some());
+        assert!(deadline.unwrap() > now);
+    }
+
+    #[test]
+    fn test_layered_timeout_interface_consistency() {
+        let mut manager = RetransmissionManager::new(create_test_config());
+        let now = Instant::now();
+        let rto = Duration::from_secs(1);
+
+        // Add packets
+        manager.add_in_flight_packet(create_fin_frame(1), now);
+        manager.add_in_flight_packet(create_regular_push_frame(10), now);
+
+        // Test that layered interface gives same results as direct calls
+        let later = now + Duration::from_secs(2);
+
+        // Using layered interface
+        let (events, layered_frames) = manager.check_retransmission_timeouts(rto, later);
+
+        // Reset state for comparison
+        manager.clear();
+        manager.add_in_flight_packet(create_fin_frame(1), now);
+        manager.add_in_flight_packet(create_regular_push_frame(10), now);
+
+        // Using direct interface
+        let direct_frames = manager.check_for_retransmissions(rto, later);
+
+        // Results should be consistent
+        if !direct_frames.is_empty() {
+            assert!(!events.is_empty());
+            assert_eq!(events[0], TimeoutEvent::RetransmissionTimeout);
+            assert_eq!(layered_frames.len(), direct_frames.len());
+        } else {
+            assert!(events.is_empty());
+            assert!(layered_frames.is_empty());
+        }
     }
 }

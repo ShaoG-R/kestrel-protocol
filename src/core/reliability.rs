@@ -481,35 +481,35 @@ impl ReliabilityLayer {
     /// timeout check results. This is the unified entry point for the reliability
     /// layer in the layered timeout management architecture.
     pub fn check_reliability_timeouts(&mut self, now: Instant) -> TimeoutCheckResult {
-        let mut events = Vec::new();
-        let mut frames_to_retransmit = Vec::new();
+        let mut all_events = Vec::new();
+        let mut all_frames_to_retransmit = Vec::new();
 
-        // 检查重传超时
-        // Check retransmission timeout
+        // 使用分层超时管理接口检查重传超时
+        // Use layered timeout management interface to check retransmission timeout
         let rto = self.rto_estimator.rto();
-        let frames_to_resend = self.retransmission_manager.check_for_retransmissions(rto, now);
+        let (retx_events, frames_to_resend) = self.retransmission_manager.check_retransmission_timeouts(rto, now);
+        
+        all_events.extend(retx_events);
+        all_frames_to_retransmit.extend(frames_to_resend);
 
-        if !frames_to_resend.is_empty() {
-            events.push(TimeoutEvent::RetransmissionTimeout);
-            frames_to_retransmit = frames_to_resend;
-
-            // 如果数据包超时，通知拥塞控制并退避RTO计时器
-            // If packets timed out, notify congestion control and back off the RTO timer
+        // 如果有重传超时，处理拥塞控制和RTO退避
+        // If there are retransmission timeouts, handle congestion control and RTO backoff
+        if !all_frames_to_retransmit.is_empty() {
             let old_cwnd = self.congestion_control.congestion_window();
             self.congestion_control.on_packet_loss(now);
             let new_cwnd = self.congestion_control.congestion_window();
             debug!(
                 old_cwnd,
                 new_cwnd,
-                count = frames_to_retransmit.len(),
+                count = all_frames_to_retransmit.len(),
                 "Congestion window reduced due to retransmissions"
             );
             self.rto_estimator.backoff();
         }
 
         TimeoutCheckResult {
-            events,
-            frames_to_retransmit,
+            events: all_events,
+            frames_to_retransmit: all_frames_to_retransmit,
         }
     }
 
@@ -521,8 +521,9 @@ impl ReliabilityLayer {
     /// This method calculates the earliest deadline among all reliability-related
     /// timeouts, used for optimizing event loop wait times.
     pub fn next_reliability_timeout_deadline(&self) -> Option<Instant> {
-        // 目前只有RTO超时，未来可以添加其他可靠性相关超时
-        // Currently only RTO timeout, can add other reliability-related timeouts in the future
-        self.next_rto_deadline()
+        // 使用分层超时管理接口获取重传超时截止时间
+        // Use layered timeout management interface to get retransmission timeout deadline
+        let rto = self.rto_estimator.rto();
+        self.retransmission_manager.next_retransmission_timeout_deadline(rto)
     }
 } 
