@@ -28,11 +28,9 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         }
 
         loop {
-            // 使用时间管理器计算下一次唤醒时间
-            // Use timing manager to calculate next wakeup time
-            let is_syn_received = *self.lifecycle_manager.current_state() == ConnectionState::SynReceived;
-            let rto_deadline = self.transport.reliability().next_rto_deadline();
-            let next_wakeup = self.timing.calculate_next_wakeup(&self.config, is_syn_received, rto_deadline);
+            // 使用统一的唤醒时间计算
+            // Use unified wakeup time calculation
+            let next_wakeup = self.calculate_next_wakeup_time();
 
             trace!(cid = self.identity.local_cid(), state = ?self.lifecycle_manager.current_state(), "Main loop waiting for event.");
             tokio::select! {
@@ -66,9 +64,10 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
                     }
                 }
 
-                // 3. Handle timeouts
+                // 3. Handle timeouts - 使用统一的超时检查
+                // Handle timeouts - use unified timeout check
                 _ = sleep_until(next_wakeup) => {
-                    EventDispatcher::dispatch_timeout(self, Instant::now()).await?;
+                    self.check_all_timeouts(Instant::now()).await?;
                 }
 
                 // 4. Stop if all channels are closed

@@ -2,7 +2,7 @@
 
 use crate::core::endpoint::Endpoint;
 use crate::{
-    error::{Error, Result},
+    error::Result,
     packet::{frame::Frame, sack::decode_sack_ranges},
     socket::{AsyncUdpSocket, SocketActorCommand},
 };
@@ -483,41 +483,19 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         Ok(())
     }
 
+    /// 处理超时事件（向后兼容方法）
+    /// Handle timeout events (backward compatibility method)
+    ///
+    /// 该方法保持向后兼容性，内部委托给新的统一超时管理接口。
+    /// 建议使用 `check_all_timeouts` 方法替代此方法。
+    ///
+    /// This method maintains backward compatibility by internally delegating
+    /// to the new unified timeout management interface. It's recommended to
+    /// use the `check_all_timeouts` method instead of this one.
     pub async fn handle_timeout(&mut self, now: Instant) -> Result<()> {
-        let frames_to_resend = self.transport.reliability_mut().check_for_retransmissions(now);
-        if !frames_to_resend.is_empty() {
-            self.send_frames(frames_to_resend).await?;
-        }
-
-        // 使用时间管理器检查路径验证超时
-        // Use timing manager to check path validation timeout
-        if matches!(
-            self.lifecycle_manager.current_state(),
-            ConnectionState::ValidatingPath { .. }
-        ) {
-            if self.timing.check_path_validation_timeout(&self.config, now) {
-                if let ConnectionState::ValidatingPath { notifier, .. } =
-                    self.lifecycle_manager.current_state().clone()
-                {
-                    if let Some(notifier) = notifier {
-                        let _ = notifier.send(Err(Error::PathValidationTimeout));
-                    }
-                    // 路径验证超时，回到Established状态 - 使用生命周期管理器
-                    // Path validation timeout, return to Established state - using lifecycle manager
-                    self.transition_state(ConnectionState::Established)?;
-                }
-            }
-        }
-
-        // 使用时间管理器检查空闲超时
-        // Use timing manager to check idle timeout
-        if self.timing.check_idle_timeout(&self.config, now) {
-            // 连接超时，强制关闭 - 使用生命周期管理器
-            // Connection timeout, force close - using lifecycle manager
-            self.lifecycle_manager.force_close()?;
-            return Err(Error::ConnectionTimeout);
-        }
-        Ok(())
+        // 委托给新的统一超时检查方法
+        // Delegate to the new unified timeout check method
+        self.check_all_timeouts(now).await
     }
 
 

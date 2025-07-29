@@ -10,6 +10,24 @@
 use crate::config::Config;
 use tokio::time::{Duration, Instant};
 
+/// 超时事件类型枚举
+/// Timeout event type enumeration
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimeoutEvent {
+    /// 空闲超时 - 连接长时间无活动
+    /// Idle timeout - connection has been inactive for too long
+    IdleTimeout,
+    /// 路径验证超时 - 路径验证过程超时
+    /// Path validation timeout - path validation process timed out
+    PathValidationTimeout,
+    /// 重传超时 - 数据包需要重传
+    /// Retransmission timeout - packets need to be retransmitted
+    RetransmissionTimeout,
+    /// 连接超时 - 连接建立超时
+    /// Connection timeout - connection establishment timed out
+    ConnectionTimeout,
+}
+
 /// 时间管理器
 /// Timing manager
 #[derive(Debug, Clone)]
@@ -273,6 +291,50 @@ impl TimingManager {
             config.connection.idle_timeout,
             self.time_until_next_timeout(config)
         )
+    }
+
+    // === 分层超时管理接口 Layered Timeout Management Interface ===
+
+    /// 检查连接级超时事件
+    /// Check connection-level timeout events
+    ///
+    /// 该方法检查所有连接级的超时情况，返回发生的超时事件列表。
+    /// 这是分层超时管理架构中连接层的统一入口。
+    ///
+    /// This method checks all connection-level timeout conditions and returns
+    /// a list of timeout events that have occurred. This is the unified entry
+    /// point for the connection layer in the layered timeout management architecture.
+    pub fn check_connection_timeouts(&self, config: &Config, now: Instant) -> Vec<TimeoutEvent> {
+        let mut events = Vec::new();
+
+        // 检查空闲超时
+        // Check idle timeout
+        if self.check_idle_timeout(config, now) {
+            events.push(TimeoutEvent::IdleTimeout);
+        }
+
+        // 检查路径验证超时
+        // Check path validation timeout
+        if self.check_path_validation_timeout(config, now) {
+            events.push(TimeoutEvent::PathValidationTimeout);
+        }
+
+        events
+    }
+
+    /// 获取下一个连接级超时的截止时间
+    /// Get the deadline for the next connection-level timeout
+    ///
+    /// 该方法计算所有连接级超时中最早的截止时间，用于事件循环的等待时间优化。
+    ///
+    /// This method calculates the earliest deadline among all connection-level
+    /// timeouts, used for optimizing event loop wait times.
+    pub fn next_connection_timeout_deadline(&self, config: &Config) -> Option<Instant> {
+        let idle_deadline = self.last_recv_time + config.connection.idle_timeout;
+        
+        // 目前只有空闲超时，未来可以添加其他连接级超时
+        // Currently only idle timeout, can add other connection-level timeouts in the future
+        Some(idle_deadline)
     }
 }
 
@@ -630,5 +692,117 @@ mod tests {
         assert!(debug_info.contains("time_since_last_recv"));
         assert!(debug_info.contains("idle_timeout"));
         assert!(debug_info.contains("remaining"));
+    }
+
+    // === 分层超时管理接口测试 Layered Timeout Management Interface Tests ===
+
+    #[test]
+    fn test_check_connection_timeouts_no_timeout() {
+        use crate::config::Config;
+
+        let manager = TimingManager::new();
+        let config = Config::default();
+        let now = Instant::now();
+
+        // 刚创建时不应该有任何超时
+        // Should not have any timeout when just created
+        let events = manager.check_connection_timeouts(&config, now);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_check_connection_timeouts_idle_timeout() {
+        use crate::config::Config;
+
+        let manager = TimingManager::new();
+        let config = Config::default();
+        let now = Instant::now();
+
+        // 超过空闲超时时间后应该有空闲超时事件
+        // Should have idle timeout event after exceeding idle timeout
+        let later = now + config.connection.idle_timeout + Duration::from_millis(100);
+        let events = manager.check_connection_timeouts(&config, later);
+        
+        // 由于路径验证超时和空闲超时使用相同的配置，会同时触发两个事件
+        // Since path validation timeout and idle timeout use the same config, both events will be triggered
+        assert_eq!(events.len(), 2);
+        assert!(events.contains(&TimeoutEvent::IdleTimeout));
+        assert!(events.contains(&TimeoutEvent::PathValidationTimeout));
+    }
+
+    #[test]
+    fn test_check_connection_timeouts_path_validation_timeout() {
+        use crate::config::Config;
+
+        let manager = TimingManager::new();
+        let config = Config::default();
+        let now = Instant::now();
+
+        // 超过路径验证超时时间后应该有路径验证超时事件
+        // Should have path validation timeout event after exceeding path validation timeout
+        let later = now + config.connection.idle_timeout + Duration::from_millis(100);
+        let events = manager.check_connection_timeouts(&config, later);
+        
+        // 由于路径验证超时使用相同的idle_timeout配置，所以会同时触发两个事件
+        // Since path validation timeout uses the same idle_timeout config, both events will be triggered
+        assert_eq!(events.len(), 2);
+        assert!(events.contains(&TimeoutEvent::IdleTimeout));
+        assert!(events.contains(&TimeoutEvent::PathValidationTimeout));
+    }
+
+    #[test]
+    fn test_next_connection_timeout_deadline() {
+        use crate::config::Config;
+
+        let manager = TimingManager::new();
+        let config = Config::default();
+
+        // 应该返回空闲超时的截止时间
+        // Should return idle timeout deadline
+        let deadline = manager.next_connection_timeout_deadline(&config);
+        assert!(deadline.is_some());
+
+        let expected_deadline = manager.last_recv_time() + config.connection.idle_timeout;
+        assert_eq!(deadline.unwrap(), expected_deadline);
+    }
+
+    #[tokio::test]
+    async fn test_connection_timeout_deadline_after_activity() {
+        use crate::config::Config;
+
+        let mut manager = TimingManager::new();
+        let config = Config::default();
+        let initial_deadline = manager.next_connection_timeout_deadline(&config).unwrap();
+
+        // 等待一段时间后更新活动时间
+        // Wait some time then update activity time
+        sleep(Duration::from_millis(50)).await;
+        manager.touch_last_recv_time();
+
+        // 截止时间应该被推迟
+        // Deadline should be postponed
+        let new_deadline = manager.next_connection_timeout_deadline(&config).unwrap();
+        assert!(new_deadline > initial_deadline);
+    }
+
+    #[test]
+    fn test_timeout_event_enum() {
+        // 测试超时事件枚举的基本功能
+        // Test basic functionality of timeout event enum
+        assert_eq!(TimeoutEvent::IdleTimeout, TimeoutEvent::IdleTimeout);
+        assert_ne!(TimeoutEvent::IdleTimeout, TimeoutEvent::PathValidationTimeout);
+        assert_ne!(TimeoutEvent::RetransmissionTimeout, TimeoutEvent::ConnectionTimeout);
+
+        // 测试Debug trait
+        // Test Debug trait
+        let event = TimeoutEvent::IdleTimeout;
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("IdleTimeout"));
+
+        // 测试Clone trait
+        // Test Clone trait
+        let event1 = TimeoutEvent::PathValidationTimeout;
+        let event2 = event1.clone();
+        assert_eq!(event1, event2);
     }
 }

@@ -16,8 +16,9 @@ pub use types::command::StreamCommand;
 use lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::{
     config::Config,
-    core::reliability::ReliabilityLayer,
+    core::reliability::{ReliabilityLayer, TimeoutCheckResult},
     socket::{AsyncUdpSocket, SocketActorCommand},
+    error::Result,
 };
 use std::net::SocketAddr;
 use tokio::{
@@ -28,7 +29,7 @@ use tracing::trace;
 use types::{
     state::ConnectionState,
     identity::ConnectionIdentity,
-    timing::TimingManager,
+    timing::{TimingManager, TimeoutEvent},
     transport::TransportManager,
     channels::ChannelManager,
 };
@@ -207,4 +208,132 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     pub fn reliability(&self) -> &ReliabilityLayer {
         self.transport.reliability()
     }
+
+    // === 分层超时管理协调接口 Layered Timeout Management Coordination Interface ===
+
+    /// 统一的超时检查入口
+    /// Unified timeout check entry point
+    ///
+    /// 该方法协调所有层次的超时检查，是分层超时管理架构的核心协调器。
+    /// 它按顺序检查连接级和可靠性级的超时，并统一处理超时事件。
+    ///
+    /// This method coordinates timeout checks across all layers and serves as the
+    /// core coordinator of the layered timeout management architecture. It checks
+    /// connection-level and reliability-level timeouts in sequence and handles
+    /// timeout events uniformly.
+    pub async fn check_all_timeouts(&mut self, now: Instant) -> Result<()> {
+        // 1. 检查连接级超时
+        // Check connection-level timeouts
+        let connection_timeout_events = self.timing.check_connection_timeouts(&self.config, now);
+        
+        // 2. 检查可靠性超时
+        // Check reliability timeouts
+        let reliability_timeout_result = self.transport.reliability_mut().check_reliability_timeouts(now);
+        
+        // 3. 处理超时事件
+        // Handle timeout events
+        self.handle_timeout_events(connection_timeout_events, reliability_timeout_result, now).await
+    }
+
+    /// 统一的下次唤醒时间计算
+    /// Unified next wakeup time calculation
+    ///
+    /// 该方法协调所有层次的超时截止时间，计算事件循环的最优唤醒时间。
+    /// 这确保了事件循环能够及时处理各种超时事件。
+    ///
+    /// This method coordinates timeout deadlines across all layers to calculate
+    /// the optimal wakeup time for the event loop. This ensures the event loop
+    /// can handle various timeout events in a timely manner.
+    pub fn calculate_next_wakeup_time(&self) -> Instant {
+        let is_syn_received = *self.lifecycle_manager.current_state() == ConnectionState::SynReceived;
+        let rto_deadline = self.transport.reliability().next_reliability_timeout_deadline();
+        
+        self.timing.calculate_next_wakeup(&self.config, is_syn_received, rto_deadline)
+    }
+
+    /// 处理各种超时事件
+    /// Handle various timeout events
+    ///
+    /// 该方法是超时事件处理的统一入口，根据不同的超时类型执行相应的处理逻辑。
+    /// 它确保了超时处理的一致性和可维护性。
+    ///
+    /// This method is the unified entry point for timeout event handling,
+    /// executing appropriate handling logic based on different timeout types.
+    /// It ensures consistency and maintainability of timeout handling.
+    async fn handle_timeout_events(
+        &mut self,
+        connection_events: Vec<TimeoutEvent>,
+        reliability_result: TimeoutCheckResult,
+        _now: Instant,
+    ) -> Result<()> {
+        // 处理连接级超时事件
+        // Handle connection-level timeout events
+        for event in connection_events {
+            match event {
+                TimeoutEvent::IdleTimeout => {
+                    // 连接超时，强制关闭
+                    // Connection timeout, force close
+                    self.lifecycle_manager.force_close()?;
+                    return Err(crate::error::Error::ConnectionTimeout);
+                }
+                TimeoutEvent::PathValidationTimeout => {
+                    // 路径验证超时处理
+                    // Path validation timeout handling
+                    self.handle_path_validation_timeout().await?;
+                }
+                _ => {
+                    // 其他连接级超时事件的处理可以在这里添加
+                    // Handling for other connection-level timeout events can be added here
+                }
+            }
+        }
+        
+        // 处理可靠性超时事件
+        // Handle reliability timeout events
+        for event in reliability_result.events {
+            match event {
+                TimeoutEvent::RetransmissionTimeout => {
+                    // 重传超时，发送需要重传的帧
+                    // Retransmission timeout, send frames that need retransmission
+                    if !reliability_result.frames_to_retransmit.is_empty() {
+                        self.send_frames(reliability_result.frames_to_retransmit.clone()).await?;
+                    }
+                }
+                _ => {
+                    // 其他可靠性超时事件的处理可以在这里添加
+                    // Handling for other reliability timeout events can be added here
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// 处理路径验证超时
+    /// Handle path validation timeout
+    ///
+    /// 该方法处理路径验证超时的具体逻辑，包括状态转换和通知调用者。
+    ///
+    /// This method handles the specific logic for path validation timeout,
+    /// including state transitions and notifying callers.
+    async fn handle_path_validation_timeout(&mut self) -> Result<()> {
+        if matches!(
+            self.lifecycle_manager.current_state(),
+            ConnectionState::ValidatingPath { .. }
+        ) {
+            if let ConnectionState::ValidatingPath { notifier, .. } =
+                self.lifecycle_manager.current_state().clone()
+            {
+                if let Some(notifier) = notifier {
+                    let _ = notifier.send(Err(crate::error::Error::PathValidationTimeout));
+                }
+                // 路径验证超时，回到Established状态
+                // Path validation timeout, return to Established state
+                self.transition_state(ConnectionState::Established)?;
+            }
+        }
+        Ok(())
+    }
+
+
 }

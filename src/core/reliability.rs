@@ -24,11 +24,29 @@ use self::{
 use crate::{
     config::Config,
     packet::{frame::Frame, sack::SackRange},
+    core::endpoint::types::timing::TimeoutEvent,
 };
 use bytes::Bytes;
 use tokio::time::Instant;
 use tracing::{debug, trace};
 use congestion::CongestionControl;
+
+/// 超时检查结果
+/// Timeout check result
+///
+/// 该结构体包含可靠性层超时检查的结果，包括发生的超时事件和需要重传的帧。
+///
+/// This struct contains the result of reliability layer timeout checks,
+/// including timeout events that occurred and frames that need retransmission.
+#[derive(Debug)]
+pub struct TimeoutCheckResult {
+    /// 发生的超时事件列表
+    /// List of timeout events that occurred
+    pub events: Vec<TimeoutEvent>,
+    /// 需要重传的帧（仅在RetransmissionTimeout时有效）
+    /// Frames that need retransmission (only valid for RetransmissionTimeout)
+    pub frames_to_retransmit: Vec<Frame>,
+}
 
 /// The reliability layer for a connection.
 ///
@@ -449,5 +467,62 @@ impl ReliabilityLayer {
     /// 获取当前RTT变化值。
     pub fn rtt_var(&self) -> Option<std::time::Duration> {
         self.rto_estimator.rtt_var()
+    }
+
+    // === 分层超时管理接口 Layered Timeout Management Interface ===
+
+    /// 检查可靠性相关超时事件
+    /// Check reliability-related timeout events
+    ///
+    /// 该方法检查所有可靠性相关的超时情况，返回超时检查结果。
+    /// 这是分层超时管理架构中可靠性层的统一入口。
+    ///
+    /// This method checks all reliability-related timeout conditions and returns
+    /// timeout check results. This is the unified entry point for the reliability
+    /// layer in the layered timeout management architecture.
+    pub fn check_reliability_timeouts(&mut self, now: Instant) -> TimeoutCheckResult {
+        let mut events = Vec::new();
+        let mut frames_to_retransmit = Vec::new();
+
+        // 检查重传超时
+        // Check retransmission timeout
+        let rto = self.rto_estimator.rto();
+        let frames_to_resend = self.retransmission_manager.check_for_retransmissions(rto, now);
+
+        if !frames_to_resend.is_empty() {
+            events.push(TimeoutEvent::RetransmissionTimeout);
+            frames_to_retransmit = frames_to_resend;
+
+            // 如果数据包超时，通知拥塞控制并退避RTO计时器
+            // If packets timed out, notify congestion control and back off the RTO timer
+            let old_cwnd = self.congestion_control.congestion_window();
+            self.congestion_control.on_packet_loss(now);
+            let new_cwnd = self.congestion_control.congestion_window();
+            debug!(
+                old_cwnd,
+                new_cwnd,
+                count = frames_to_retransmit.len(),
+                "Congestion window reduced due to retransmissions"
+            );
+            self.rto_estimator.backoff();
+        }
+
+        TimeoutCheckResult {
+            events,
+            frames_to_retransmit,
+        }
+    }
+
+    /// 获取下一个可靠性超时的截止时间
+    /// Get the deadline for the next reliability timeout
+    ///
+    /// 该方法计算所有可靠性相关超时中最早的截止时间，用于事件循环的等待时间优化。
+    ///
+    /// This method calculates the earliest deadline among all reliability-related
+    /// timeouts, used for optimizing event loop wait times.
+    pub fn next_reliability_timeout_deadline(&self) -> Option<Instant> {
+        // 目前只有RTO超时，未来可以添加其他可靠性相关超时
+        // Currently only RTO timeout, can add other reliability-related timeouts in the future
+        self.next_rto_deadline()
     }
 } 
