@@ -28,16 +28,11 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         }
 
         loop {
-            // In SynReceived, we don't set a timeout. We wait for the user to accept.
-            let next_wakeup = if *self.lifecycle_manager.current_state() == ConnectionState::SynReceived
-            {
-                Instant::now() + self.config.connection.idle_timeout // Effectively, sleep forever until a message
-            } else {
-                self.transport
-                    .reliability()
-                    .next_rto_deadline()
-                    .unwrap_or_else(|| Instant::now() + self.config.connection.idle_timeout)
-            };
+            // 使用时间管理器计算下一次唤醒时间
+            // Use timing manager to calculate next wakeup time
+            let is_syn_received = *self.lifecycle_manager.current_state() == ConnectionState::SynReceived;
+            let rto_deadline = self.transport.reliability().next_rto_deadline();
+            let next_wakeup = self.timing.calculate_next_wakeup(&self.config, is_syn_received, rto_deadline);
 
             trace!(cid = self.identity.local_cid(), state = ?self.lifecycle_manager.current_state(), "Main loop waiting for event.");
             tokio::select! {
@@ -45,10 +40,17 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
 
                 // 1. Handle frames from the network
                 Some((frame, src_addr)) = self.channels.receiver.recv() => {
+                    // 更新接收时间
+                    // Update receive time
+                    self.timing.on_packet_received(Instant::now());
+                    
                     EventDispatcher::dispatch_frame(self, frame, src_addr).await?;
                     // After handling one frame, try to drain any other pending frames
                     // to process them in a batch.
                     while let Ok((frame, src_addr)) = self.channels.receiver.try_recv() {
+                        // 为批量处理的帧也更新接收时间
+                        // Update receive time for batched frames too
+                        self.timing.on_packet_received(Instant::now());
                         EventDispatcher::dispatch_frame(self, frame, src_addr).await?;
                     }
                 }
