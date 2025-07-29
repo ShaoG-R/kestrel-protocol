@@ -1,12 +1,11 @@
 //! tests/common/harness.rs
-use kestrel_protocol::socket::{Listener, ReliableUdpSocket};
+use kestrel_protocol::socket::{TransportListener, TransportReliableUdpSocket, UdpTransport};
 use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicU16, Ordering},
     Arc, Once,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UdpSocket;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 /// Initializes tracing for tests, ensuring it's only done once.
@@ -30,8 +29,8 @@ static NEXT_SERVER_PORT: AtomicU16 = AtomicU16::new(40000);
 /// A test harness to simplify setting up client-server integration tests.
 pub struct TestHarness {
     pub server_addr: SocketAddr,
-    pub server_listener: Listener,
-    _server_socket: Arc<ReliableUdpSocket<UdpSocket>>, // Keep the socket alive
+    pub server_listener: TransportListener,
+    _server_socket: Arc<TransportReliableUdpSocket<UdpTransport>>, // Keep the socket alive
 }
 
 impl TestHarness {
@@ -42,7 +41,7 @@ impl TestHarness {
         let server_addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
         let (server_socket, server_listener) =
-            ReliableUdpSocket::<UdpSocket>::bind(server_addr)
+            TransportReliableUdpSocket::<UdpTransport>::bind(server_addr)
                 .await
                 .unwrap();
 
@@ -55,10 +54,10 @@ impl TestHarness {
     }
 
     /// Creates a new client socket bound to a random available port.
-    pub async fn create_client() -> Arc<ReliableUdpSocket<UdpSocket>> {
+    pub async fn create_client() -> Arc<TransportReliableUdpSocket<UdpTransport>> {
         // Clients can still use ephemeral ports as they don't need to be addressed directly.
         let client_addr = "127.0.0.1:0".parse().unwrap();
-        let (client_socket, _) = ReliableUdpSocket::<UdpSocket>::bind(client_addr)
+        let (client_socket, _) = TransportReliableUdpSocket::<UdpTransport>::bind(client_addr)
             .await
             .unwrap();
         Arc::new(client_socket)
@@ -108,7 +107,7 @@ pub async fn echo_server_handler(
 
 /// A generic client handler for sending data and verifying an echo response.
 pub async fn client_echo_task(
-    client_socket: Arc<ReliableUdpSocket<UdpSocket>>,
+    client_socket: Arc<TransportReliableUdpSocket<UdpTransport>>,
     server_addr: SocketAddr,
     payload: Vec<u8>,
     id: usize,

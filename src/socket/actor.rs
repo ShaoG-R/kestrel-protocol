@@ -1,11 +1,11 @@
-//! The implementation of the central `SocketActor`.
+//! The implementation of the transport-based `SocketActor`.
 //!
-//! `SocketActor` 核心实现。
+//! 基于传输的 `SocketActor` 实现。
 
 use super::{
-    command::{SenderTaskCommand, SocketActorCommand},
+    command::SocketActorCommand,
     draining::DrainingPool,
-    traits::BindableUdpSocket,
+    transport::{adapter_task, create_adapter_channel, BindableTransport, TransportCommand},
 };
 use crate::{
     config::Config,
@@ -26,32 +26,31 @@ pub(crate) struct ConnectionMeta {
     pub(crate) sender: mpsc::Sender<(Frame, SocketAddr)>,
 }
 
-/// The actor that owns and manages the UDP socket and all connection state.
+/// The actor that owns and manages the transport and all connection state.
 ///
 /// This actor runs in a dedicated task and processes commands from the public
-/// `ReliableUdpSocket` handle and incoming UDP packets.
+/// `ReliableUdpSocket` handle and incoming frames from the transport.
 ///
-/// 拥有并管理UDP套接字和所有连接状态的actor。
+/// 拥有并管理传输和所有连接状态的actor。
 ///
-/// 此actor在专用任务中运行，并处理来自公共 `ReliableUdpSocket` 句柄的命令和传入的UDP数据包。
-pub(crate) struct SocketActor<S: BindableUdpSocket> {
-    pub(crate) socket: Arc<S>,
+/// 此actor在专用任务中运行，并处理来自公共 `ReliableUdpSocket` 句柄的命令和来自传输的传入帧。
+pub(crate) struct TransportSocketActor<T: BindableTransport> {
+    pub(crate) transport: Arc<T>,
     pub(crate) connections: HashMap<u32, ConnectionMeta>,
     pub(crate) addr_to_cid: HashMap<SocketAddr, u32>,
     pub(crate) draining_pool: DrainingPool,
     pub(crate) config: Arc<Config>,
-    pub(crate) send_tx: mpsc::Sender<SenderTaskCommand<S>>,
+    pub(crate) send_tx: mpsc::Sender<TransportCommand<T>>,
     pub(crate) accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
     pub(crate) command_rx: mpsc::Receiver<SocketActorCommand>,
     pub(crate) command_tx: mpsc::Sender<SocketActorCommand>,
 }
 
-impl<S: BindableUdpSocket> SocketActor<S> {
+impl<T: BindableTransport> TransportSocketActor<T> {
     /// Runs the actor's main event loop.
     ///
     /// 运行 actor 的主事件循环。
     pub(crate) async fn run(&mut self) {
-        let mut recv_buf = [0u8; 2048]; // Max UDP packet size. 最大UDP包大小。
         let mut cleanup_interval =
             tokio::time::interval(self.config.connection.draining_cleanup_interval);
 
@@ -66,51 +65,25 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                         break;
                     }
                 }
-                // 2. Handle incoming UDP packets.
-                // 2. 处理传入的UDP数据包。
-                Ok((len, remote_addr)) = self.socket.recv_from(&mut recv_buf) => {
-                    debug!(len, addr = %remote_addr, "Received UDP datagram");
+                // 2. Handle incoming frames from transport.
+                // 2. 处理来自传输的传入帧。
+                Ok(datagram) = self.transport.recv_frames() => {
+                    debug!(
+                        addr = %datagram.remote_addr,
+                        frame_count = datagram.frames.len(),
+                        "Received frame batch from transport"
+                    );
 
-                    // Immediately copy the received data into an owned buffer. This is the
-                    // definitive fix for the race condition. By creating an owned copy,
-                    // we ensure that the buffer being processed by this task cannot be
-                    // overwritten by a subsequent `recv_from` call in the `select!` loop
-                    // when this task `await`s. The `Frame`s decoded below will hold
-                    // slices pointing to `datagram_buf`, which is safe.
-                    //
-                    // 立即将接收到的数据复制到一个拥有的缓冲区中。这是对竞争条件的最终修复。
-                    // 通过创建拥有的副本，我们确保此任务正在处理的缓冲区不会在 `select!`
-                    // 循环中被后续的 `recv_from` 调用覆盖，当此任务 `await` 时。
-                    // 下面解码的 `Frame` 将持有指向 `datagram_buf` 的切片，这是安全的。
-                    let datagram_buf = recv_buf[..len].to_vec();
-
-                    // Decode all frames from the datagram first before dispatching any.
-                    // 在分发之前，首先从数据报中解码所有帧。
-                    let mut frames = Vec::new();
-                    let mut cursor = &datagram_buf[..];
-                    while !cursor.is_empty() {
-                        let frame = match Frame::decode(&mut cursor) {
-                            Some(frame) => frame,
-                            None => {
-                                warn!(addr = %remote_addr, "Received an invalid or partially decoded packet");
-                                break; // Stop processing this datagram. 停止处理此数据报。
-                            }
-                        };
-                        frames.push(frame);
-                    }
-
-                    // Now that all frames are safely decoded, dispatch them.
-                    // 现在所有帧都已安全解码，开始分发它们。
-                    if !frames.is_empty() {
+                    if !datagram.frames.is_empty() {
                         // Check if the first frame indicates a new connection attempt.
                         // 检查第一帧是否表示新的连接尝试。
-                        if let Frame::Syn { .. } = &frames[0] {
-                            self.handle_new_connection(frames, remote_addr).await;
+                        if let Frame::Syn { .. } = &datagram.frames[0] {
+                            self.handle_new_connection(datagram.frames, datagram.remote_addr).await;
                         } else {
                             // Otherwise, dispatch frames individually to existing connections.
                             // 否则，将帧单独分派到现有连接。
-                            for frame in frames {
-                                self.dispatch_frame(frame, remote_addr).await;
+                            for frame in datagram.frames {
+                                self.dispatch_frame(frame, datagram.remote_addr).await;
                             }
                         }
                     }
@@ -145,13 +118,22 @@ impl<S: BindableUdpSocket> SocketActor<S> {
 
                 let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
+                // Create adapter channel for legacy compatibility
+                let (adapter_tx, adapter_rx) = create_adapter_channel::<tokio::net::UdpSocket, T>(self.send_tx.clone());
+                
+                // Spawn adapter task
+                let transport_tx = self.send_tx.clone();
+                tokio::spawn(async move {
+                    adapter_task(adapter_rx, transport_tx).await;
+                });
+
                 let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
                     Endpoint::new_client(
                         config,
                         remote_addr,
                         local_cid,
                         rx_from_socket,
-                        self.send_tx.clone(),
+                        adapter_tx,
                         self.command_tx.clone(),
                         initial_data,
                     );
@@ -195,13 +177,13 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                 response_tx,
             } => {
                 let result = async {
-                    let new_socket = Arc::new(S::bind(new_local_addr).await?);
+                    let new_transport = Arc::new(T::bind(new_local_addr).await?);
                     self.send_tx
-                        .send(SenderTaskCommand::SwapSocket(new_socket.clone()))
+                        .send(TransportCommand::SwapTransport(new_transport.clone()))
                         .await
                         .map_err(|_| Error::ChannelClosed)?;
-                    self.socket = new_socket;
-                    info!(addr = ?new_local_addr, "Socket rebound to new local address");
+                    self.transport = new_transport;
+                    info!(addr = ?new_local_addr, "Transport rebound to new local address");
                     Ok(())
                 }
                 .await;
@@ -251,14 +233,23 @@ impl<S: BindableUdpSocket> SocketActor<S> {
 
         // 2. Handle packets for connections that are still in handshake (e.g. retransmitted SYN)
         //    by looking up the remote address.
+        //    但是要确保连接仍然存在，避免将帧发送到已关闭的连接。
         // 2. 通过查找远程地址来处理仍处于握手状态的连接的数据包（例如重传的SYN）。
+        //    但是要确保连接仍然存在，避免将帧发送到已关闭的连接。
         if let Some(&existing_cid) = self.addr_to_cid.get(&remote_addr) {
+            // Double-check that the connection still exists
+            // 双重检查连接是否仍然存在
             if let Some(meta) = self.connections.get(&existing_cid) {
                 if meta.sender.send((frame, remote_addr)).await.is_err() {
                     debug!(addr = %remote_addr, cid = %existing_cid, "Endpoint (addr lookup) died. Removing.");
                     self.remove_connection_by_cid(existing_cid);
                 }
                 return;
+            } else {
+                // Connection no longer exists, clean up the stale address mapping
+                // 连接不再存在，清理过时的地址映射
+                debug!(addr = %remote_addr, cid = %existing_cid, "Removing stale address mapping for non-existent connection");
+                self.addr_to_cid.remove(&remote_addr);
             }
         }
 
@@ -330,6 +321,15 @@ impl<S: BindableUdpSocket> SocketActor<S> {
             }
             let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
+            // Create adapter channel for legacy compatibility
+            let (adapter_tx, adapter_rx) = create_adapter_channel::<tokio::net::UdpSocket, T>(self.send_tx.clone());
+            
+            // Spawn adapter task
+            let transport_tx = self.send_tx.clone();
+            tokio::spawn(async move {
+                adapter_task(adapter_rx, transport_tx).await;
+            });
+
             let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
                 Endpoint::new_server(
                     config.clone(),
@@ -337,7 +337,7 @@ impl<S: BindableUdpSocket> SocketActor<S> {
                     local_cid,
                     peer_cid,
                     rx_from_socket,
-                    self.send_tx.clone(),
+                    adapter_tx,
                     self.command_tx.clone(),
                 );
 
@@ -418,13 +418,27 @@ impl<S: BindableUdpSocket> SocketActor<S> {
     /// 这是连接清理的唯一权威位置。它会从主CID映射中移除连接，
     /// 并清理握手期间使用的临时地址到CID的映射。
     fn remove_connection_by_cid(&mut self, cid: u32) {
-        if self.connections.remove(&cid).is_none() {
+        let was_present = self.connections.remove(&cid).is_some();
+        if !was_present {
+            debug!(cid = %cid, "Connection already removed, nothing to do");
             return; // Already removed, nothing to do. 已被移除，无需任何操作。
         }
 
         // Find and remove the corresponding address mapping.
+        // Only remove if it maps to this specific CID to avoid removing newer mappings.
         // 查找并移除对应的地址映射。
-        self.addr_to_cid.retain(|_addr, c| *c != cid);
+        // 只有当映射到这个特定CID时才移除，以避免移除更新的映射。
+        let mut addr_to_remove = None;
+        for (addr, &mapped_cid) in self.addr_to_cid.iter() {
+            if mapped_cid == cid {
+                addr_to_remove = Some(*addr);
+                break;
+            }
+        }
+        if let Some(addr) = addr_to_remove {
+            self.addr_to_cid.remove(&addr);
+            debug!(cid = %cid, addr = %addr, "Removed address mapping for connection");
+        }
         
         // Instead of forgetting the CID, move it to the draining state.
         // 不直接丢弃CID，而是将其移至draining状态。
@@ -432,4 +446,4 @@ impl<S: BindableUdpSocket> SocketActor<S> {
 
         info!(cid = %cid, "Cleaned up connection state. CID is now in draining state.");
     }
-} 
+}

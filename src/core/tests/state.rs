@@ -1,12 +1,15 @@
 //! Tests for connection state management, especially in concurrent or racy conditions.
+//! 连接状态管理的测试，特别是在并发或竞争条件下。
 
-use crate::socket::ReliableUdpSocket;
+use crate::socket::{TransportReliableUdpSocket, UdpTransport};
 use std::{net::SocketAddr, time::Duration};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::UdpSocket};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::UdpSocket,
+};
 use tracing::info;
 
-use crate::{core::test_utils::init_tracing, config::Config};
-
+use crate::{config::Config, core::test_utils::init_tracing};
 
 /// Test that a server can handle a new connection from an address that was
 /// just used by a different connection. This validates that the `addr_to_cid`
@@ -22,15 +25,19 @@ async fn test_address_reuse_after_connection_close() {
     let server_addr: SocketAddr = temp_socket.local_addr().unwrap();
     drop(temp_socket); // Release the address so our socket can bind to it.
 
-    let (_, mut listener) =
-        ReliableUdpSocket::<UdpSocket>::bind(server_addr)
-            .await
-            .unwrap();
+    let (_, mut listener) = TransportReliableUdpSocket::<UdpTransport>::bind(server_addr)
+        .await
+        .unwrap();
 
     let server_task = tokio::spawn(async move {
         // Accept the first connection.
-        let (mut server_stream_a, _) = listener.accept().await.unwrap();
-        info!("Accepted first connection.");
+        let (mut server_stream_a, client_addr_a) = listener.accept().await.unwrap();
+        info!("Accepted first connection from {}", client_addr_a);
+
+        // Write something to complete the handshake
+        server_stream_a.write_all(b"ack1").await.unwrap();
+        server_stream_a.flush().await.unwrap();
+
         // It immediately closes, so reading should yield 0 bytes (EOF).
         let mut buf = vec![0; 10];
         assert_eq!(
@@ -41,14 +48,14 @@ async fn test_address_reuse_after_connection_close() {
         info!("First connection terminated on server.");
 
         // Accept the second connection.
-        let (mut server_stream_b, _) = listener.accept().await.unwrap();
-        info!("Accepted second connection.");
-        
+        let (mut server_stream_b, client_addr_b) = listener.accept().await.unwrap();
+        info!("Accepted second connection from {}", client_addr_b);
+
         // Per protocol design, the server must write something to trigger the
         // SYN-ACK and complete the handshake. An empty write is sufficient.
-        server_stream_b.write_all(b"1").await.unwrap();
+        server_stream_b.write_all(b"ack2").await.unwrap();
         server_stream_b.flush().await.unwrap();
-        info!("Sent empty write to trigger SYN-ACK for connection B.");
+        info!("Sent ack to trigger SYN-ACK for connection B.");
 
         let mut buf = vec![0; 20];
         let len = server_stream_b.read(&mut buf).await.unwrap();
@@ -58,7 +65,7 @@ async fn test_address_reuse_after_connection_close() {
 
     // 2. Setup a client socket.
     let (client, _) =
-        ReliableUdpSocket::<UdpSocket>::bind("127.0.0.1:0".parse().unwrap())
+        TransportReliableUdpSocket::<UdpTransport>::bind("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
 
@@ -66,13 +73,23 @@ async fn test_address_reuse_after_connection_close() {
     info!("Connecting for the first time...");
     let mut client_stream_a = client.connect(server_addr).await.unwrap();
     info!("First connection established.");
+
+    // Wait for server ack to complete handshake
+    let mut buf = vec![0; 10];
+    let len = client_stream_a.read(&mut buf).await.unwrap();
+    info!("Client read {} bytes: {:?}", len, &buf[..len]);
+    assert_eq!(&buf[..len], b"ack1");
+    info!("Received server ack for first connection");
+
     client_stream_a.shutdown().await.unwrap();
     info!("First connection shut down from client side.");
 
-    // Wait for a short time, much less than the drain timeout, to allow the
-    // server to process the shutdown and move the first connection's CID to the
-    // draining state.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for a longer time to allow the server to fully process the shutdown
+    // and complete the connection cleanup before attempting a new connection.
+    // This prevents connection state confusion.
+    // 等待更长时间让服务器完全处理关闭并完成连接清理，然后再尝试新连接。
+    // 这可以防止连接状态混乱。
+    tokio::time::advance(Duration::from_millis(500)).await;
 
     // 4. Second connection attempt from the same client socket.
     // This will use the same local address as the first connection. This must
@@ -80,14 +97,27 @@ async fn test_address_reuse_after_connection_close() {
     info!("Connecting for the second time from the same local socket...");
     let mut client_stream_b = client.connect(server_addr).await.unwrap();
     info!("Second connection established.");
-    client_stream_b.write_all(b"hello from client B").await.unwrap();
+
+    // Wait for server ack to complete handshake
+    let mut buf = vec![0; 10];
+    let len = client_stream_b.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..len], b"ack2");
+    info!("Received server ack for second connection");
+
+    client_stream_b
+        .write_all(b"hello from client B")
+        .await
+        .unwrap();
     client_stream_b.flush().await.unwrap();
     info!("Data sent on second connection.");
 
     // 5. Wait for server to finish its checks.
-    
+
     server_task.await.unwrap();
-} 
+
+    // Give some time for cleanup
+    tokio::time::advance(Duration::from_millis(100)).await;
+}
 
 /// Test that a CID is eventually fully removed from the draining state,
 /// allowing it to be potentially reused later (though unlikely).
@@ -105,29 +135,31 @@ async fn test_address_reuse_after_cid_drained() {
     let server_addr: SocketAddr = temp_socket.local_addr().unwrap();
     drop(temp_socket);
 
-    let (_, mut listener) =
-        ReliableUdpSocket::<UdpSocket>::bind(server_addr)
-            .await
-            .unwrap();
+    let (_, mut listener) = TransportReliableUdpSocket::<UdpTransport>::bind(server_addr)
+        .await
+        .unwrap();
 
     let server_task = tokio::spawn(async move {
         // Accept and close connection A.
-        // The client shuts down before the handshake fully completes on the server,
-        // so the server-side endpoint will just time out. We accept it and
-        // immediately drop it to simulate the user moving on.
         info!("[Server] Waiting for conn A");
-        let (stream_a, _) = listener.accept().await.unwrap();
+        let (mut stream_a, _) = listener.accept().await.unwrap();
+
+        // Complete handshake for connection A
+        stream_a.write_all(b"ack_a").await.unwrap();
+        stream_a.flush().await.unwrap();
+
+        // Connection A will be closed by client, so we just drop it
         drop(stream_a);
         info!("[Server] Conn A accepted and dropped.");
 
         // Accept connection B
         info!("[Server] Waiting for conn B");
         let (mut stream_b, _) = listener.accept().await.unwrap();
-        
+
         // Per protocol design, the server must write something to trigger the
         // SYN-ACK and complete the handshake. We send our "pong" to do this.
         stream_b.write_all(b"pong").await.unwrap();
-        
+
         // Now that the handshake is complete, we can read the client's "ping".
         let mut buf = vec![0; 10];
         let len = stream_b.read(&mut buf).await.unwrap();
@@ -137,21 +169,31 @@ async fn test_address_reuse_after_cid_drained() {
 
     // 2. Setup client
     let (client, _) =
-        ReliableUdpSocket::<UdpSocket>::bind("127.0.0.1:0".parse().unwrap())
+        TransportReliableUdpSocket::<UdpTransport>::bind("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
 
     // 3. Connection A: connect and immediately close.
     info!("[Client] Connecting A...");
     let mut client_stream_a = client.connect(server_addr).await.unwrap();
+
+    // Wait for server ack to complete handshake
+    let mut buf = vec![0; 10];
+    let len = client_stream_a.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..len], b"ack_a");
+    info!("[Client] Received server ack for conn A");
+
     client_stream_a.shutdown().await.unwrap();
     info!("[Client] Conn A shut down.");
 
     // 4. Wait for a time LONGER than the drain timeout + cleanup interval
     // to ensure the CID has been fully purged from the server actor.
     info!("[Client] Waiting for CID to be drained on server...");
-    tokio::time::sleep(config.connection.drain_timeout + config.connection.draining_cleanup_interval).await;
-    
+    tokio::time::advance(
+        config.connection.drain_timeout + config.connection.draining_cleanup_interval,
+    )
+    .await;
+
     // 5. Connection B: Connect again from the same socket.
     info!("[Client] Connecting B...");
     let mut client_stream_b = client.connect(server_addr).await.unwrap();
@@ -162,4 +204,91 @@ async fn test_address_reuse_after_cid_drained() {
     info!("[Client] Conn B verified.");
 
     server_task.await.unwrap();
-} 
+
+    // Give some time for cleanup
+    tokio::time::advance(Duration::from_millis(100)).await;
+}
+
+/// Test that the transport layer correctly handles basic bidirectional communication
+/// after connection establishment.
+///
+/// 测试传输层在连接建立后是否正确处理基本的双向通信。
+#[tokio::test(start_paused = true)]
+async fn test_transport_bidirectional_communication() {
+    init_tracing();
+
+    // 1. Setup server
+    let temp_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_addr: SocketAddr = temp_socket.local_addr().unwrap();
+    drop(temp_socket);
+
+    let (_, mut listener) = TransportReliableUdpSocket::<UdpTransport>::bind(server_addr)
+        .await
+        .unwrap();
+
+    let server_task = tokio::spawn(async move {
+        let (mut stream, client_addr) = listener.accept().await.unwrap();
+        info!("[Server] Accepted connection from {}", client_addr);
+
+        // Trigger handshake completion
+        stream.write_all(b"server_ready").await.unwrap();
+        stream.flush().await.unwrap();
+
+        // Read initial message
+        let mut buf = vec![0; 20];
+        let len = stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..len], b"hello_server");
+        info!("[Server] Received client message");
+
+        // Send response
+        stream.write_all(b"hello_client").await.unwrap();
+        stream.flush().await.unwrap();
+
+        // Read second message
+        let len = stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..len], b"goodbye_server");
+        info!("[Server] Received second client message");
+
+        // Send final response
+        stream.write_all(b"goodbye_client").await.unwrap();
+        stream.flush().await.unwrap();
+    });
+
+    // 2. Setup client
+    let (client, _) =
+        TransportReliableUdpSocket::<UdpTransport>::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+
+    // 3. Establish connection
+    info!("[Client] Connecting...");
+    let mut stream = client.connect(server_addr).await.unwrap();
+
+    // Wait for server ready signal
+    let mut buf = vec![0; 20];
+    let len = stream.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..len], b"server_ready");
+
+    // Send first message
+    stream.write_all(b"hello_server").await.unwrap();
+    stream.flush().await.unwrap();
+
+    // Wait for response
+    let len = stream.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..len], b"hello_client");
+    info!("[Client] Received server response");
+
+    // Send second message
+    stream.write_all(b"goodbye_server").await.unwrap();
+    stream.flush().await.unwrap();
+
+    // Wait for final response
+    let len = stream.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..len], b"goodbye_client");
+    info!("[Client] Communication test completed successfully");
+
+    server_task.await.unwrap();
+
+    // Give some time for cleanup
+    tokio::time::advance(Duration::from_millis(100)).await;
+}

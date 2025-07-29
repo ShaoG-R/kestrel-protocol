@@ -3,13 +3,14 @@ pub mod actor;
 pub mod command;
 mod draining;
 pub mod handle;
-mod sender;
 pub mod traits;
+pub mod transport;
 pub mod zerortt;
 
 pub use command::{SocketActorCommand, SenderTaskCommand, SendCommand};
-pub use handle::{Listener, ReliableUdpSocket};
 pub use traits::{BindableUdpSocket, AsyncUdpSocket};
+pub use transport::{BindableTransport, Transport, UdpTransport};
+pub use handle::{TransportListener, TransportReliableUdpSocket};
 
 #[cfg(test)]
 mod tests;

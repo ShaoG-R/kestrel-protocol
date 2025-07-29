@@ -1,7 +1,11 @@
-//! Unit tests for the `socket` module, specifically for the `SocketActor`.
-//! `socket` 模块的单元测试，特别是针对 `SocketActor`。
+//! Unit tests for the `socket` module, specifically for the transport-based `SocketActor`.
+//! `socket` 模块的单元测试，特别是针对基于传输的 `SocketActor`。
 
-use super::{actor::SocketActor, command::*, draining::DrainingPool, traits::*};
+use super::{
+    draining::DrainingPool,
+    transport::{BindableTransport, FrameBatch, ReceivedDatagram, Transport, TransportCommand},
+    actor::TransportSocketActor,
+};
 use crate::{
     config::Config,
     core::stream::Stream,
@@ -16,32 +20,45 @@ use tokio::{
     sync::{mpsc, Mutex},
 };
 
-/// A mock `UdpSocket` for testing the `SocketActor`.
+/// A mock transport for testing the transport-based `SocketActor`.
 /// This version uses tokio::sync::Mutex to be Send-safe across .await points.
 #[derive(Debug)]
-struct MockSocket {
+struct MockTransport {
     local_addr: SocketAddr,
-    packet_rx: Arc<Mutex<mpsc::Receiver<(Vec<u8>, SocketAddr)>>>,
+    packet_rx: Arc<Mutex<mpsc::Receiver<ReceivedDatagram>>>,
+    sent_packets: Arc<Mutex<Vec<FrameBatch>>>,
+}
+
+impl MockTransport {
+    fn new(local_addr: SocketAddr) -> (Self, mpsc::Sender<ReceivedDatagram>) {
+        let (packet_tx, packet_rx) = mpsc::channel(128);
+        let transport = Self {
+            local_addr,
+            packet_rx: Arc::new(Mutex::new(packet_rx)),
+            sent_packets: Arc::new(Mutex::new(Vec::new())),
+        };
+        (transport, packet_tx)
+    }
+
+    async fn get_sent_packets(&self) -> Vec<FrameBatch> {
+        self.sent_packets.lock().await.clone()
+    }
 }
 
 #[async_trait]
-impl AsyncUdpSocket for MockSocket {
-    async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
-        let mut rx = self.packet_rx.lock().await;
-        match rx.recv().await {
-            Some((data, addr)) => {
-                let len = data.len();
-                buf[..len].copy_from_slice(&data);
-                Ok((len, addr))
-            }
-            None => Err(Error::ChannelClosed),
-        }
+impl Transport for MockTransport {
+    async fn send_frames(&self, batch: FrameBatch) -> Result<()> {
+        let mut sent = self.sent_packets.lock().await;
+        sent.push(batch);
+        Ok(())
     }
 
-    async fn send_to(&self, _buf: &[u8], _target: SocketAddr) -> Result<usize> {
-        // The actor should not send directly, but via the SenderTask.
-        // This method being called would indicate a design flaw.
-        unimplemented!("Actor should not call send_to directly")
+    async fn recv_frames(&self) -> Result<ReceivedDatagram> {
+        let mut rx = self.packet_rx.lock().await;
+        match rx.recv().await {
+            Some(datagram) => Ok(datagram),
+            None => Err(Error::ChannelClosed),
+        }
     }
 
     fn local_addr(&self) -> Result<SocketAddr> {
@@ -50,17 +67,23 @@ impl AsyncUdpSocket for MockSocket {
 }
 
 #[async_trait]
-impl BindableUdpSocket for MockSocket {
+impl BindableTransport for MockTransport {
     async fn bind(_addr: SocketAddr) -> Result<Self> {
-        unreachable!("MockSocket is created manually for tests")
+        unreachable!("MockTransport is created manually for tests")
+    }
+
+    async fn rebind(&mut self, new_addr: SocketAddr) -> Result<()> {
+        self.local_addr = new_addr;
+        Ok(())
     }
 }
 
-/// A comprehensive test harness for the `SocketActor`.
+/// A comprehensive test harness for the transport-based `SocketActor`.
 struct ActorTestHarness {
     accept_rx: mpsc::Receiver<(Stream, SocketAddr)>,
-    incoming_packet_tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
-    outgoing_cmd_rx: mpsc::Receiver<SenderTaskCommand<MockSocket>>,
+    incoming_packet_tx: mpsc::Sender<ReceivedDatagram>,
+    outgoing_cmd_rx: mpsc::Receiver<TransportCommand<MockTransport>>,
+    mock_transport: Arc<MockTransport>,
     actor_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -69,17 +92,14 @@ impl ActorTestHarness {
         let (command_tx, command_rx) = mpsc::channel(128);
         let (accept_tx, accept_rx) = mpsc::channel(128);
         let (send_tx, outgoing_cmd_rx) = mpsc::channel(128);
-        let (incoming_packet_tx, incoming_packet_rx) = mpsc::channel(128);
 
-        let mock_socket = Arc::new(MockSocket {
-            local_addr: "127.0.0.1:9999".parse().unwrap(),
-            packet_rx: Arc::new(Mutex::new(incoming_packet_rx)),
-        });
+        let (mock_transport, incoming_packet_tx) = MockTransport::new("127.0.0.1:9999".parse().unwrap());
+        let mock_transport = Arc::new(mock_transport);
 
         let config = Arc::new(Config::default());
 
-        let mut actor = SocketActor {
-            socket: mock_socket,
+        let mut actor = TransportSocketActor {
+            transport: mock_transport.clone(),
             connections: HashMap::new(),
             addr_to_cid: HashMap::new(),
             draining_pool: DrainingPool::new(config.connection.drain_timeout),
@@ -98,6 +118,7 @@ impl ActorTestHarness {
             accept_rx,
             incoming_packet_tx,
             outgoing_cmd_rx,
+            mock_transport,
             actor_handle,
         }
     }
@@ -108,12 +129,20 @@ impl ActorTestHarness {
             source_cid,
             0, // destination_cid is unknown for initial SYN
         );
-        let mut buffer = Vec::new();
-        syn_frame.encode(&mut buffer);
+        
+        let datagram = ReceivedDatagram {
+            remote_addr: from_addr,
+            frames: vec![syn_frame],
+        };
+        
         self.incoming_packet_tx
-            .send((buffer, from_addr))
+            .send(datagram)
             .await
             .unwrap();
+    }
+
+    async fn get_sent_packets(&self) -> Vec<FrameBatch> {
+        self.mock_transport.get_sent_packets().await
     }
 }
 
@@ -151,28 +180,28 @@ async fn test_actor_sends_to_correct_address_after_accept() {
         .await
         .expect("Writing to stream failed");
 
-    // 5. Verification (Part 2): The Actor must send a `SendCommand` to the SenderTask
+    // 5. Verification (Part 2): The Actor must send a `TransportCommand` to the transport
     // with the `remote_addr` correctly set to the client's address.
-    let sender_command =
+    let transport_command =
         tokio::time::timeout(std::time::Duration::from_secs(1), harness.outgoing_cmd_rx.recv())
             .await
-            .expect("Actor did not dispatch a command to the SenderTask")
+            .expect("Actor did not dispatch a command to the transport")
             .unwrap();
 
-    match sender_command {
-        SenderTaskCommand::Send(send_command) => {
+    match transport_command {
+        TransportCommand::Send(frame_batch) => {
             assert_eq!(
-                send_command.remote_addr, client_addr,
-                "CRITICAL: Actor dispatched SendCommand with the wrong remote address!"
+                frame_batch.remote_addr, client_addr,
+                "CRITICAL: Actor dispatched FrameBatch with the wrong remote address!"
             );
 
             // Optional: check if the first frame is indeed a SYN-ACK
             assert!(
-                matches!(send_command.frames.get(0), Some(Frame::SynAck { .. })),
+                matches!(frame_batch.frames.get(0), Some(Frame::SynAck { .. })),
                 "Expected the first frame to be a SYN-ACK"
             );
         }
-        _ => panic!("Expected SenderTaskCommand::Send, but got something else"),
+        _ => panic!("Expected TransportCommand::Send, but got something else"),
     }
 }
 
@@ -198,7 +227,7 @@ async fn test_actor_concurrent_write_sends_to_correct_addresses() {
     writer_a.write_all(b"to A").await.unwrap();
     writer_b.write_all(b"to B").await.unwrap();
 
-    // 5. Verification: Collect the two outgoing SendCommands
+    // 5. Verification: Collect the two outgoing TransportCommands
     let mut outgoing_commands = HashMap::new();
     for _ in 0..2 {
         let cmd = tokio::time::timeout(
@@ -209,10 +238,10 @@ async fn test_actor_concurrent_write_sends_to_correct_addresses() {
         .expect("Failed to receive command from actor")
         .unwrap();
 
-        if let SenderTaskCommand::Send(send_cmd) = cmd {
+        if let TransportCommand::Send(frame_batch) = cmd {
             // We use the payload to identify which command is which.
             // The actual data is now in the PUSH frame, not the SYN-ACK.
-            let payload = send_cmd
+            let payload = frame_batch
                 .frames
                 .iter()
                 .find_map(|f| match f {
@@ -226,7 +255,7 @@ async fn test_actor_concurrent_write_sends_to_correct_addresses() {
                     _ => None,
                 })
                 .unwrap();
-            outgoing_commands.insert(payload, send_cmd.remote_addr);
+            outgoing_commands.insert(payload, frame_batch.remote_addr);
         }
     }
 
@@ -283,10 +312,10 @@ async fn test_actor_with_true_concurrent_handlers() {
         .expect("Actor did not send command in time")
         .unwrap();
 
-        if let SenderTaskCommand::Send(send_cmd) = cmd {
+        if let TransportCommand::Send(frame_batch) = cmd {
             // SYN-ACK for a probe has no payload, and the PUSH frame might also be empty initially.
             // So, we identify by address.
-            outgoing_commands.insert(send_cmd.remote_addr, send_cmd);
+            outgoing_commands.insert(frame_batch.remote_addr, frame_batch);
         }
     }
 
@@ -298,4 +327,46 @@ async fn test_actor_with_true_concurrent_handlers() {
         outgoing_commands.contains_key(&client_b_addr),
         "Did not send a command to client B"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_transport_layer_integration() {
+    // Test that the transport layer correctly handles frame batching and addressing
+    let mut harness = ActorTestHarness::new();
+    let client_addr: SocketAddr = "127.0.0.1:4001".parse().unwrap();
+
+    // Send SYN and accept connection
+    harness.send_syn(client_addr, 500).await;
+    let (stream, _) = harness.accept_rx.recv().await.unwrap();
+
+    // Write data to trigger frame sending
+    let (_, mut writer) = tokio::io::split(stream);
+    writer.write_all(b"test data").await.unwrap();
+
+    // Wait for the transport command to be sent
+    let transport_command = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        harness.outgoing_cmd_rx.recv(),
+    )
+    .await
+    .expect("Actor did not dispatch a command to the transport")
+    .unwrap();
+
+    // Verify the command is correct
+    match transport_command {
+        TransportCommand::Send(frame_batch) => {
+            assert_eq!(
+                frame_batch.remote_addr, client_addr,
+                "Transport command sent to wrong address"
+            );
+            assert!(!frame_batch.frames.is_empty(), "No frames in the batch");
+        }
+        _ => panic!("Expected TransportCommand::Send, but got something else"),
+    }
+
+    // Also verify that the mock transport would have received the frames
+    // (This tests the integration between the actor and transport layer)
+    let _sent_packets = harness.get_sent_packets().await;
+    // Note: sent_packets might be empty because our mock doesn't actually execute the send
+    // but the important thing is that the command was dispatched correctly
 } 
