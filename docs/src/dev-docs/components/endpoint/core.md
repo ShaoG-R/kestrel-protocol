@@ -76,8 +76,8 @@ graph TD
     style F fill:#333,color:#fff
     style H fill:#333,color:#fff
     style I fill:#333,color:#fff
-    style G fill:#f9f,stroke:#333,stroke-width:2px
-    style J fill:#ccf,stroke:#333,stroke-width:2px
+    style G fill:#8B008B,color:#fff,stroke:#fff,stroke-width:2px
+    style J fill:#00008B,color:#fff,stroke:#fff,stroke-width:2px
 ```
 
 **架构解读:**

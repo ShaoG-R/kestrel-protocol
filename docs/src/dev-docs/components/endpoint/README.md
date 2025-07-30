@@ -90,12 +90,14 @@ graph TD
     end
     
     style A fill:#333,color:#fff
+    style B fill:#333,color:#fff
     style C fill:#333,color:#fff
     style D fill:#333,color:#fff
+    style E fill:#333,color:#fff
     style F fill:#333,color:#fff
     style G fill:#333,color:#fff
     style I fill:#333,color:#fff
-    style H fill:#f9f,stroke:#333,stroke-width:2px
+    style H fill:#8B008B,color:#fff,stroke:#fff,stroke-width:2px
 ```
 
 **数据流解读:**

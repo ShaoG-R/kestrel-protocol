@@ -63,9 +63,9 @@ graph LR
     A -- "调用 e.g., transition_to()" --> B
 
     style A fill:#333,color:#fff
-    style B fill:#bbf,stroke:#333,stroke-width:2px
-    style C fill:#bfb,stroke:#333,stroke-width:2px
-    style D fill:#fbb,stroke:#333,stroke-width:2px
+    style B fill:#00008B,color:#fff,stroke:#fff,stroke-width:2px
+    style C fill:#006400,color:#fff,stroke:#fff,stroke-width:2px
+    style D fill:#8B0000,color:#fff,stroke:#fff,stroke-width:2px
 ```
 
 **协作流程 (以`transition_to`为例):**

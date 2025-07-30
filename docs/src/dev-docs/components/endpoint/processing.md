@@ -76,8 +76,8 @@ graph TD
     style G fill:#333,color:#fff
     style H fill:#333,color:#fff
     style J fill:#333,color:#fff
-    style C fill:#f9f,stroke:#333,stroke-width:2px
-    style I fill:#bbf,stroke:#333,stroke-width:2px
+    style C fill:#8B008B,color:#fff,stroke:#fff,stroke-width:2px
+    style I fill:#00008B,color:#fff,stroke:#fff,stroke-width:2px
 ```
 
 **处理流程:**
