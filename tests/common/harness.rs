@@ -2,8 +2,8 @@
 use kestrel_protocol::socket::{TransportListener, TransportReliableUdpSocket, UdpTransport};
 use std::net::SocketAddr;
 use std::sync::{
-    atomic::{AtomicU16, Ordering},
     Arc, Once,
+    atomic::{AtomicU16, Ordering},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -36,7 +36,6 @@ pub struct TestHarness {
 impl TestHarness {
     /// Creates a new server that listens on a unique, non-ephemeral port.
     pub async fn new() -> Self {
-        init_tracing();
         let port = NEXT_SERVER_PORT.fetch_add(1, Ordering::SeqCst);
         let server_addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
@@ -153,4 +152,4 @@ pub async fn client_echo_task(
         "[Client {}] Received correct echo response and connection closed.",
         id
     );
-} 
+}

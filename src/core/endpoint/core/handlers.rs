@@ -505,14 +505,21 @@ impl<T: Transport> Endpoint<T> {
 
         match self.lifecycle_manager.current_state() {
             crate::core::endpoint::types::state::ConnectionState::SynReceived => {
-                // 在SynReceived状态下，连接还没有真正建立，立即关闭用户流接收器
-                // In SynReceived state, connection is not established yet, immediately close user stream receiver
-                *self.channels.tx_to_stream_mut() = None;
+                // 在SynReceived状态下，连接还没有真正建立
+                // 如果没有待发送的数据，可以立即关闭用户流
+                // In SynReceived state, connection is not established yet
+                // If there's no pending data, we can immediately close the user stream
+                if self.transport.reliability().is_send_buffer_empty() {
+                    // 没有待发送数据，立即关闭用户流接收器
+                    *self.channels.tx_to_stream_mut() = None;
+                }
 
                 // 尝试优雅关闭
                 if let Ok(()) = self.begin_graceful_shutdown() {
                     if self.lifecycle_manager.should_close() {
                         self.transport.reliability_mut().clear_in_flight_packets();
+                        // 确保用户流已关闭
+                        *self.channels.tx_to_stream_mut() = None;
                     }
                 }
             }
@@ -527,6 +534,7 @@ impl<T: Transport> Endpoint<T> {
                 } else {
                     // 有待发送数据，转换到Closing状态，继续尝试连接
                     if let Ok(()) = self.begin_graceful_shutdown() {
+                        // 不要在这里关闭用户流，等待连接完全关闭
                         if self.lifecycle_manager.should_close() {
                             self.transport.reliability_mut().clear_in_flight_packets();
                             *self.channels.tx_to_stream_mut() = None;

@@ -1,19 +1,11 @@
-
-
-use crate::core::endpoint::{
-    ConnectionCleaner,
-    Endpoint,
-};
-use crate::{
-    error::Result,
-    socket::{Transport},
-};
-use tokio::time::{sleep_until, Instant};
-use tracing::trace;
 use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
 use crate::core::endpoint::processing::dispatcher::EventDispatcher;
 use crate::core::endpoint::processing::traits::ProcessorOperations;
 use crate::core::endpoint::types::state::ConnectionState;
+use crate::core::endpoint::{ConnectionCleaner, Endpoint};
+use crate::{error::Result, socket::Transport};
+use tokio::time::{Instant, sleep_until};
+use tracing::trace;
 
 impl<T: Transport> Endpoint<T> {
     /// Runs the endpoint's main event loop.
@@ -42,7 +34,7 @@ impl<T: Transport> Endpoint<T> {
                     // 更新接收时间
                     // Update receive time
                     self.timing.on_packet_received(Instant::now());
-                    
+
                     EventDispatcher::dispatch_frame::<T>(self as &mut dyn ProcessorOperations, frame, src_addr).await?;
                     // After handling one frame, try to drain any other pending frames
                     // to process them in a batch.
@@ -98,8 +90,17 @@ impl<T: Transport> Endpoint<T> {
                     if let Some(tx) = self.channels.tx_to_stream().as_ref() {
                         if tx.send(data_vec).await.is_err() {
                             // User's stream handle has been dropped. We can no longer send.
+                            // But we should not immediately close the connection - let it finish
+                            // processing any remaining network events first.
+                            // 用户的流句柄已被丢弃，我们无法再发送数据。
+                            // 但我们不应该立即关闭连接 - 让它先完成处理任何剩余的网络事件。
+                            trace!(
+                                cid = self.identity.local_cid(),
+                                "User stream handle dropped, marking for cleanup"
+                            );
                             *self.channels.tx_to_stream_mut() = None;
-                            let _ = self.transition_state(ConnectionState::Closing);
+                            // Note: We don't transition to Closing here to avoid race conditions
+                            // The connection will be cleaned up when appropriate
                         }
                     }
                 }
@@ -141,7 +142,9 @@ impl<T: Transport> Endpoint<T> {
             // 8. Check if we need to send a deferred EOF.
             // This happens after a FIN has been received and all data that came before
             // the FIN has been passed to the user's stream.
-            if self.timing.is_fin_pending_eof() && self.transport.reliability().is_recv_buffer_empty() {
+            if self.timing.is_fin_pending_eof()
+                && self.transport.reliability().is_recv_buffer_empty()
+            {
                 if let Some(tx) = self.channels.tx_to_stream_mut().take() {
                     trace!(
                         cid = self.identity.local_cid(),
