@@ -6,24 +6,24 @@
 
 **实现位置:**
 
-- **Listener API**: `src/socket/handle.rs` (`ReliableUdpSocket`, `ConnectionListener`)
+- **Listener API**: `src/socket/handle.rs` (`TransportReliableUdpSocket`, `TransportListener`)
 - **Stream API**: `src/core/stream.rs` (`Stream`)
 
 ### 1. 服务端 Listener API
 
-为了提供经典的服务器编程体验，协议封装了`SocketActor`的创建和管理过程。
+为了提供经典的服务器编程体验，协议封装了`SocketEventLoop`的创建和管理过程。
 
-- **`ReliableUdpSocket::bind(addr)`**: 这是API的入口点。调用它会：
+- **`TransportReliableUdpSocket::bind(addr)`**: 这是API的入口点。调用它会：
     1.  在指定地址上绑定一个UDP Socket。
-    2.  在后台`tokio::spawn`一个`SocketActor`任务和一个`SenderTask`任务。
-    3.  返回两个句柄：`ReliableUdpSocket`用于发起新连接，`ConnectionListener`用于接收新连接。
+    2.  在后台`tokio::spawn`一个`SocketEventLoop`任务和一个`transport_sender_task`任务。
+    3.  返回两个句柄：`TransportReliableUdpSocket`用于发起新连接，`TransportListener`用于接收新连接。
 
-- **`ConnectionListener::accept()`**:
-  `ConnectionListener`持有一个MPSC通道的接收端。`SocketActor`在每次接受一个新连接（即收到一个`SYN`包）并为其创建好`Endpoint`任务和`Stream`句柄后，会将`Stream`句柄通过此通道发送过来。用户代码可以在一个循环中调用`.accept().await`来异步地、逐一地获取这些新建立的连接。
+- **`TransportListener::accept()`**:
+  `TransportListener`持有一个MPSC通道的接收端。`SocketEventLoop`在每次接受一个新连接（即收到一个`SYN`包）并为其创建好`Endpoint`任务和`Stream`句柄后，会将`(Stream, SocketAddr)`通过此通道发送过来。用户代码可以在一个循环中调用`.accept().await`来异步地、逐一地获取这些新建立的连接。
 
 ```rust,ignore
 // 用户代码示例
-let (socket_handle, mut listener) = ReliableUdpSocket::bind("127.0.0.1:1234").await?;
+let (socket_handle, mut listener) = TransportReliableUdpSocket::bind("127.0.0.1:1234").await?;
 
 loop {
     let (stream, remote_addr) = listener.accept().await?;
@@ -49,4 +49,4 @@ loop {
       *   如果通道暂时没有新数据（返回`Poll::Pending`），并且`read_buffer`也为空，`poll_read`则返回`Poll::Pending`，并将`Waker`注册，以便在数据到达时唤醒任务。
       *   如果通道被关闭（`Endpoint`任务已终止，通常是因为连接正常关闭），并且`read_buffer`也已耗尽，`poll_read`会返回`Ok(())`且不写入任何数据，这在`tokio`的`AsyncRead`中代表了EOF（流结束），用户的读取循环会自然终止。
 
-这种设计使得用户可以使用标准的`tokio::io::copy`等工具函数，与`Stream`进行高效、便捷的数据交换。 
+这种设计使得用户可以使用标准的`tokio::io::copy`等工具函数，与`Stream`进行高效、便捷的数据交换。

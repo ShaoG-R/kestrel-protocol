@@ -6,7 +6,7 @@
 
 **实现位置:**
 
-- **包聚合**: `src/core/endpoint/sending.rs` (`PacketBuilder`)
+- **包聚合**: `src/core/endpoint/transport/sender.rs` (`PacketBuilder`)
 - **快速应答**: `src/core/reliability.rs`
 
 ### 1. 包聚合 (Packet Coalescing)
@@ -20,7 +20,7 @@
     4.  `SenderTask` 接收到这个**预先聚合好的批次**后，将其中的所有帧连续编码到同一个缓冲区，并通过一次 `socket.send_to()` 系统调用发送出去。
 
 ```rust
-// 位于 src/socket/sender.rs
+// 位于 src/socket/transport/sender.rs
 // ...
 for cmd in commands.drain(..) {
     send_buf.clear();
