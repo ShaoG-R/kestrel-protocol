@@ -39,3 +39,5 @@
 - [开发文档](./dev-docs/README.md)
     - [数据流到数据包转换](./dev-docs/01-stream-to-packet.md)
     - [连接关闭机制](./dev-docs/02-connection-shutdown.md)
+    - [组件文档](./dev-docs/components/README.md)
+        - [传输层架构设计](./dev-docs/components/transport-layer.md)
