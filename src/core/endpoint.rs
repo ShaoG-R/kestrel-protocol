@@ -10,6 +10,7 @@ pub mod types;
 
 #[cfg(test)]
 mod tests;
+pub mod timing;
 
 pub use types::command::StreamCommand;
 
@@ -17,8 +18,8 @@ use lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::{
     config::Config,
     core::reliability::{ReliabilityLayer, TimeoutCheckResult},
-    socket::{SocketActorCommand, Transport},
     error::Result,
+    socket::{SocketActorCommand, Transport},
 };
 use std::net::SocketAddr;
 use tokio::{
@@ -26,12 +27,12 @@ use tokio::{
     time::Instant,
 };
 use tracing::trace;
+use timing::{TimeoutEvent, TimingManager};
 use types::{
-    state::ConnectionState,
-    identity::ConnectionIdentity,
-    timing::{TimingManager, TimeoutEvent},
-    transport::TransportManager,
     channels::ChannelManager,
+    identity::ConnectionIdentity,
+    state::ConnectionState,
+    transport::TransportManager,
 };
 
 

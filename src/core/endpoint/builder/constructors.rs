@@ -5,20 +5,18 @@ use crate::socket::{Transport, TransportCommand};
 use crate::{
     config::Config,
     core::reliability::ReliabilityLayer,
-    socket::{SocketActorCommand},
+    socket::SocketActorCommand,
 };
 use bytes::Bytes;
 use std::net::SocketAddr;
-use tokio::{
-    sync::mpsc,
-};
+use tokio::sync::mpsc;
 use crate::core::endpoint::lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
+use crate::core::endpoint::timing::TimingManager;
 use crate::core::endpoint::types::{
-    state::ConnectionState,
-    identity::ConnectionIdentity,
-    timing::TimingManager,
-    transport::TransportManager,
     channels::ChannelManager,
+    identity::ConnectionIdentity,
+    state::ConnectionState,
+    transport::TransportManager,
 };
 use crate::core::reliability::congestion::vegas::Vegas;
 

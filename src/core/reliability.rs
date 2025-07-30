@@ -24,12 +24,12 @@ use self::{
 use crate::{
     config::Config,
     packet::{frame::Frame, sack::SackRange},
-    core::endpoint::types::timing::TimeoutEvent,
 };
 use bytes::Bytes;
 use tokio::time::Instant;
 use tracing::{debug, trace};
 use congestion::CongestionControl;
+use crate::core::endpoint::timing::TimeoutEvent;
 
 /// 超时检查结果
 /// Timeout check result

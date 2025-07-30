@@ -15,7 +15,6 @@ use self::{sack_manager::SackManager, simple_retx_manager::SimpleRetransmissionM
 
 use crate::{
     config::Config,
-    core::endpoint::types::timing::TimeoutEvent,
     packet::{
         frame::{Frame, ReliabilityMode},
         sack::SackRange,
@@ -24,6 +23,7 @@ use crate::{
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::{debug, trace};
+use crate::core::endpoint::timing::TimeoutEvent;
 
 /// Result of processing an ACK with both SACK and simple retransmission.
 /// 使用SACK和简单重传处理ACK的结果。
