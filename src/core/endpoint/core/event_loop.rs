@@ -12,6 +12,7 @@ use tokio::time::{sleep_until, Instant};
 use tracing::trace;
 use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
 use crate::core::endpoint::processing::dispatcher::EventDispatcher;
+use crate::core::endpoint::processing::traits::ProcessorOperations;
 use crate::core::endpoint::types::state::ConnectionState;
 
 impl<T: Transport> Endpoint<T> {
@@ -42,14 +43,14 @@ impl<T: Transport> Endpoint<T> {
                     // Update receive time
                     self.timing.on_packet_received(Instant::now());
                     
-                    EventDispatcher::dispatch_frame(self, frame, src_addr).await?;
+                    EventDispatcher::dispatch_frame::<T>(self as &mut dyn ProcessorOperations, frame, src_addr).await?;
                     // After handling one frame, try to drain any other pending frames
                     // to process them in a batch.
                     while let Ok((frame, src_addr)) = self.channels.receiver.try_recv() {
                         // 为批量处理的帧也更新接收时间
                         // Update receive time for batched frames too
                         self.timing.on_packet_received(Instant::now());
-                        EventDispatcher::dispatch_frame(self, frame, src_addr).await?;
+                        EventDispatcher::dispatch_frame::<T>(self as &mut dyn ProcessorOperations, frame, src_addr).await?;
                     }
                 }
 

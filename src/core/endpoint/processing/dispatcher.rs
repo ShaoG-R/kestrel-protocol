@@ -22,7 +22,7 @@ impl EventDispatcher {
     /// 分发网络帧事件到对应的帧处理器
     /// Dispatches network frame events to the corresponding frame processors
     pub async fn dispatch_frame<T: Transport>(
-        endpoint: &mut Endpoint<T>,
+        endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
     ) -> Result<()> {
