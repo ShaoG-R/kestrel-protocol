@@ -5,7 +5,7 @@ use crate::{
     config::Config,
     core::{endpoint::StreamCommand, test_utils::setup_server_harness},
     packet::frame::Frame,
-    socket::SenderTaskCommand,
+    socket::TransportCommand,
 };
 use bytes::Bytes;
 use std::time::Duration;
@@ -61,7 +61,7 @@ async fn test_1rtt_handshake_with_server_data() {
     .unwrap();
 
     // 4. Verify the SYN-ACK and PUSH frame contents.
-    if let SenderTaskCommand::Send(cmd) = syn_ack_cmd {
+    if let TransportCommand::Send(cmd) = syn_ack_cmd {
         assert_eq!(cmd.remote_addr, client_addr);
         // We now expect two frames due to coalescing: SYN-ACK and PUSH.
         assert_eq!(cmd.frames.len(), 2);
@@ -166,7 +166,7 @@ async fn test_0rtt_handshake_with_client_data() {
     .expect("Server should send a response")
     .unwrap();
 
-    if let SenderTaskCommand::Send(cmd) = response_cmd {
+    if let TransportCommand::Send(cmd) = response_cmd {
         assert_eq!(cmd.frames.len(), 2, "Expected SYN-ACK and PUSH");
         assert!(matches!(&cmd.frames[0], Frame::SynAck { .. }));
         if let Frame::Push { payload, .. } = &cmd.frames[1] {

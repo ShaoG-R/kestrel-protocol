@@ -12,7 +12,7 @@ use crate::{
     core::{endpoint::{core::frame::create_path_response_frame, lifecycle::ConnectionLifecycleManager, processing::traits::{EndpointOperations, ProcessorOperations}, types::state::ConnectionState}, reliability::ReliabilityLayer},
     error::Result,
     packet::{frame::Frame, sack::SackRange},
-    socket::{AsyncUdpSocket, SocketActorCommand},
+    socket::{SocketActorCommand, Transport},
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -26,7 +26,7 @@ use tokio::{sync::mpsc, time::Instant};
 /// This implementation abstracts the endpoint operations needed by processors,
 /// allowing processors to decouple from the Endpoint.
 #[async_trait]
-impl<S: AsyncUdpSocket> EndpointOperations for Endpoint<S> {
+impl<T: Transport> EndpointOperations for Endpoint<T> {
     // ========== 基础信息获取 (Basic Information Access) ==========
     
     fn local_cid(&self) -> u32 {
@@ -141,7 +141,7 @@ impl<S: AsyncUdpSocket> EndpointOperations for Endpoint<S> {
 /// for frame processors, combining multiple low-level operations to provide interfaces
 /// that better match processor usage patterns.
 #[async_trait]
-impl<S: AsyncUdpSocket> ProcessorOperations for Endpoint<S> {
+impl<T: Transport> ProcessorOperations for Endpoint<T> {
     async fn process_ack_and_get_retx_frames(
         &mut self,
         recv_next_seq: u32,
@@ -211,20 +211,19 @@ mod tests {
         config::Config,
         core::{
             endpoint::types::state::ConnectionState,
-            test_utils::MockUdpSocket,
-        },
-        socket::SenderTaskCommand,
+            test_utils::MockTransport,
+        }, socket::TransportCommand,
     };
     use tokio::{sync::mpsc, time::Instant};
 
-    fn create_test_endpoint() -> Endpoint<MockUdpSocket> {
+    fn create_test_endpoint() -> Endpoint<MockTransport> {
         let config = Config::default();
         let remote_addr = "127.0.0.1:8081".parse().unwrap();
         let local_cid = 1;
         
         // 创建必要的通道
         let (_frame_tx, frame_rx) = mpsc::channel(10);
-        let (sender_tx, mut sender_rx) = mpsc::channel::<SenderTaskCommand<MockUdpSocket>>(10);
+        let (sender_tx, mut sender_rx) = mpsc::channel::<TransportCommand<MockTransport>>(10);
         let (command_tx, mut command_rx) = mpsc::channel(10);
         
         // 启动后台任务来处理发送命令，避免通道关闭

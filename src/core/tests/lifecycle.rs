@@ -6,7 +6,7 @@ use crate::{
         test_utils::{init_tracing, setup_client_server_pair, setup_server_harness},
     },
     packet::frame::Frame,
-    socket::SenderTaskCommand,
+    socket::{TransportCommand},
 };
 use bytes::Bytes;
 use std::time::Duration;
@@ -86,7 +86,7 @@ async fn test_connection_migration() {
 
     // The server should send a SYN-ACK back to the client. We'll just drain this for now.
     let syn_ack_cmd = harness.rx_from_endpoint_network.recv().await.unwrap();
-    if let SenderTaskCommand::Send(cmd) = syn_ack_cmd {
+    if let TransportCommand::Send(cmd) = syn_ack_cmd {
         assert!(matches!(cmd.frames[0], Frame::SynAck { .. }));
         assert_eq!(cmd.remote_addr, old_addr);
     } else {
@@ -108,11 +108,11 @@ async fn test_connection_migration() {
     let cmd1_enum = harness.rx_from_endpoint_network.recv().await.unwrap();
     let cmd2_enum = harness.rx_from_endpoint_network.recv().await.unwrap();
     let cmd1 = match cmd1_enum {
-        SenderTaskCommand::Send(c) => c,
+        TransportCommand::Send(c) => c,
         _ => panic!("Expected Send"),
     };
     let cmd2 = match cmd2_enum {
-        SenderTaskCommand::Send(c) => c,
+        TransportCommand::Send(c) => c,
         _ => panic!("Expected Send"),
     };
 
@@ -157,7 +157,7 @@ async fn test_connection_migration() {
             .expect("should receive a PUSH after migration")
             .unwrap();
 
-    if let SenderTaskCommand::Send(cmd) = push_after_migration_cmd {
+    if let TransportCommand::Send(cmd) = push_after_migration_cmd {
         assert_eq!(cmd.remote_addr, new_addr, "PUSH should now be sent to the new, migrated address");
         assert!(matches!(cmd.frames[0], Frame::Push { .. }));
     } else {

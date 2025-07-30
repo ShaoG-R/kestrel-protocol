@@ -12,7 +12,7 @@ use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcesso
 use crate::{
     error::{Result, ProcessorErrorContext},
     packet::frame::Frame,
-    socket::AsyncUdpSocket,
+    socket::{Transport},
 };
 use std::net::SocketAddr;
 use tokio::time::Instant;
@@ -29,7 +29,7 @@ pub struct PushProcessor;
 // 最新的类型安全处理器接口实现
 // Latest type-safe processor interface implementation
 #[async_trait]
-impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for PushProcessor {
+impl<T: Transport> TypeSafeFrameProcessor<T> for PushProcessor {
     type FrameTypeMarker = PushFrame;
 
     fn name() -> &'static str {
@@ -59,7 +59,7 @@ impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for PushProcessor {
             seq = header.sequence_number,
             payload_len = payload.len(),
             state = ?context.connection_state,
-            processor = <Self as TypeSafeFrameProcessor<S>>::name(),
+            processor = <Self as TypeSafeFrameProcessor<T>>::name(),
             "Processing PUSH frame with type-safe processor"
         );
 
@@ -119,7 +119,7 @@ impl TypeSafeFrameValidator for PushProcessor {
 // 新的统一处理器接口实现
 // New unified processor interface implementation
 #[async_trait]
-impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for PushProcessor {
+impl<T: Transport> UnifiedFrameProcessor<T> for PushProcessor {
     type FrameType = crate::packet::frame::Frame;
 
     fn can_handle(frame: &Frame) -> bool {
@@ -315,7 +315,7 @@ impl PushProcessor {
 mod tests {
     use super::*;
     use crate::{
-        core::test_utils::MockUdpSocket,
+        core::test_utils::MockTransport,
         packet::{frame::Frame, header::ShortHeader, command::Command},
     };
     use bytes::Bytes;
@@ -360,18 +360,18 @@ mod tests {
         // 测试能够处理PUSH帧
         // Test can handle PUSH frame
         let push_frame = create_test_push_frame(1, "test data");
-        assert!(<PushProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame));
+        assert!(<PushProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&push_frame));
 
         // 测试不能处理非PUSH帧
         // Test cannot handle non-PUSH frame
         let ack_frame = create_test_ack_frame();
-        assert!(!<PushProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&ack_frame));
+        assert!(!<PushProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&ack_frame));
     }
 
     #[test]
     fn test_processor_name() {
-        assert_eq!(<PushProcessor as UnifiedFrameProcessor<MockUdpSocket>>::name(), "PushProcessor");
-        assert_eq!(<PushProcessor as TypeSafeFrameProcessor<MockUdpSocket>>::name(), "PushProcessor");
+        assert_eq!(<PushProcessor as UnifiedFrameProcessor<MockTransport>>::name(), "PushProcessor");
+        assert_eq!(<PushProcessor as TypeSafeFrameProcessor<MockTransport>>::name(), "PushProcessor");
     }
 
     #[test]
@@ -414,13 +414,13 @@ mod tests {
         
         // 确保所有接口实现的行为一致
         // Ensure all interface implementations behave consistently
-        let unified_can_handle = <PushProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame);
+        let unified_can_handle = <PushProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&push_frame);
         assert!(unified_can_handle);
         
         // 确保名称一致
         // Ensure names are consistent
-        let unified_name = <PushProcessor as UnifiedFrameProcessor<MockUdpSocket>>::name();
-        let type_safe_name = <PushProcessor as TypeSafeFrameProcessor<MockUdpSocket>>::name();
+        let unified_name = <PushProcessor as UnifiedFrameProcessor<MockTransport>>::name();
+        let type_safe_name = <PushProcessor as TypeSafeFrameProcessor<MockTransport>>::name();
         
         assert_eq!(unified_name, type_safe_name);
         assert_eq!(unified_name, "PushProcessor");

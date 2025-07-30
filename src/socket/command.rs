@@ -4,35 +4,10 @@ use crate::{
     config::Config,
     core::stream::Stream,
     error::Result,
-    packet::frame::Frame,
-    socket::traits::AsyncUdpSocket,
 };
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr};
 use tokio::sync::oneshot;
 
-
-/// A command for the central socket sender task.
-/// 用于中央套接字发送任务的命令。
-#[derive(Debug)]
-pub struct SendCommand {
-    /// The destination address.
-    /// 目标地址。
-    pub remote_addr: SocketAddr,
-    /// The frames to send.
-    /// 要发送的帧。
-    pub frames: Vec<Frame>,
-}
-
-/// Commands for the central socket sender task.
-///
-/// 用于中央套接字发送任务的命令。
-#[derive(Debug)]
-pub enum SenderTaskCommand<S: AsyncUdpSocket> {
-    /// Send a batch of frames to a remote address.
-    Send(SendCommand),
-    /// Swap the underlying socket.
-    SwapSocket(Arc<S>),
-}
 
 /// Commands sent to the `SocketActor`.
 ///

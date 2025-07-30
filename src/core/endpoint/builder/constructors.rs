@@ -1,10 +1,11 @@
 //! Constructors for the `Endpoint`.
 
 use crate::core::endpoint::{Endpoint, StreamCommand};
+use crate::socket::{Transport, TransportCommand};
 use crate::{
     config::Config,
     core::reliability::ReliabilityLayer,
-    socket::{AsyncUdpSocket, SenderTaskCommand, SocketActorCommand},
+    socket::{SocketActorCommand},
 };
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -21,14 +22,14 @@ use crate::core::endpoint::types::{
 };
 use crate::core::reliability::congestion::vegas::Vegas;
 
-impl<S: AsyncUdpSocket> Endpoint<S> {
+impl<T: Transport> Endpoint<T> {
     /// Creates a new `Endpoint` for the client-side.
     pub fn new_client(
         config: Config,
         remote_addr: SocketAddr,
         local_cid: u32,
         receiver: mpsc::Receiver<(crate::packet::frame::Frame, SocketAddr)>,
-        sender: mpsc::Sender<SenderTaskCommand<S>>,
+        sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
         initial_data: Option<Bytes>,
     ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>) {
@@ -73,7 +74,7 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
         local_cid: u32,
         peer_cid: u32,
         receiver: mpsc::Receiver<(crate::packet::frame::Frame, SocketAddr)>,
-        sender: mpsc::Sender<SenderTaskCommand<S>>,
+        sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
     ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>) {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);

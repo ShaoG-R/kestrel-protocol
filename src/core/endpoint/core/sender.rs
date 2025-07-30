@@ -1,10 +1,12 @@
 //! Sending-related logic for the `Endpoint`.
 
 use crate::core::endpoint::Endpoint;
+use crate::socket::transport::FrameBatch;
 use crate::{
     error::{Error, Result},
     packet::frame::Frame,
-    socket::{AsyncUdpSocket, SendCommand, SenderTaskCommand},
+    socket::{Transport},
+    socket::TransportCommand,
 };
 use std::{future::Future, net::SocketAddr};
 use tokio::time::Instant;
@@ -76,7 +78,7 @@ where
     }
 }
 
-impl<S: AsyncUdpSocket> Endpoint<S> {
+impl<T: Transport> Endpoint<T> {
     pub(in crate::core::endpoint) async fn packetize_and_send(&mut self) -> Result<()> {
         let now = Instant::now();
 
@@ -191,12 +193,12 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
             );
         }
         
-        let cmd = SendCommand {
+        let cmd = FrameBatch {
             remote_addr: self.identity.remote_addr(),
             frames,
         };
         self.channels.sender
-            .send(SenderTaskCommand::Send(cmd))
+            .send(TransportCommand::Send(cmd))
             .await
             .map_err(|_| Error::ChannelClosed)
     }
@@ -216,12 +218,12 @@ impl<S: AsyncUdpSocket> Endpoint<S> {
     }
 
     pub(in crate::core::endpoint) async fn send_frame_to(&self, frame: Frame, remote_addr: SocketAddr) -> Result<()> {
-        let cmd = SendCommand {
+        let cmd = FrameBatch {
             remote_addr,
             frames: vec![frame],
         };
         self.channels.sender
-            .send(SenderTaskCommand::Send(cmd))
+            .send(TransportCommand::Send(cmd))
             .await
             .map_err(|_| Error::ChannelClosed)
     }

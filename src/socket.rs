@@ -7,7 +7,8 @@ pub mod traits;
 pub mod transport;
 pub mod zerortt;
 
-pub use command::{SocketActorCommand, SenderTaskCommand, SendCommand};
+pub use command::{SocketActorCommand};
+pub use transport::TransportCommand;
 pub use traits::{BindableUdpSocket, AsyncUdpSocket};
 pub use transport::{BindableTransport, Transport, UdpTransport};
 pub use handle::{TransportListener, TransportReliableUdpSocket};

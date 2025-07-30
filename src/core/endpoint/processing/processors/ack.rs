@@ -11,7 +11,7 @@ use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcesso
 use crate::{
     error::{Result, ProcessorErrorContext},
     packet::{frame::Frame, sack::decode_sack_ranges},
-    socket::AsyncUdpSocket,
+    socket::{Transport},
 };
 use std::net::SocketAddr;
 use tokio::time::Instant;
@@ -28,7 +28,7 @@ pub struct AckProcessor;
 // 最新的类型安全处理器接口实现
 // Latest type-safe processor interface implementation
 #[async_trait]
-impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for AckProcessor {
+impl<T: Transport> TypeSafeFrameProcessor<T> for AckProcessor {
     type FrameTypeMarker = AckFrame;
 
     fn name() -> &'static str {
@@ -136,7 +136,7 @@ impl AckProcessor {
 // 统一接口实现
 // Unified interface implementation
 #[async_trait]
-impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for AckProcessor {
+impl<T: Transport> UnifiedFrameProcessor<T> for AckProcessor {
     type FrameType = AckFrame;
 
     fn can_handle(frame: &Frame) -> bool {
@@ -330,7 +330,7 @@ mod tests {
     use crate::packet::header::ShortHeader;
     use crate::packet::command::Command;
     use bytes::Bytes;
-    use crate::core::test_utils::MockUdpSocket;
+    use crate::core::test_utils::MockTransport;
 
     #[test]
     fn test_ack_processor_can_handle() {
@@ -347,7 +347,7 @@ mod tests {
             payload: Bytes::new(),
         };
 
-        assert!(<AckProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&ack_frame));
+        assert!(<AckProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&ack_frame));
 
         let push_frame = Frame::Push {
             header: ShortHeader {
@@ -362,11 +362,11 @@ mod tests {
             payload: Bytes::from("test data"),
         };
 
-        assert!(!<AckProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame));
+        assert!(!<AckProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&push_frame));
     }
 
     #[test]
     fn test_processor_name() {
-        assert_eq!(<AckProcessor as UnifiedFrameProcessor<MockUdpSocket>>::name(), "AckProcessor");
+        assert_eq!(<AckProcessor as UnifiedFrameProcessor<MockTransport>>::name(), "AckProcessor");
     }
 }

@@ -5,7 +5,7 @@ use crate::{
     config::Config,
     error::Result,
     packet::frame::Frame,
-    socket::{AsyncUdpSocket, SenderTaskCommand, SocketActorCommand},
+    socket::{SocketActorCommand, transport::{FrameBatch, ReceivedDatagram, Transport, TransportCommand}},
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -22,55 +22,65 @@ use tokio::sync::mpsc;
 
 // --- Mock Network Infrastructure ---
 
-/// A mock UDP socket that uses shared queues to simulate a network link.
-/// It allows two `MockUdpSocket` instances to send packets to each other.
+/// A mock transport that uses shared queues to simulate a network link.
+/// It allows two `MockTransport` instances to send packets to each other.
 #[derive(Clone)]
-pub struct MockUdpSocket {
+pub struct MockTransport {
     pub local_addr: SocketAddr,
-    // Packets sent to this socket are pushed here by the peer.
-    pub recv_queue: Arc<Mutex<VecDeque<(Bytes, SocketAddr)>>>,
-    // This socket sends packets by pushing them to the peer's recv_queue.
-    pub peer_recv_queue: Arc<Mutex<VecDeque<(Bytes, SocketAddr)>>>,
+    // Packets sent to this transport are pushed here by the peer.
+    pub recv_queue: Arc<Mutex<VecDeque<ReceivedDatagram>>>,
+    // This transport sends packets by pushing them to the peer's recv_queue.
+    pub peer_recv_queue: Arc<Mutex<VecDeque<ReceivedDatagram>>>,
     // The filter is applied on SEND. Return true to keep the packet, false to drop.
     pub packet_tx_filter: Arc<dyn Fn(&Frame) -> bool + Send + Sync>,
     pub sent_packets_count: Arc<AtomicUsize>,
 }
 
-impl std::fmt::Debug for MockUdpSocket {
+impl std::fmt::Debug for MockTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MockUdpSocket {{ local_addr: {}, recv_queue: {:?}, peer_recv_queue: {:?}, sent_packets_count: {:?} }}", self.local_addr, self.recv_queue, self.peer_recv_queue, self.sent_packets_count)
+        write!(
+            f,
+            "MockTransport {{ local_addr: {}, recv_queue: {:?}, peer_recv_queue: {:?}, sent_packets_count: {:?} }}", 
+            self.local_addr, 
+            self.recv_queue, 
+            self.peer_recv_queue, 
+            self.sent_packets_count
+        )
     }
 }
 
 #[async_trait]
-impl AsyncUdpSocket for MockUdpSocket {
-    async fn send_to(&self, buf: &[u8], _target: SocketAddr) -> Result<usize> {
-        // A datagram might contain multiple frames. For test simplicity, we only check the first.
-        let mut cursor = &buf[..];
-        if let Some(frame) = Frame::decode(&mut cursor) {
-            if !(self.packet_tx_filter)(&frame) {
+impl Transport for MockTransport {
+    async fn send_frames(&self, batch: FrameBatch) -> Result<()> {
+        // Check the first frame for filtering (if any frames exist)
+        if !batch.frames.is_empty() {
+            if !(self.packet_tx_filter)(&batch.frames[0]) {
                 // Packet dropped by the filter.
-                return Ok(buf.len());
+                return Ok(());
             }
         }
 
         self.sent_packets_count.fetch_add(1, Ordering::Relaxed);
 
-        // When this socket sends, the peer receives. The sender address is our local address.
+        // When this transport sends, the peer receives. The sender address is our local address.
+        let received_datagram = ReceivedDatagram {
+            remote_addr: self.local_addr,
+            frames: batch.frames,
+        };
+
         self.peer_recv_queue
             .lock()
             .unwrap()
-            .push_back((Bytes::copy_from_slice(buf), self.local_addr));
-        Ok(buf.len())
+            .push_back(received_datagram);
+        
+        Ok(())
     }
 
-    async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
-        // Loop until a packet is available in our receive queue.
+    async fn recv_frames(&self) -> Result<ReceivedDatagram> {
+        // Loop until a datagram is available in our receive queue.
         loop {
-            if let Some((data, addr)) = self.recv_queue.lock().unwrap().pop_front() {
-                let len = data.len();
-                buf[..len].copy_from_slice(&data);
-                return Ok((len, addr));
+            if let Some(datagram) = self.recv_queue.lock().unwrap().pop_front() {
+                return Ok(datagram);
             }
             // Yield to allow other tasks to run.
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -100,73 +110,44 @@ pub struct ServerTestHarness {
     /// To send frames to the Endpoint, simulating network ingress.
     pub tx_to_endpoint_network: mpsc::Sender<(Frame, SocketAddr)>,
     /// To receive commands from the Endpoint that would go to the network.
-    pub rx_from_endpoint_network: mpsc::Receiver<SenderTaskCommand<MockUdpSocket>>,
+    pub rx_from_endpoint_network: mpsc::Receiver<TransportCommand<MockTransport>>,
     /// The address of the "client" that the server is connected to.
     pub client_addr: SocketAddr,
     /// The local connection ID of the server endpoint.
     pub server_cid: u32,
 }
 
-/// Spawns an `Endpoint` and the necessary relay tasks to connect it to a `MockUdpSocket`.
+/// Spawns an `Endpoint` and the necessary relay tasks to connect it to a `MockTransport`.
 pub fn spawn_endpoint(
-    mut endpoint: Endpoint<MockUdpSocket>,
-    socket: MockUdpSocket,
-    mut sender_task_rx: mpsc::Receiver<SenderTaskCommand<MockUdpSocket>>,
+    mut endpoint: Endpoint<MockTransport>,
+    transport: MockTransport,
+    mut sender_task_rx: mpsc::Receiver<TransportCommand<MockTransport>>,
     tx_to_endpoint_network: mpsc::Sender<(Frame, SocketAddr)>,
 ) {
     // --- Sender Relay Task ---
-    // The Endpoint sends `SenderTaskCommand`s to this task, which then uses the mock socket.
-    let socket_clone = socket.clone();
+    // The Endpoint sends `TransportCommand`s to this task, which then uses the mock transport.
+    let transport_clone = transport.clone();
     tokio::spawn(async move {
-        while let Some(SenderTaskCommand::Send(cmd)) = sender_task_rx.recv().await {
-            // We can't just encode all frames into one buffer because PUSH/ACK frames
-            // have variable length payloads, and our protocol doesn't include a length
-            // prefix for them. This means any PUSH or ACK frame *must* be the last
-            // frame in a datagram.
-            let mut current_datagram = bytes::BytesMut::new();
-            for frame in cmd.frames {
-                // If the current datagram is not empty and we are about to add a
-                // variable-length frame, we must send the current datagram first.
-                if !current_datagram.is_empty() {
-                    if matches!(&frame, Frame::Push {..} | Frame::Ack {..}) {
-                        // Send the datagram containing only fixed-length frames so far.
-                        socket_clone.send_to(&current_datagram, cmd.remote_addr).await.unwrap();
-                        current_datagram.clear();
-                    }
+        while let Some(command) = sender_task_rx.recv().await {
+            match command {
+                TransportCommand::Send(batch) => {
+                    let _ = transport_clone.send_frames(batch).await;
                 }
-
-                frame.encode(&mut current_datagram);
-
-                // If we just encoded a variable-length frame, we must send it now
-                // as its own datagram.
-                if matches!(&frame, Frame::Push {..} | Frame::Ack {..}) {
-                    socket_clone.send_to(&current_datagram, cmd.remote_addr).await.unwrap();
-                    current_datagram.clear();
+                TransportCommand::SwapTransport(_) => {
+                    // For testing, we ignore transport swaps
                 }
-            }
-
-            // Send any remaining buffered frames (will only be fixed-length ones).
-            if !current_datagram.is_empty() {
-                socket_clone.send_to(&current_datagram, cmd.remote_addr).await.unwrap();
             }
         }
     });
 
     // --- Receiver Relay Task ---
-    // This task uses the mock socket to receive packets and forwards them to the Endpoint.
+    // This task uses the mock transport to receive datagrams and forwards frames to the Endpoint.
     tokio::spawn(async move {
-        let mut recv_buf = [0u8; 2048];
         loop {
-            if let Ok((len, src_addr)) = socket.recv_from(&mut recv_buf).await {
-                let mut cursor = &recv_buf[..len];
-                while !cursor.is_empty() {
-                    if let Some(frame) = Frame::decode(&mut cursor) {
-                        if tx_to_endpoint_network.send((frame, src_addr)).await.is_err() {
-                            break; // Endpoint closed
-                        }
-                    } else {
-                        // Could not decode further, stop processing this datagram.
-                        break;
+            if let Ok(datagram) = transport.recv_frames().await {
+                for frame in datagram.frames {
+                    if tx_to_endpoint_network.send((frame, datagram.remote_addr)).await.is_err() {
+                        break; // Endpoint closed
                     }
                 }
             }
@@ -220,15 +201,15 @@ pub fn setup_client_server_with_filter(
     let client_sent_count = Arc::new(AtomicUsize::new(0));
     let server_sent_count = Arc::new(AtomicUsize::new(0));
 
-    // Create sockets that are linked to each other's queues
-    let client_socket = MockUdpSocket {
+    // Create transports that are linked to each other's queues
+    let client_transport = MockTransport {
         local_addr: client_addr,
         recv_queue: client_recv_queue.clone(),
         peer_recv_queue: server_recv_queue.clone(),
         packet_tx_filter: client_tx_filter,
         sent_packets_count: client_sent_count.clone(),
     };
-    let server_socket = MockUdpSocket {
+    let server_transport = MockTransport {
         local_addr: server_addr,
         recv_queue: server_recv_queue,
         peer_recv_queue: client_recv_queue,
@@ -257,7 +238,7 @@ pub fn setup_client_server_with_filter(
 
         spawn_endpoint(
             endpoint,
-            client_socket,
+            client_transport,
             sender_task_rx,
             tx_to_endpoint_network,
         );
@@ -288,7 +269,7 @@ pub fn setup_client_server_with_filter(
 
         spawn_endpoint(
             endpoint,
-            server_socket,
+            server_transport,
             sender_task_rx,
             tx_to_endpoint_network,
         );
@@ -308,7 +289,7 @@ pub fn setup_client_server_with_filter(
 }
 
 /// Creates a fully connected pair of client and server `Stream`s using a mock
-/// socket, with the ability to inject a packet filter to simulate network issues.
+/// transport, with the ability to inject a packet filter to simulate network issues.
 ///
 /// This is a high-level test utility that returns ready-to-use `Stream` objects,
 /// perfect for integration tests that need to verify `AsyncRead`/`AsyncWrite` behavior.

@@ -6,7 +6,7 @@ use crate::core::endpoint::{
 };
 use crate::{
     error::Result,
-    socket::AsyncUdpSocket,
+    socket::{Transport},
 };
 use tokio::time::{sleep_until, Instant};
 use tracing::trace;
@@ -14,10 +14,10 @@ use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
 use crate::core::endpoint::processing::dispatcher::EventDispatcher;
 use crate::core::endpoint::types::state::ConnectionState;
 
-impl<S: AsyncUdpSocket> Endpoint<S> {
+impl<T: Transport> Endpoint<T> {
     /// Runs the endpoint's main event loop.
     pub async fn run(&mut self) -> Result<()> {
-        let _cleaner = ConnectionCleaner::<S> {
+        let _cleaner = ConnectionCleaner::<T> {
             cid: self.identity.local_cid(),
             command_tx: self.channels.command_tx().clone(),
             _marker: std::marker::PhantomData,

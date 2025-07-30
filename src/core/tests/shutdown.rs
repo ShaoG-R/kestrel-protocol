@@ -1,6 +1,6 @@
 //! Tests for the connection shutdown logic.
 
-use crate::core::test_utils::{setup_client_server_pair, setup_server_harness, MockUdpSocket};
+use crate::core::test_utils::{setup_client_server_pair, setup_server_harness, MockTransport};
 use crate::{
     core::endpoint::StreamCommand,
     packet::frame::Frame,
@@ -66,7 +66,7 @@ async fn test_shutdown_when_connecting() {
     });
 
     let (mut client_endpoint, tx_to_stream, _) =
-        crate::core::endpoint::Endpoint::<MockUdpSocket>::new_client(
+        crate::core::endpoint::Endpoint::<MockTransport>::new_client(
             Default::default(),
             "127.0.0.1:1234".parse().unwrap(),
             1,

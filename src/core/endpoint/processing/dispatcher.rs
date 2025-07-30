@@ -5,7 +5,7 @@ use crate::core::endpoint::Endpoint;
 use crate::{
     error::Result,
     packet::frame::Frame,
-    socket::AsyncUdpSocket,
+    socket::{Transport},
 };
 use super::traits::ProcessorOperations;
 use std::net::SocketAddr;
@@ -21,8 +21,8 @@ pub struct EventDispatcher;
 impl EventDispatcher {
     /// 分发网络帧事件到对应的帧处理器
     /// Dispatches network frame events to the corresponding frame processors
-    pub async fn dispatch_frame<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    pub async fn dispatch_frame<T: Transport>(
+        endpoint: &mut Endpoint<T>,
         frame: Frame,
         src_addr: SocketAddr,
     ) -> Result<()> {
@@ -32,7 +32,7 @@ impl EventDispatcher {
         // 无需创建对象实例，直接静态分发，编译器可以内联所有调用
         // Use high-performance static dispatch frame processor - zero-cost abstraction
         // No object instantiation needed, direct static dispatch, compiler can inline all calls
-        StaticFrameProcessorRegistry::route_frame::<S>(
+        StaticFrameProcessorRegistry::route_frame::<T>(
             endpoint as &mut dyn ProcessorOperations, 
             frame, 
             src_addr, 
@@ -42,8 +42,8 @@ impl EventDispatcher {
 
     /// 分发流命令事件
     /// Dispatches stream command events
-    pub async fn dispatch_stream_command<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    pub async fn dispatch_stream_command<T: Transport>(
+        endpoint: &mut Endpoint<T>,
         cmd: StreamCommand,
     ) -> Result<()> {
         endpoint.handle_stream_command(cmd).await
@@ -51,8 +51,8 @@ impl EventDispatcher {
 
     /// 分发超时事件
     /// Dispatches timeout events
-    pub async fn dispatch_timeout<S: AsyncUdpSocket>(
-        endpoint: &mut Endpoint<S>,
+    pub async fn dispatch_timeout<T: Transport>(
+        endpoint: &mut Endpoint<T>,
         now: Instant,
     ) -> Result<()> {
         endpoint.handle_timeout(now).await

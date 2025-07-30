@@ -5,7 +5,7 @@
 use super::{
     command::SocketActorCommand,
     draining::DrainingPool,
-    transport::{adapter_task, create_adapter_channel, BindableTransport, TransportCommand},
+    transport::{BindableTransport, TransportCommand},
 };
 use crate::{
     config::Config,
@@ -118,14 +118,7 @@ impl<T: BindableTransport> TransportSocketActor<T> {
 
                 let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
-                // Create adapter channel for legacy compatibility
-                let (adapter_tx, adapter_rx) = create_adapter_channel::<tokio::net::UdpSocket, T>(self.send_tx.clone());
-                
-                // Spawn adapter task
                 let transport_tx = self.send_tx.clone();
-                tokio::spawn(async move {
-                    adapter_task(adapter_rx, transport_tx).await;
-                });
 
                 let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
                     Endpoint::new_client(
@@ -133,7 +126,7 @@ impl<T: BindableTransport> TransportSocketActor<T> {
                         remote_addr,
                         local_cid,
                         rx_from_socket,
-                        adapter_tx,
+                        transport_tx,
                         self.command_tx.clone(),
                         initial_data,
                     );
@@ -321,14 +314,7 @@ impl<T: BindableTransport> TransportSocketActor<T> {
             }
             let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
-            // Create adapter channel for legacy compatibility
-            let (adapter_tx, adapter_rx) = create_adapter_channel::<tokio::net::UdpSocket, T>(self.send_tx.clone());
-            
-            // Spawn adapter task
             let transport_tx = self.send_tx.clone();
-            tokio::spawn(async move {
-                adapter_task(adapter_rx, transport_tx).await;
-            });
 
             let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
                 Endpoint::new_server(
@@ -337,7 +323,7 @@ impl<T: BindableTransport> TransportSocketActor<T> {
                     local_cid,
                     peer_cid,
                     rx_from_socket,
-                    adapter_tx,
+                    transport_tx,
                     self.command_tx.clone(),
                 );
 

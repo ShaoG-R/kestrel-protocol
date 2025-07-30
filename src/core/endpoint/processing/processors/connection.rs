@@ -12,7 +12,7 @@ use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcesso
 use crate::{
     error::{Result, ProcessorErrorContext},
     packet::frame::Frame,
-    socket::AsyncUdpSocket,
+    socket::{Transport},
 };
 use std::net::SocketAddr;
 use tokio::time::Instant;
@@ -29,7 +29,7 @@ pub struct ConnectionProcessor;
 // 最新的类型安全处理器接口实现
 // Latest type-safe processor interface implementation
 #[async_trait]
-impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for ConnectionProcessor {
+impl<T: Transport> TypeSafeFrameProcessor<T> for ConnectionProcessor {
     type FrameTypeMarker = ConnectionFrame;
 
     fn name() -> &'static str {
@@ -112,7 +112,7 @@ impl ConnectionProcessor {
 // 统一接口实现
 // Unified interface implementation
 #[async_trait]
-impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for ConnectionProcessor {
+impl<T: Transport> UnifiedFrameProcessor<T> for ConnectionProcessor {
     type FrameType = ConnectionFrame;
 
     fn can_handle(frame: &Frame) -> bool {
@@ -391,10 +391,10 @@ impl ConnectionProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_utils::MockTransport;
     use crate::packet::frame::Frame;
     use crate::packet::header::{LongHeader, ShortHeader};
     use crate::packet::command::Command;
-    use crate::core::test_utils::MockUdpSocket;
 
     #[test]
     fn test_connection_processor_can_handle() {
@@ -402,7 +402,7 @@ mod tests {
             header: LongHeader {
                 command: Command::Syn,
                 protocol_version: 1,
-                destination_cid: 0,
+                destination_cid: 0, 
                 source_cid: 123,
             },
         };
@@ -428,9 +428,9 @@ mod tests {
             },
         };
 
-        assert!(<ConnectionProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&syn_frame));
-        assert!(<ConnectionProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&syn_ack_frame));
-        assert!(<ConnectionProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&fin_frame));
+        assert!(<ConnectionProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&syn_frame));
+        assert!(<ConnectionProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&syn_ack_frame));
+        assert!(<ConnectionProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&fin_frame));
 
         let push_frame = Frame::Push {
             header: ShortHeader {
@@ -445,11 +445,11 @@ mod tests {
             payload: bytes::Bytes::from("test data"),
         };
 
-        assert!(!<ConnectionProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame));
+        assert!(!<ConnectionProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&push_frame));
     }
 
     #[test]
     fn test_processor_name() {
-        assert_eq!(<ConnectionProcessor as UnifiedFrameProcessor<MockUdpSocket>>::name(), "ConnectionProcessor");
+        assert_eq!(<ConnectionProcessor as UnifiedFrameProcessor<MockTransport>>::name(), "ConnectionProcessor");
     }
 }

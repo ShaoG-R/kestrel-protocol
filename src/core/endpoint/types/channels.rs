@@ -11,8 +11,9 @@
 
 use crate::{
     packet::frame::Frame,
-    socket::{AsyncUdpSocket, SenderTaskCommand, SocketActorCommand},
+    socket::{SocketActorCommand, Transport},
     core::endpoint::types::command::StreamCommand,
+    socket::TransportCommand,
 };
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -20,14 +21,14 @@ use tokio::sync::mpsc;
 
 /// 通信通道管理器
 /// Communication channels manager
-pub struct ChannelManager<S: AsyncUdpSocket> {
+pub struct ChannelManager<T: Transport> {
     /// 网络数据接收通道
     /// Network data receive channel
     pub(crate) receiver: mpsc::Receiver<(Frame, SocketAddr)>,
     
     /// 网络数据发送通道
     /// Network data send channel
-    pub(crate) sender: mpsc::Sender<SenderTaskCommand<S>>,
+    pub(crate) sender: mpsc::Sender<TransportCommand<T>>,
     
     /// Socket控制命令发送通道
     /// Socket control command send channel
@@ -42,12 +43,12 @@ pub struct ChannelManager<S: AsyncUdpSocket> {
     pub(crate) tx_to_stream: Option<mpsc::Sender<Vec<Bytes>>>,
 }
 
-impl<S: AsyncUdpSocket> ChannelManager<S> {
+impl<T: Transport> ChannelManager<T> {
     /// 创建新的通道管理器
     /// Create new channel manager
     pub fn new(
         receiver: mpsc::Receiver<(Frame, SocketAddr)>,
-        sender: mpsc::Sender<SenderTaskCommand<S>>,
+        sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
         rx_from_stream: mpsc::Receiver<StreamCommand>,
         tx_to_stream: Option<mpsc::Sender<Vec<Bytes>>>,
@@ -69,7 +70,7 @@ impl<S: AsyncUdpSocket> ChannelManager<S> {
 
     /// 获取网络数据发送通道的引用
     /// Get reference to network data send channel
-    pub fn sender(&self) -> &mpsc::Sender<SenderTaskCommand<S>> {
+    pub fn sender(&self) -> &mpsc::Sender<TransportCommand<T>> {
         &self.sender
     }
 
@@ -160,7 +161,7 @@ impl<S: AsyncUdpSocket> ChannelManager<S> {
     }
 }
 
-impl<S: AsyncUdpSocket> std::fmt::Debug for ChannelManager<S> {
+impl<T: Transport> std::fmt::Debug for ChannelManager<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChannelManager")
             .field("receiver_closed", &self.receiver.is_closed())
@@ -172,7 +173,7 @@ impl<S: AsyncUdpSocket> std::fmt::Debug for ChannelManager<S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::test_utils::MockUdpSocket;
+    use crate::socket::UdpTransport;
 
     use super::*;
     use tokio::sync::mpsc;
@@ -185,7 +186,7 @@ mod tests {
         let (_stream_cmd_tx, stream_cmd_rx) = mpsc::channel(10);
         let (to_stream_tx, _to_stream_rx) = mpsc::channel(10);
 
-        let manager = ChannelManager::<MockUdpSocket>::new(
+        let manager = ChannelManager::<UdpTransport>::new(
             frame_rx,
             sender_tx,
             cmd_tx,
@@ -205,7 +206,7 @@ mod tests {
         let (_stream_cmd_tx, stream_cmd_rx) = mpsc::channel(10);
         let (to_stream_tx, mut to_stream_rx) = mpsc::channel(10);
 
-        let mut manager = ChannelManager::<MockUdpSocket>::new(
+        let mut manager = ChannelManager::<UdpTransport>::new(
             frame_rx,
             sender_tx,
             cmd_tx,
@@ -237,7 +238,7 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::channel(10);
         let (stream_cmd_tx, stream_cmd_rx) = mpsc::channel(10);
 
-        let manager = ChannelManager::<MockUdpSocket>::new(
+        let manager = ChannelManager::<UdpTransport>::new(
             frame_rx,
             sender_tx,
             cmd_tx,

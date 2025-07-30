@@ -12,7 +12,7 @@ use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcesso
 use crate::{
     error::{Result, ProcessorErrorContext},
     packet::frame::Frame,
-    socket::{AsyncUdpSocket, SocketActorCommand},
+    socket::{SocketActorCommand, Transport},
 };
 use std::net::SocketAddr;
 use tokio::time::Instant;
@@ -28,7 +28,7 @@ pub struct PathProcessor;
 // 最新的类型安全处理器接口实现
 // Latest type-safe processor interface implementation
 #[async_trait]
-impl<S: AsyncUdpSocket> TypeSafeFrameProcessor<S> for PathProcessor {
+impl<T: Transport> TypeSafeFrameProcessor<T> for PathProcessor {
     type FrameTypeMarker = PathFrame;
 
     fn name() -> &'static str {
@@ -116,7 +116,7 @@ impl PathProcessor {
 // 统一接口实现
 // Unified interface implementation
 #[async_trait]
-impl<S: AsyncUdpSocket> UnifiedFrameProcessor<S> for PathProcessor {
+impl<T: Transport> UnifiedFrameProcessor<T> for PathProcessor {
     type FrameType = PathFrame;
 
     fn can_handle(frame: &Frame) -> bool {
@@ -307,7 +307,7 @@ mod tests {
     use crate::packet::command::Command;
     use crate::packet::frame::Frame;
     use crate::packet::header::ShortHeader;
-    use crate::core::test_utils::MockUdpSocket;
+    use crate::core::test_utils::MockTransport;
 
     #[test]
     fn test_path_processor_can_handle() {
@@ -337,10 +337,10 @@ mod tests {
             challenge_data: 0x1234567890abcdef,
         };
 
-        assert!(<PathProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(
+        assert!(<PathProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(
             &path_challenge_frame
         ));
-        assert!(<PathProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(
+        assert!(<PathProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(
             &path_response_frame
         ));
 
@@ -357,7 +357,7 @@ mod tests {
             payload: bytes::Bytes::from("test data"),
         };
 
-        assert!(!<PathProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(
+        assert!(!<PathProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(
             &push_frame
         ));
     }
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn test_processor_name() {
         assert_eq!(
-            <PathProcessor as UnifiedFrameProcessor<MockUdpSocket>>::name(),
+            <PathProcessor as UnifiedFrameProcessor<MockTransport>>::name(),
             "PathProcessor"
         );
     }

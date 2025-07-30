@@ -23,7 +23,7 @@ pub use path::PathProcessor;
 use crate::{
     error::Result,
     packet::frame::Frame,
-    socket::AsyncUdpSocket,
+    socket::Transport,
 };
 use super::traits::ProcessorOperations;
 use std::net::SocketAddr;
@@ -71,7 +71,7 @@ pub mod frame_types {
 /// preventing processors from handling frames of the wrong type. It also achieves
 /// decoupling through trait bounds.
 #[async_trait]
-pub trait TypeSafeFrameProcessor<S: AsyncUdpSocket> {
+pub trait TypeSafeFrameProcessor<T: Transport> {
     /// 关联的帧类型标记
     /// Associated frame type marker
     type FrameTypeMarker;
@@ -118,7 +118,7 @@ pub trait TypeSafeFrameValidator {
 /// providing better type safety and a cleaner interface, while achieving decoupling
 /// through trait bounds.
 #[async_trait]
-pub trait UnifiedFrameProcessor<S: AsyncUdpSocket> {
+pub trait UnifiedFrameProcessor<T: Transport> {
     /// 关联类型：该处理器能处理的帧类型
     /// Associated type: the frame type this processor can handle
     type FrameType;
@@ -162,7 +162,7 @@ pub trait UnifiedFrameProcessor<S: AsyncUdpSocket> {
 /// 支持运行时多态，使用 EndpointOperations trait 对象实现解耦
 /// Supports runtime polymorphism and achieves decoupling using EndpointOperations trait objects
 #[async_trait]
-pub trait DynamicFrameProcessor<S: AsyncUdpSocket>: Send + Sync {
+pub trait DynamicFrameProcessor<T: Transport>: Send + Sync {
     /// 检查是否可以处理给定的帧
     /// Check if this processor can handle the given frame
     fn can_handle(&self, frame: &Frame) -> bool;
@@ -200,10 +200,10 @@ impl<P> ProcessorAdapter<P> {
 }
 
 #[async_trait]
-impl<P, S> DynamicFrameProcessor<S> for ProcessorAdapter<P>
+impl<P, T> DynamicFrameProcessor<T> for ProcessorAdapter<P>
 where
-    P: UnifiedFrameProcessor<S> + Send + Sync,
-    S: AsyncUdpSocket,
+    P: UnifiedFrameProcessor<T> + Send + Sync,
+    T: Transport,
 {
     fn can_handle(&self, frame: &Frame) -> bool {
         P::can_handle(frame)
@@ -283,7 +283,7 @@ impl StaticFrameProcessorRegistry {
     /// 高性能帧路由 - 静态分发，零虚函数调用开销
     /// High-performance frame routing - static dispatch, zero virtual call overhead
     #[inline]
-    pub async fn route_frame<S: AsyncUdpSocket>(
+    pub async fn route_frame<T: Transport>(
         endpoint: &mut dyn ProcessorOperations,
         frame: Frame,
         src_addr: SocketAddr,
@@ -309,7 +309,7 @@ impl StaticFrameProcessorRegistry {
                     frame_type = ?frame,
                     "Routing frame to processor (static dispatch with type validation)"
                 );
-                <PushProcessor as UnifiedFrameProcessor<S>>::process_frame(endpoint, frame, src_addr, now).await
+                <PushProcessor as UnifiedFrameProcessor<T>>::process_frame(endpoint, frame, src_addr, now).await
             }
             Some(ProcessorType::Ack) => {
                 <AckProcessor as TypeSafeFrameValidator>::validate_frame_type(&frame)?;
@@ -318,7 +318,7 @@ impl StaticFrameProcessorRegistry {
                     frame_type = ?frame,
                     "Routing frame to processor (static dispatch with type validation)"
                 );
-                <AckProcessor as UnifiedFrameProcessor<S>>::process_frame(endpoint, frame, src_addr, now).await
+                <AckProcessor as UnifiedFrameProcessor<T>>::process_frame(endpoint, frame, src_addr, now).await
             }
             Some(ProcessorType::Connection) => {
                 <ConnectionProcessor as TypeSafeFrameValidator>::validate_frame_type(&frame)?;
@@ -327,7 +327,7 @@ impl StaticFrameProcessorRegistry {
                     frame_type = ?frame, 
                     "Routing frame to processor (static dispatch with type validation)"
                 );
-                <ConnectionProcessor as UnifiedFrameProcessor<S>>::process_frame(endpoint, frame, src_addr, now).await
+                <ConnectionProcessor as UnifiedFrameProcessor<T>>::process_frame(endpoint, frame, src_addr, now).await
             }
             Some(ProcessorType::Path) => {
                 <PathProcessor as TypeSafeFrameValidator>::validate_frame_type(&frame)?;
@@ -336,7 +336,7 @@ impl StaticFrameProcessorRegistry {
                     frame_type = ?frame,
                     "Routing frame to processor (static dispatch with type validation)"
                 );
-                <PathProcessor as UnifiedFrameProcessor<S>>::process_frame(endpoint, frame, src_addr, now).await
+                <PathProcessor as UnifiedFrameProcessor<T>>::process_frame(endpoint, frame, src_addr, now).await
             }
             Some(ProcessorType::Ping) => {
                 tracing::trace!(
@@ -444,10 +444,10 @@ mod tests {
         
         // 注意：这里使用一个占位符类型来满足泛型约束
         // Note: Using a placeholder type to satisfy generic constraints
-        use crate::core::test_utils::MockUdpSocket;
-        assert!(<PushProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame));
-        assert!(!<AckProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame));
-        assert!(!<ConnectionProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame));
-        assert!(!<PathProcessor as UnifiedFrameProcessor<MockUdpSocket>>::can_handle(&push_frame));
+        use crate::core::test_utils::MockTransport;
+        assert!(<PushProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&push_frame));
+        assert!(!<AckProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&push_frame));
+        assert!(!<ConnectionProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&push_frame));
+        assert!(!<PathProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&push_frame));
     }
 }

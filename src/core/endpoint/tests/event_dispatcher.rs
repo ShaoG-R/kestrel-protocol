@@ -5,7 +5,7 @@
 mod tests {
     use crate::{
         config::Config,
-        core::{endpoint::Endpoint, test_utils::MockUdpSocket},
+        core::{endpoint::Endpoint, test_utils::MockTransport},
     };
     use std::net::SocketAddr;
     use tokio::sync::mpsc;
@@ -20,7 +20,7 @@ mod tests {
         let (sender_tx, _sender_rx) = mpsc::channel(10);
         let (command_tx, _command_rx) = mpsc::channel(10);
 
-        let (endpoint, _stream_tx, _stream_rx) = Endpoint::<MockUdpSocket>::new_client(
+        let (endpoint, _stream_tx, _stream_rx) = Endpoint::<MockTransport>::new_client(
             config,
             remote_addr,
             local_cid,

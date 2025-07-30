@@ -4,7 +4,7 @@ use crate::core::endpoint::Endpoint;
 use crate::{
     error::Result,
     packet::{frame::Frame, sack::decode_sack_ranges},
-    socket::{AsyncUdpSocket, SocketActorCommand},
+    socket::{SocketActorCommand, Transport},
 };
 use tokio::time::Instant;
 use tracing::{info, trace};
@@ -15,7 +15,7 @@ use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
 use crate::core::endpoint::types::command::StreamCommand;
 use crate::core::endpoint::types::state::ConnectionState;
 
-impl<S: AsyncUdpSocket> Endpoint<S> {
+impl<T: Transport> Endpoint<T> {
 
     // handle_frame 方法已被 EventDispatcher 替代
     // handle_frame method has been replaced by EventDispatcher

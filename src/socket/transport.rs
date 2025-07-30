@@ -7,7 +7,6 @@
 //!
 //! 此模块提供底层网络传输的抽象，处理帧的序列化/反序列化、地址管理和路由。
 
-pub mod adapter;
 pub mod command;
 pub mod sender;
 pub mod udp;
@@ -19,7 +18,6 @@ use crate::{
 use async_trait::async_trait;
 use std::{fmt::Debug, net::SocketAddr};
 
-pub use adapter::{adapter_task, create_adapter_channel, TransportAdapter};
 pub use command::TransportCommand;
 pub use sender::transport_sender_task;
 pub use udp::UdpTransport;

@@ -17,7 +17,7 @@ use lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::{
     config::Config,
     core::reliability::{ReliabilityLayer, TimeoutCheckResult},
-    socket::{AsyncUdpSocket, SocketActorCommand},
+    socket::{SocketActorCommand, Transport},
     error::Result,
 };
 use std::net::SocketAddr;
@@ -41,13 +41,13 @@ use types::{
 ///
 /// 一个哨兵结构，确保在 `Endpoint` 被丢弃时，其在 `SocketActor` 中的
 /// 连接状态能够被清理。
-struct ConnectionCleaner<S: AsyncUdpSocket> {
+struct ConnectionCleaner<T: Transport> {
     cid: u32,
     command_tx: mpsc::Sender<SocketActorCommand>,
-    _marker: std::marker::PhantomData<S>,
+    _marker: std::marker::PhantomData<T>,
 }
 
-impl<S: AsyncUdpSocket> Drop for ConnectionCleaner<S> {
+impl<T: Transport> Drop for ConnectionCleaner<T> {
     fn drop(&mut self) {
         // Use `try_send` to avoid blocking in a drop implementation. This is a
         // "best-effort" cleanup. If the channel is full or closed, the actor
@@ -59,7 +59,7 @@ impl<S: AsyncUdpSocket> Drop for ConnectionCleaner<S> {
 }
 
 /// Represents one end of a reliable connection.
-pub struct Endpoint<S: AsyncUdpSocket> {
+pub struct Endpoint<T: Transport> {
     /// 新的连接标识管理器
     /// New connection identity manager
     identity: ConnectionIdentity,
@@ -74,7 +74,7 @@ pub struct Endpoint<S: AsyncUdpSocket> {
 
     /// 新的通道管理器
     /// New channel manager
-    channels: ChannelManager<S>,
+    channels: ChannelManager<T>,
 
     /// 新的生命周期管理器
     /// New lifecycle manager
@@ -83,7 +83,7 @@ pub struct Endpoint<S: AsyncUdpSocket> {
     
 }
 
-impl<S: AsyncUdpSocket> Endpoint<S> {
+impl<T: Transport> Endpoint<T> {
 
     /// 获取生命周期管理器的引用
     /// Gets a reference to the lifecycle manager

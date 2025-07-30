@@ -4,9 +4,10 @@ use crate::{
     config::Config,
     core::{
         endpoint::{Endpoint, StreamCommand},
-        test_utils::{spawn_endpoint, MockUdpSocket},
+        test_utils::{spawn_endpoint, MockTransport},
     },
     packet::frame::Frame,
+    socket::transport::ReceivedDatagram,
 };
 use bytes::Bytes;
 // use sha2::{Digest, Sha256};
@@ -24,14 +25,14 @@ use tokio::sync::mpsc;
 // --- Multi-client Test Infrastructure ---
 
 /// A central hub to simulate a server's UDP socket that can handle multiple clients.
-/// It creates interconnected mock sockets for a multi-client test scenario.
+/// It creates interconnected mock transports for a multi-client test scenario.
 struct TestNetHub {
     server_addr: SocketAddr,
     /// A single queue that simulates the server's single listening port.
-    /// All clients send packets to this queue.
-    server_ingress_queue: Arc<Mutex<VecDeque<(Bytes, SocketAddr)>>>,
+    /// All clients send datagrams to this queue.
+    server_ingress_queue: Arc<Mutex<VecDeque<ReceivedDatagram>>>,
     /// Maps a client's address to its dedicated receive queue for server responses.
-    client_egress_queues: Arc<Mutex<HashMap<SocketAddr, Arc<Mutex<VecDeque<(Bytes, SocketAddr)>>>>>>,
+    client_egress_queues: Arc<Mutex<HashMap<SocketAddr, Arc<Mutex<VecDeque<ReceivedDatagram>>>>>>,
 }
 
 impl TestNetHub {
@@ -43,15 +44,15 @@ impl TestNetHub {
         }
     }
 
-    /// Creates a socket for a client.
-    fn new_client_socket(&self, client_addr: SocketAddr) -> MockUdpSocket {
+    /// Creates a transport for a client.
+    fn new_client_transport(&self, client_addr: SocketAddr) -> MockTransport {
         let client_recv_queue = Arc::new(Mutex::new(VecDeque::new()));
         self.client_egress_queues
             .lock()
             .unwrap()
             .insert(client_addr, client_recv_queue.clone());
 
-        MockUdpSocket {
+        MockTransport {
             local_addr: client_addr,
             recv_queue: client_recv_queue,
             peer_recv_queue: self.server_ingress_queue.clone(), // Sends to the server
@@ -60,8 +61,8 @@ impl TestNetHub {
         }
     }
 
-    /// Creates a socket for a server-side endpoint.
-    fn new_server_socket_for_client(&self, client_addr: SocketAddr) -> MockUdpSocket {
+    /// Creates a transport for a server-side endpoint.
+    fn new_server_transport_for_client(&self, client_addr: SocketAddr) -> MockTransport {
         let client_queue = self
             .client_egress_queues
             .lock()
@@ -70,7 +71,7 @@ impl TestNetHub {
             .cloned()
             .unwrap();
 
-        MockUdpSocket {
+        MockTransport {
             local_addr: self.server_addr,
             // Server endpoints don't receive directly from a shared queue in this model.
             // The demultiplexer task below handles that.
@@ -92,37 +93,39 @@ impl TestNetHub {
         tokio::spawn(async move {
             loop {
                 // Lock, pop, and immediately unlock to avoid holding the guard across `.await`.
-                let packet = server_ingress_queue.lock().unwrap().pop_front();
+                let datagram = server_ingress_queue.lock().unwrap().pop_front();
 
-                if let Some((data, src_addr)) = packet {
-                    // --- DEBUG LOG: Print raw bytes received by the server-side hub ---
+                if let Some(datagram) = datagram {
+                    // --- DEBUG LOG: Print datagram received by the server-side hub ---
+                    // let total_bytes: usize = datagram.frames.iter()
+                    //     .map(|f| {
+                    //         let mut buf = Vec::new();
+                    //         f.encode(&mut buf);
+                    //         buf.len()
+                    //     })
+                    //     .sum();
                     // let mut hasher = Sha256::new();
-                    // hasher.update(&data);
+                    // hasher.update(&total_bytes.to_be_bytes());
                     // let hash = hasher.finalize();
                     // println!(
-                    //     "[SERVER DEMUX] RECV FROM {} -> len: {}, hash: {:x}",
-                    //     src_addr,
-                    //     data.len(),
+                    //     "[SERVER DEMUX] RECV FROM {} -> frame_count: {}, total_bytes: {}, hash: {:x}",
+                    //     datagram.remote_addr,
+                    //     datagram.frames.len(),
+                    //     total_bytes,
                     //     hash
                     // );
                     // --- END DEBUG LOG ---
 
-                    let mut cursor = &data[..];
-                    while !cursor.is_empty() {
-                        if let Some(frame) = Frame::decode(&mut cursor) {
-                            if let Some(sender) = endpoint_senders.get_mut(&src_addr) {
-                                if sender.send((frame, src_addr)).await.is_err() {
-                                    // Endpoint is gone, remove it to prevent further sends.
-                                    endpoint_senders.remove(&src_addr);
-                                }
+                    for frame in datagram.frames {
+                        if let Some(sender) = endpoint_senders.get_mut(&datagram.remote_addr) {
+                            if sender.send((frame, datagram.remote_addr)).await.is_err() {
+                                // Endpoint is gone, remove it to prevent further sends.
+                                endpoint_senders.remove(&datagram.remote_addr);
                             }
-                        } else {
-                            // Could not decode further, stop processing this datagram.
-                            break;
                         }
                     }
                 } else {
-                    // If no packet, yield to avoid busy-waiting.
+                    // If no datagram, yield to avoid busy-waiting.
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
             }
@@ -146,9 +149,9 @@ async fn test_core_multiple_clients_concurrently() {
         let client_cid = (i + 1) as u32;
         let server_cid = (100 + i + 1) as u32;
 
-        // Sockets must be created before spawning tasks that use them.
-        let client_socket = hub.new_client_socket(client_addr);
-        let server_socket = hub.new_server_socket_for_client(client_addr);
+        // Transports must be created before spawning tasks that use them.
+        let client_transport = hub.new_client_transport(client_addr);
+        let server_transport = hub.new_server_transport_for_client(client_addr);
 
         // --- Setup Server-side Endpoint ---
         let (tx_to_endpoint_network, rx_from_demux) = mpsc::channel(128);
@@ -168,7 +171,7 @@ async fn test_core_multiple_clients_concurrently() {
 
         spawn_endpoint(
             server_endpoint,
-            server_socket,
+            server_transport,
             server_sender_task_rx,
             tx_to_endpoint_network,
         );
@@ -191,7 +194,7 @@ async fn test_core_multiple_clients_concurrently() {
             endpoint.set_peer_cid(server_cid);
             spawn_endpoint(
                 endpoint,
-                client_socket,
+                client_transport,
                 client_sender_task_rx,
                 tx_to_endpoint_network,
             );
