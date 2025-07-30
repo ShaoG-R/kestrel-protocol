@@ -41,3 +41,4 @@
     - [连接关闭机制](./dev-docs/02-connection-shutdown.md)
     - [组件文档](./dev-docs/components/README.md)
         - [传输层架构设计](./dev-docs/components/transport-layer.md)
+        - [Socket层架构设计](./dev-docs/components/socket-layer.md)

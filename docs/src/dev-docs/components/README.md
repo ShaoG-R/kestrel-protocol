@@ -8,13 +8,16 @@
 
 - **[传输层架构设计](./transport-layer.md)** - 详细介绍传输层模块的设计，包括分层抽象、UDP传输实现、批量发送优化等核心特性
 
+### Socket层组件
+
+- **[Socket层架构设计](./socket-layer.md)** - 详细介绍Socket层的设计，包括Actor模式架构、会话协调、帧路由、连接迁移等核心功能
+
 ### 待添加组件
 
 - **端点层组件** - Endpoint的设计与实现
 - **可靠性层组件** - ReliabilityLayer的设计与实现  
 - **拥塞控制组件** - CongestionControl的设计与实现
 - **包处理组件** - Packet处理的设计与实现
-- **套接字层组件** - Socket层的设计与实现
 
 ## 文档风格
 
