@@ -23,6 +23,9 @@ use crate::socket::event_loop::draining::DrainingPool;
 use crate::socket::event_loop::routing::FrameRouter;
 use crate::socket::event_loop::session_coordinator::SocketSessionCoordinator;
 
+#[cfg(test)]
+mod rebind;
+
 /// A mock transport for testing the transport-based `SocketActor`.
 /// This version uses tokio::sync::Mutex to be Send-safe across .await points.
 #[derive(Debug)]
