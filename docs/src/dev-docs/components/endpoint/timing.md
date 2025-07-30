@@ -77,23 +77,30 @@ impl TimingManager {
 
 ```mermaid
 graph TD
-    subgraph "Reliability Layer"
-        A[RTO/Retransmission Deadline] --> C
+    subgraph "可靠性层"
+        A[RTO/重传截止时间] --> C
     end
     
-    subgraph "Timing Module"
-        B[Idle/Keep-Alive Deadline] --> C
+    subgraph "计时模块"
+        B[空闲/心跳截止时间] --> C
     end
     
-    subgraph "Endpoint"
-         C{"calculate_next_wakeup_time()"} -- "min(Deadline_A, Deadline_B, ...)" --> D[Next Wakeup Time]
+    subgraph "端点"
+         C{"calculate_next_wakeup_time()"} -- "min(截止时间_A, 截止时间_B, ...)" --> D[下一次唤醒时间]
     end
     
-    subgraph "Event Loop"
-        E(tokio::select!) -- "sleep_until(Next Wakeup Time)" --> F[Timeout Branch]
+    subgraph "事件循环"
+        E(tokio::select!) -- "sleep_until(下一次唤醒时间)" --> F[超时分支]
     end
 
     D --> E
+
+    style A fill:#333,color:#fff
+    style B fill:#333,color:#fff
+    style C fill:#333,color:#fff
+    style D fill:#333,color:#fff
+    style E fill:#333,color:#fff
+    style F fill:#333,color:#fff
 ```
 **工作流程**:
 1. `Endpoint`的`calculate_next_wakeup_time`方法被调用。

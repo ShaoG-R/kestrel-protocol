@@ -39,35 +39,43 @@
 
 ```mermaid
 graph TD
-    subgraph "Event Loop"
-        A["Event Captured: (Frame, SocketAddr)"] --> B(EventDispatcher::dispatch_frame)
+    subgraph "事件循环"
+        A["捕获事件: (帧, 套接字地址)"] --> B(事件分发器::分发帧)
     end
 
-    subgraph "Processing Module"
-        B --> C{StaticFrameProcessorRegistry::route_frame}
-        C -- "match ProcessorType::from_frame(&frame)" --> D{Static Dispatch}
+    subgraph "处理模块"
+        B --> C{静态帧处理器注册表::路由帧}
+        C -- "匹配 ProcessorType::from_frame(&frame)" --> D{静态分派}
         
-        D -- "ProcessorType::Ack" --> E[AckProcessor::process_frame]
-        D -- "ProcessorType::Push" --> F[PushProcessor::process_frame]
-        D -- "ProcessorType::Connection" --> G[ConnectionProcessor::process_frame]
-        D -- "ProcessorType::Path" --> H[PathProcessor::process_frame]
+        D -- "处理器类型::Ack" --> E[Ack处理器::处理帧]
+        D -- "处理器类型::Push" --> F[Push处理器::处理帧]
+        D -- "处理器类型::Connection" --> G[连接处理器::处理帧]
+        D -- "处理器类型::Path" --> H[路径处理器::处理帧]
         
-        subgraph "Processors"
-            E -- "Uses" --> I
-            F -- "Uses" --> I
-            G -- "Uses" --> I
-            H -- "Uses" --> I
+        subgraph "处理器"
+            E -- "使用" --> I
+            F -- "使用" --> I
+            G -- "使用" --> I
+            H -- "使用" --> I
         end
         
-        subgraph "Abstraction Layer"
+        subgraph "抽象层"
             I(dyn ProcessorOperations)
         end
     end
 
-    subgraph "Endpoint State & Logic"
-        J[Endpoint<T>] -- "Implements" --> I
+    subgraph "端点状态与逻辑"
+        J[端点<T>] -- "实现" --> I
     end
 
+    style A fill:#333,color:#fff
+    style B fill:#333,color:#fff
+    style D fill:#333,color:#fff
+    style E fill:#333,color:#fff
+    style F fill:#333,color:#fff
+    style G fill:#333,color:#fff
+    style H fill:#333,color:#fff
+    style J fill:#333,color:#fff
     style C fill:#f9f,stroke:#333,stroke-width:2px
     style I fill:#bbf,stroke:#333,stroke-width:2px
 ```

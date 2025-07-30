@@ -40,28 +40,29 @@
 
 ```mermaid
 graph LR
-    subgraph Endpoint
-        A[Other Components e.g., EventLoop]
+    subgraph 端点
+        A[其他组件，如事件循环]
     end
 
-    subgraph "Lifecycle Module"
-        subgraph "Manager"
-            B(DefaultLifecycleManager)
+    subgraph "生命周期模块"
+        subgraph "管理器"
+            B(默认生命周期管理器)
         end
-        subgraph "Executor"
-            C(StateTransitionExecutor)
+        subgraph "执行器"
+            C(状态转换执行器)
         end
-        subgraph "Validator"
-            D(StateValidator)
+        subgraph "验证器"
+            D(状态验证器)
         end
         
-        B -- "execute_transition()" --> C
-        C -- "is_valid_transition()" --> D
-        C -- "Broadcasts" --> E((LifecycleEvent Listeners))
+        B -- "执行转换()" --> C
+        C -- "是否为有效转换()" --> D
+        C -- "广播" --> E((生命周期事件监听器))
     end
     
-    A -- "Calls e.g., transition_to()" --> B
+    A -- "调用 e.g., transition_to()" --> B
 
+    style A fill:#333,color:#fff
     style B fill:#bbf,stroke:#333,stroke-width:2px
     style C fill:#bfb,stroke:#333,stroke-width:2px
     style D fill:#fbb,stroke:#333,stroke-width:2px

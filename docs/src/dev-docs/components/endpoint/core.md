@@ -39,36 +39,43 @@
 
 ```mermaid
 graph TD
-    subgraph "用户应用 (User App)"
-        A[Stream API] -- "StreamCommand (e.g. write, close)" --> B
+    subgraph "用户应用"
+        A[流API] -- "流命令 (如 写入, 关闭)" --> B
     end
 
-    subgraph "Endpoint Core"
-        B(Channel: rx_from_stream) --> C{"Event Loop (tokio::select!)"}
+    subgraph "端点核心"
+        B(通道: rx_from_stream) --> C{"事件循环 (tokio::select!)"}
         
-        C -- "Process Frame" --> D[EventDispatcher]
-        D -- "Call handler by state" --> E[State-specific Logic]
+        C -- "处理帧" --> D[事件分发器]
+        D -- "按状态调用处理器" --> E[特定状态逻辑]
         
-        C -- "Process Command" --> F[Stream Command Handler]
-        F -- "Write to buffer" --> G[Reliability Layer]
+        C -- "处理命令" --> F[流命令处理器]
+        F -- "写入缓冲区" --> G[可靠性层]
 
-        C -- "Timeout" --> H["Timeout Handlers (RTO, Idle)"]
-        H -- "Get frames to retransmit" --> G
+        C -- "超时" --> H["超时处理器 (RTO, 空闲)"]
+        H -- "获取需重传的帧" --> G
         
-        I[Packetize & Send Logic] -- "Pull data" --> G
-        I -- "Frames" --> J[PacketBuilder]
-        J -- "Datagram" --> K(Channel: tx_to_socket)
+        I[打包并发送逻辑] -- "拉取数据" --> G
+        I -- "帧" --> J[包构造器]
+        J -- "数据报" --> K(通道: tx_to_socket)
     end
 
-    subgraph "Socket Layer"
-        L(Channel: rx_from_endpoint) --> K
-        M(Channel: tx_to_endpoint) -- "Frame" --> N
+    subgraph "套接字层"
+        L(通道: rx_from_endpoint) --> K
+        M(通道: tx_to_endpoint) -- "帧" --> N
     end
     
-    subgraph "网络 (Network)"
-       N(Channel: receiver) --> C
+    subgraph "网络"
+       N(通道: receiver) --> C
     end
     
+    style A fill:#333,color:#fff
+    style C fill:#333,color:#fff
+    style D fill:#333,color:#fff
+    style E fill:#333,color:#fff
+    style F fill:#333,color:#fff
+    style H fill:#333,color:#fff
+    style I fill:#333,color:#fff
     style G fill:#f9f,stroke:#333,stroke-width:2px
     style J fill:#ccf,stroke:#333,stroke-width:2px
 ```

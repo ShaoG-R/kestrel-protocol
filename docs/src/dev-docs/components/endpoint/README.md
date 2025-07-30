@@ -36,16 +36,21 @@
 
 ```mermaid
 graph TD
-    subgraph "Endpoint"
-        A["User-Facing Logic<br>(Stream API Adaptation)"]
-        B["Connection Lifecycle Management<br>(`lifecycle` module)"]
-        C["Event Processing & Dispatching<br>(`processing` module)"]
-        D["Reliability & Congestion Control<br>(`ReliabilityLayer`)"]
+    subgraph "端点"
+        A["面向用户的逻辑<br>(流API适配)"]
+        B["连接生命周期管理<br>(`lifecycle`模块)"]
+        C["事件处理与分发<br>(`processing`模块)"]
+        D["可靠性与拥塞控制<br>(`ReliabilityLayer`)"]
     end
 
     A --> B
     B --> C
     C --> D
+
+    style A fill:#333,color:#fff
+    style B fill:#333,color:#fff
+    style C fill:#333,color:#fff
+    style D fill:#333,color:#fff
 ```
 - **应用层逻辑**: 负责将`Stream`的字节流接口与`ReliabilityLayer`的面向数据包的接口进行适配。
 - **生命周期层**: 管理连接的宏观状态（建立、关闭等）。
@@ -58,32 +63,38 @@ graph TD
 
 ```mermaid
 graph TD
-    subgraph "Socket Layer"
-        A[Socket EventLoop] -- "Frame In" --> B(ChannelManager)
-        B -- "FrameBatch Out" --> A
+    subgraph "套接字层"
+        A[套接字事件循环] -- "帧入" --> B(通道管理器)
+        B -- "帧批次出" --> A
     end
 
-    subgraph "User Application"
-        C[Stream API] -- "StreamCommand In" --> E(ChannelManager)
-        E -- "Reassembled Bytes Out" --> C
+    subgraph "用户应用"
+        C[流API] -- "流命令入" --> E(通道管理器)
+        E -- "重组字节流出" --> C
     end
 
-    subgraph "Endpoint Task"
-        B -- "Frame" --> D{Endpoint EventLoop}
-        E -- "StreamCommand" --> D
+    subgraph "端点任务"
+        B -- "帧" --> D{端点事件循环}
+        E -- "流命令" --> D
 
-        D -- "Process Event" --> F[Processing Module]
-        F -- "Use" --> G[Lifecycle Module]
-        F -- "Use" --> H[Reliability Layer]
+        D -- "处理事件" --> F[处理模块]
+        F -- "使用" --> G[生命周期模块]
+        F -- "使用" --> H[可靠性层]
         
-        D -- "Packetize & Send" --> H
-        H -- "Reassemble" --> D
-        D -- "Send to User" --> E
+        D -- "打包并发送" --> H
+        H -- "重组" --> D
+        D -- "发送给用户" --> E
 
-        D -- "Check Timeouts" --> I[Timing Module]
-        I -- "Wakeup Time" --> D
+        D -- "检查超时" --> I[计时模块]
+        I -- "唤醒时间" --> D
     end
     
+    style A fill:#333,color:#fff
+    style C fill:#333,color:#fff
+    style D fill:#333,color:#fff
+    style F fill:#333,color:#fff
+    style G fill:#333,color:#fff
+    style I fill:#333,color:#fff
     style H fill:#f9f,stroke:#333,stroke-width:2px
 ```
 

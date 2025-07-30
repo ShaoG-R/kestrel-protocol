@@ -76,34 +76,42 @@ pub enum StreamCommand {
 
 ```mermaid
 graph TD
-    subgraph "Socket Layer"
-        A[Socket EventLoop]
+    subgraph "套接字层"
+        A[套接字事件循环]
     end
     
-    subgraph "User Application"
-        B[Stream API]
+    subgraph "用户应用"
+        B[流 API]
     end
 
-    subgraph "Endpoint Task"
-        subgraph "ChannelManager"
+    subgraph "端点任务"
+        subgraph "通道管理器"
             C(rx_from_socket)
             D(tx_to_socket)
             E(rx_from_stream)
             F(tx_to_stream)
         end
-        G[Endpoint Core Logic]
+        G[端点核心逻辑]
     end
 
-    A -- "Frame" --> C
-    D -- "FrameBatch" --> A
+    A -- "帧" --> C
+    D -- "帧批次" --> A
     
-    B -- "StreamCommand" --> E
+    B -- "流命令" --> E
     F -- "Vec<Bytes>" --> B
 
     C --> G
     E --> G
     G --> D
     G --> F
+
+    style A fill:#333,color:#fff
+    style B fill:#333,color:#fff
+    style C fill:#333,color:#fff
+    style D fill:#333,color:#fff
+    style E fill:#333,color:#fff
+    style F fill:#333,color:#fff
+    style G fill:#333,color:#fff
 ```
 **`ChannelManager`的职责**:
 - `receiver`: 从`Socket`层接收属于该`Endpoint`的网络帧。
