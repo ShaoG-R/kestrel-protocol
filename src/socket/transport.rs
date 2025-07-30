@@ -23,7 +23,7 @@ pub use command::TransportCommand;
 pub use sender::transport_sender_task;
 pub use udp::UdpTransport;
 
-pub(crate) use manager::{TransportManager};
+pub(crate) use manager::TransportManager;
 
 /// A batch of frames to be sent to a remote address.
 ///
