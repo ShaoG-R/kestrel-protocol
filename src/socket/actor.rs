@@ -5,12 +5,12 @@
 use super::{
     command::SocketActorCommand,
     draining::DrainingPool,
-    transport::{BindableTransport, TransportCommand},
+    transport::{BindableTransport, TransportManager},
 };
 use crate::{
     config::Config,
     core::{endpoint::Endpoint, stream::Stream},
-    error::{Error, Result},
+    error::{Result},
     packet::frame::Frame,
 };
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
@@ -35,12 +35,13 @@ pub(crate) struct ConnectionMeta {
 ///
 /// 此actor在专用任务中运行，并处理来自公共 `ReliableUdpSocket` 句柄的命令和来自传输的传入帧。
 pub(crate) struct TransportSocketActor<T: BindableTransport> {
-    pub(crate) transport: Arc<T>,
+    /// 传输管理器 - 负责所有底层传输操作
+    /// Transport manager - responsible for all low-level transport operations
+    pub(crate) transport_manager: TransportManager<T>,
     pub(crate) connections: HashMap<u32, ConnectionMeta>,
     pub(crate) addr_to_cid: HashMap<SocketAddr, u32>,
     pub(crate) draining_pool: DrainingPool,
     pub(crate) config: Arc<Config>,
-    pub(crate) send_tx: mpsc::Sender<TransportCommand<T>>,
     pub(crate) accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
     pub(crate) command_rx: mpsc::Receiver<SocketActorCommand>,
     pub(crate) command_tx: mpsc::Sender<SocketActorCommand>,
@@ -55,6 +56,10 @@ impl<T: BindableTransport> TransportSocketActor<T> {
             tokio::time::interval(self.config.connection.draining_cleanup_interval);
 
         loop {
+            // 获取传输引用用于接收操作
+            // Get transport reference for receive operations
+            let transport = self.transport_manager.transport();
+            
             tokio::select! {
                 // 1. Handle incoming actor commands.
                 // 1. 处理传入的 actor 命令。
@@ -67,7 +72,7 @@ impl<T: BindableTransport> TransportSocketActor<T> {
                 }
                 // 2. Handle incoming frames from transport.
                 // 2. 处理来自传输的传入帧。
-                Ok(datagram) = self.transport.recv_frames() => {
+                Ok(datagram) = transport.recv_frames() => {
                     debug!(
                         addr = %datagram.remote_addr,
                         frame_count = datagram.frames.len(),
@@ -118,7 +123,7 @@ impl<T: BindableTransport> TransportSocketActor<T> {
 
                 let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
-                let transport_tx = self.send_tx.clone();
+                let transport_tx = self.transport_manager.send_tx();
 
                 let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
                     Endpoint::new_client(
@@ -169,17 +174,7 @@ impl<T: BindableTransport> TransportSocketActor<T> {
                 new_local_addr,
                 response_tx,
             } => {
-                let result = async {
-                    let new_transport = Arc::new(T::bind(new_local_addr).await?);
-                    self.send_tx
-                        .send(TransportCommand::SwapTransport(new_transport.clone()))
-                        .await
-                        .map_err(|_| Error::ChannelClosed)?;
-                    self.transport = new_transport;
-                    info!(addr = ?new_local_addr, "Transport rebound to new local address");
-                    Ok(())
-                }
-                .await;
+                let result = self.transport_manager.rebind(new_local_addr).await.map(|_| ());
                 let _ = response_tx.send(result);
             }
             SocketActorCommand::UpdateAddr { cid, new_addr } => {
@@ -314,7 +309,7 @@ impl<T: BindableTransport> TransportSocketActor<T> {
             }
             let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
 
-            let transport_tx = self.send_tx.clone();
+            let transport_tx = self.transport_manager.send_tx();
 
             let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
                 Endpoint::new_server(

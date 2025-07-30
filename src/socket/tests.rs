@@ -99,13 +99,16 @@ impl ActorTestHarness {
 
         let config = Arc::new(Config::default());
 
+        // 创建传输管理器用于测试
+        // Create transport manager for testing
+        let transport_manager = super::transport::TransportManager::new(mock_transport.clone(), send_tx);
+
         let mut actor = TransportSocketActor {
-            transport: mock_transport.clone(),
+            transport_manager,
             connections: HashMap::new(),
             addr_to_cid: HashMap::new(),
             draining_pool: DrainingPool::new(config.connection.drain_timeout),
             config: config.clone(),
-            send_tx,
             accept_tx,
             command_rx,
             command_tx: command_tx.clone(),

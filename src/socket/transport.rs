@@ -8,6 +8,7 @@
 //! 此模块提供底层网络传输的抽象，处理帧的序列化/反序列化、地址管理和路由。
 
 pub mod command;
+pub mod manager;
 pub mod sender;
 pub mod udp;
 
@@ -21,6 +22,8 @@ use std::{fmt::Debug, net::SocketAddr};
 pub use command::TransportCommand;
 pub use sender::transport_sender_task;
 pub use udp::UdpTransport;
+
+pub(crate) use manager::{TransportManager};
 
 /// A batch of frames to be sent to a remote address.
 ///

@@ -76,19 +76,22 @@ impl<T: BindableTransport> TransportReliableUdpSocket<T> {
 
         let config = Arc::new(Config::default());
 
+        // 创建传输管理器
+        // Create transport manager
+        let transport_manager = super::transport::TransportManager::new(transport, send_tx);
+
         let mut actor = TransportSocketActor {
-            transport,
+            transport_manager,
             connections: std::collections::HashMap::new(),
             addr_to_cid: std::collections::HashMap::new(),
             draining_pool: DrainingPool::new(config.connection.drain_timeout),
             config: config.clone(),
-            send_tx,
             accept_tx,
             command_rx,
             command_tx: command_tx.clone(),
         };
 
-        info!(addr = ?actor.transport.local_addr().ok(), "TransportReliableUdpSocket actor created and running");
+        info!(addr = ?actor.transport_manager.local_addr().ok(), "TransportReliableUdpSocket actor created and running");
 
         // Spawn the actor task
         tokio::spawn(async move {
