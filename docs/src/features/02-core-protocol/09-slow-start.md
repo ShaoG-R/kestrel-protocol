@@ -6,8 +6,8 @@
 
 **实现位置:**
 
-- **核心逻辑**: `src/congestion/vegas.rs` (`Vegas::on_ack`, `Vegas::on_packet_loss`)
-- **状态定义**: `src/congestion/vegas.rs` (`State` enum)
+- **核心逻辑**: `src/core/reliability/congestion/vegas.rs` (`Vegas::on_ack`, `Vegas::on_packet_loss`)
+- **状态定义**: `src/core/reliability/congestion/vegas.rs` (`State` enum)
 - **相关配置**: `src/config.rs` (`Config::initial_cwnd_packets`, `Config::initial_ssthresh`)
 
 ### 慢启动工作原理

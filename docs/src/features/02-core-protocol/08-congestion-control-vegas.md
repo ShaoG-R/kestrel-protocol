@@ -6,8 +6,8 @@
 
 **实现位置:**
 
-- **Trait定义**: `src/congestion.rs` (`CongestionControl`)
-- **Vegas实现**: `src/congestion/vegas.rs` (`Vegas`)
+- **Trait定义**: `src/core/reliability/congestion/congestion.rs` (`CongestionControl`)
+- **Vegas实现**: `src/core/reliability/congestion/vegas.rs` (`Vegas`)
 - **配置参数**: `src/config.rs` (`vegas_alpha_packets`, `vegas_beta_packets`)
 
 ### 1. Vegas的核心思想
