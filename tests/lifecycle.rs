@@ -487,7 +487,7 @@ async fn test_high_concurrency_1rtt_connections() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 32)]
 async fn test_high_concurrency_large_transfer() {
     init_tracing();
-    const NUM_CLIENTS: usize = 1; // Reduced from 1000 to manage test duration with larger payloads
+    const NUM_CLIENTS: usize = 2; // Reduced from 1000 to manage test duration with larger payloads
     const TRANSFER_SIZE: usize = 1024; // 1KB
     tracing::info!(
         "[Test] Starting high concurrency large transfer test with {} clients, {}B each way...",

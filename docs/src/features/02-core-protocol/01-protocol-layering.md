@@ -6,77 +6,86 @@
 
 ### 1. 架构概览
 
-协议栈从上到下可以分为四个逻辑层次，其核心设计思想是 **"编排与实现分离"**。
+协议栈从上到下可以分为六个逻辑层次，其核心设计思想是 **"分层解耦，各司其职"**。
 
-1.  **L4: API层 (`Stream`)**:
+1.  **L6: API层 (`stream`)**:
     *   **职责**: 为用户提供符合人体工程学的 `AsyncRead`/`AsyncWrite` 字节流接口，隐藏所有底层包的细节。并将用户的读写操作转换为命令，通过MPSC通道发送给对应的 `Endpoint` 任务进行处理。
 
-2.  **L3: 端点层 (`Endpoint`)**:
-    *   **职责**: 作为连接的"大脑"和中央编排器，负责管理单个连接的完整生命周期（握手、通信、连接迁移、关闭），并根据状态向下层的 `ReliabilityLayer` 发出明确指令。它处理来自API层和网络层的所有事件，但不实现具体的可靠性算法。
-    *   **核心组件**:
-        *   `LifecycleManager`: 统一的连接生命周期管理器，负责所有状态转换、验证和连接生命周期事件的协调。完全替代了旧的StateManager，提供更现代化和一致的状态管理。
-        *   `EventDispatcher`: 事件分发器，将不同类型的帧分发给相应的处理器。
-        *   `FrameProcessors`: 专门的帧处理器集合，分别处理连接控制、数据传输、确认和路径验证等不同类型的帧。
+2.  **L5: 连接管理层 (`socket`)**:
+    *   **职责**: 协议栈的“大脑”和事件中枢，在 `SocketEventLoop` 中管理所有连接的生命周期。其核心是`FrameRouter`，它能够智能地将网络帧分派给正确的`Endpoint`实例，并原生支持连接迁移。
 
-3.  **L2: 可靠性层 (`ReliabilityLayer`)**:
+3.  **L4: 端点层 (`endpoint`)**:
+    *   **职责**: 作为单个连接的"微观世界"，在独立的Tokio任务中运行，编排连接的生命周期，并根据状态向下层的 `ReliabilityLayer` 发出明确指令。它处理来自API层和网络层的所有事件，但不实现具体的可靠性算法。
+
+4.  **L3: 可靠性层 (`reliability`)**:
     *   **职责**: 这是一个综合性的功能实现层，封装了基于SACK的ARQ（自动重传请求）、动态RTO计算、快速重传、滑动窗口流量控制等核心可靠性机制。它接收来自端点层的清晰指令，执行具体的算法逻辑。
 
-4.  **L1: 拥塞控制层 (`CongestionControl` Trait)**:
-    *   **职责**: 作为可插拔的算法层，当前实现了基于延迟的Vegas算法，并且设计为trait形式以支持未来轻松集成其他算法（如BBR）。
+5.  **L2: 拥塞控制层 (`congestion`)**:
+    *   **职责**: 作为可插拔的算法层，通过`CongestionControl` Trait实现。当前默认实现了基于延迟的Vegas算法，并且该设计支持未来轻松集成其他算法（如BBR）。
+
+6.  **L1: 传输抽象层 (`transport`)**:
+    *   **职责**: 抽象底层I/O操作，提供高性能的UDP数据包收发能力。它将发送和接收逻辑解耦到独立的异步任务中，并实现批量发送优化。
 
 ```mermaid
 graph TD
-    %% 用户应用层
     subgraph "用户应用 (User Application)"
         APP[Application Code]
     end
 
-    %% L4: API层
-    subgraph "L4: API层 (Stream Interface)"
-        STREAM[Stream<br/>AsyncRead/AsyncWrite]
+    subgraph "L6: API层 (Stream API)"
+        STREAM[Stream]
+    end
+    
+    subgraph "L5: 连接管理层 (Socket Layer)"
+        SOCKET[SocketEventLoop & FrameRouter]
     end
 
-    %% L3: 端点层
-    subgraph "L3: 端点层 (Endpoint Layer)"
-        ENDPOINT[Endpoint<br/>连接编排器]
+    subgraph "L4: 端点层 (Endpoint Layer)"
+        ENDPOINT[Endpoint]
     end
 
-    %% L2: 可靠性层
-    subgraph "L2: 可靠性层 (Reliability Layer)"
-        RELIABILITY[ReliabilityLayer<br/>ARQ + 滑动窗口]
+    subgraph "L3: 可靠性层 (Reliability Layer)"
+        RELIABILITY[ReliabilityLayer]
     end
 
-    %% L1: 拥塞控制层
-    subgraph "L1: 拥塞控制层 (Congestion Control)"
-        VEGAS[Vegas Algorithm<br/>基于延迟的拥塞控制]
+    subgraph "L2: 拥塞控制层 (Congestion Control)"
+        CONGESTION[CongestionControl Trait]
+    end
+    
+    subgraph "L1: 传输层 (Transport Layer)"
+        TRANSPORT[Transport & Batch Sender]
     end
 
-    %% 网络层
-    subgraph "网络传输 (Network Transport)"
-        UDP[UDP Socket]
+    subgraph "网络 (Network)"
+        NETWORK_IO[Physical UDP Socket]
     end
 
-    %% 垂直数据流
-    APP-. "read()/write()" .->STREAM
-    STREAM <-->|StreamCommand| ENDPOINT
-    ENDPOINT <-->|指令/数据| RELIABILITY
-    RELIABILITY <-->|窗口调整| VEGAS
-    RELIABILITY <-->|发送/接收包| UDP
-
-    %% 样式定义 (深色主题)
-    classDef l4 fill:#2C3E50,color:#ECF0F1,stroke:#BDC3C7
-    classDef l3 fill:#34495E,color:#ECF0F1,stroke:#BDC3C7
-    classDef l2 fill:#16A085,color:#FFFFFF,stroke:#BDC3C7
-    classDef l1 fill:#27AE60,color:#FFFFFF,stroke:#BDC3C7
-    classDef network fill:#7F8C8D,color:#FFFFFF,stroke:#BDC3C7
-    classDef default fill:#34495E,color:#ECF0F1,stroke:#BDC3C7
-
+    APP -- "read()/write()" --> STREAM
+    STREAM -- "StreamCommand" --> ENDPOINT
+    SOCKET -- "Manages" --> ENDPOINT
+    SOCKET -- "Routes Frame to" --> ENDPOINT
+    ENDPOINT -- "Uses" --> RELIABILITY
+    ENDPOINT -- "Submits FrameBatch to" --> SOCKET
+    RELIABILITY -- "Uses" --> CONGESTION
+    SOCKET -- "Sends FrameBatch via" --> TRANSPORT
+    TRANSPORT -- "Reads/Writes" --> NETWORK_IO
+    
+    classDef l6 fill:#2C3E50,color:#ECF0F1,stroke:#BDC3C7
+    classDef l5 fill:#34495E,color:#ECF0F1,stroke:#BDC3C7
+    classDef l4 fill:#8E44AD,color:#FFFFFF,stroke:#BDC3C7
+    classDef l3 fill:#16A085,color:#FFFFFF,stroke:#BDC3C7
+    classDef l2 fill:#27AE60,color:#FFFFFF,stroke:#BDC3C7
+    classDef l1 fill:#7F8C8D,color:#FFFFFF,stroke:#BDC3C7
+    classDef default fill:#333,color:#fff
+    
     class APP default
-    class STREAM l4
-    class ENDPOINT l3
-    class RELIABILITY l2
-    class VEGAS l1
-    class UDP network
+    class STREAM l6
+    class SOCKET l5
+    class ENDPOINT l4
+    class RELIABILITY l3
+    class CONGESTION l2
+    class TRANSPORT l1
+    class NETWORK_IO default
 ```
 
 ### 2. Endpoint内部架构
@@ -151,21 +160,24 @@ graph TD
 
 #### 3.1 写数据路径 (Write Path)
 
-1.  **用户调用**: 用户调用 `stream.write(data)`
-2.  **命令转换**: `Stream` 将写请求转换为 `StreamCommand::Write`，通过MPSC通道发送给 `Endpoint`
-3.  **状态检查**: `Endpoint` 通过 `LifecycleManager` 检查当前连接状态是否允许发送数据
-4.  **可靠性处理**: 将数据交给 `ReliabilityLayer` 进行分包、序号标记、缓冲等处理
-5.  **拥塞控制**: `ReliabilityLayer` 咨询 `CongestionControl` 当前的发送窗口大小
-6.  **网络发送**: 构造最终的UDP包并发送到网络
+1.  **用户调用**: 用户调用 `stream.write(data)`。
+2.  **命令转换**: `Stream` 将写请求转换为 `StreamCommand::SendData`，通过MPSC通道发送给 `Endpoint`。
+3.  **状态检查**: `Endpoint` 通过 `LifecycleManager` 检查当前连接状态是否允许发送数据。
+4.  **可靠性处理**: `Endpoint`将数据交给 `ReliabilityLayer`。`ReliabilityLayer`的`Packetizer`根据拥塞和流量窗口的许可，将数据打包成`PUSH`帧。
+5.  **帧聚合**: `Endpoint`收集`ReliabilityLayer`生成的`PUSH`帧和`ACK`帧，聚合成一个`FrameBatch`。
+6.  **提交发送**: `Endpoint`将`FrameBatch`提交给`Socket`任务。
+7.  **批量发送**: `Socket`将`FrameBatch`转发给`transport_sender_task`，后者通过`Transport`层接口进行批量网络发送。
 
 #### 3.2 读数据路径 (Read Path)
 
-1.  **网络接收**: 从UDP socket接收到原始包
-2.  **事件分发**: `EventDispatcher` 根据帧类型将包分发给相应的 `FrameProcessor`
-3.  **帧处理**: 各个处理器根据帧类型执行相应逻辑（数据重组、确认处理、状态更新等）
-4.  **状态协调**: 处理器通过 `LifecycleManager` 进行必要的状态检查和更新
-5.  **数据重组**: `ReliabilityLayer` 将乱序的包重新排序，组装成连续的字节流
-6.  **用户接收**: 通过MPSC通道将重组后的数据发送给 `Stream`，用户通过 `stream.read()` 获取
+1.  **网络接收**: `Transport`层的接收任务从UDP socket接收到原始包，解码成`Frame`。
+2.  **路由分发**: `Transport`将解码后的数据报发送给`SocketEventLoop`。`FrameRouter`根据连接ID，将`Frame`路由到正确的`Endpoint`任务。
+3.  **事件处理**: `Endpoint`收到`Frame`，交由内部的`EventDispatcher`分发给相应的`FrameProcessor`。
+4.  **可靠性处理**:
+    *   `DataProcessor`将`PUSH`帧交给`ReliabilityLayer`的`ReceiveBuffer`进行去重和排序。
+    *   `AckProcessor`将`ACK`帧交给`ReliabilityLayer`的`SackManager`更新在途包列表和RTT。
+5.  **数据重组**: `Endpoint`调用`ReliabilityLayer`的`reassemble`方法，从`ReceiveBuffer`中提取出连续有序的字节流。
+6.  **用户接收**: `Endpoint`通过MPSC通道将重组后的数据发送给 `Stream`，用户通过 `stream.read()` 获取。
 
 #### 3.3 生命周期管理 (Lifecycle Management)
 
@@ -223,4 +235,4 @@ graph TD
 
 *   帧处理器采用零拷贝设计，减少内存分配
 *   支持包聚合和批处理，提高网络效率
-*   事件驱动的架构，减少不必要的轮询 
+*   事件驱动的架构，减少不必要的轮询

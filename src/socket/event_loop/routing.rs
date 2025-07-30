@@ -10,7 +10,7 @@ use crate::socket::event_loop::draining::DrainingPool;
 /// 帧路由管理器 - 负责帧的智能路由和连接映射管理
 /// Frame Router Manager - Handles intelligent frame routing and connection mapping
 ///
-/// 该组件管理所有连接的路由状态，包括活跃连接映射、地址路由表和排水连接池。
+/// 该组件管理所有连接的路由状态，包括活跃连接映射、地址路由表和 draining 连接池。
 /// 它提供统一的帧分发接口，支持连接迁移和智能路由决策。
 ///
 /// This component manages routing state for all connections, including active connection
@@ -24,7 +24,7 @@ pub(crate) struct FrameRouter {
     /// 地址路由表：远程地址 -> 本地CID (握手期间使用)
     /// Address routing table: Remote address -> Local CID (used during handshake)
     address_routing: HashMap<SocketAddr, u32>,
-    /// 正在排水的连接ID池
+    /// 正在 draining 的连接ID池
     /// Pool of connection IDs being drained
     draining_pool: DrainingPool,
 }
@@ -39,7 +39,7 @@ pub(crate) enum RoutingResult {
     /// 连接未找到，需要上层处理
     /// Connection not found, needs upper layer handling
     ConnectionNotFound,
-    /// 连接已在排水状态，已忽略
+    /// 连接已在 draining 状态，已忽略
     /// Connection is in draining state, ignored
     ConnectionDraining,
 }
@@ -49,7 +49,7 @@ impl FrameRouter {
     /// Creates a new frame router manager
     ///
     /// # Arguments
-    /// * `draining_pool` - 排水连接池实例
+    /// * `draining_pool` -  draining 连接池实例
     ///
     /// # Arguments  
     /// * `draining_pool` - Draining connection pool instance
@@ -127,7 +127,7 @@ impl FrameRouter {
         //    We also check the draining CIDs to provide better logging for why a packet might be dropped.
         if self.draining_pool.contains(&cid) {
             debug!(
-                "忽略来自排水连接的数据包 {} CID {}: {:?} | Ignoring packet for draining connection from {} with CID {}: {:?}",
+                "忽略来自 draining 连接的数据包 {} CID {}: {:?} | Ignoring packet for draining connection from {} with CID {}: {:?}",
                 remote_addr, cid, frame, remote_addr, cid, frame
             );
             RoutingResult::ConnectionDraining
@@ -208,7 +208,7 @@ impl FrameRouter {
     /// Remove connection and its associated state
     ///
     /// 这是连接清理的权威方法。它会从活跃连接映射和地址路由表中
-    /// 移除连接，并将CID移入排水池。
+    /// 移除连接，并将CID移入 draining 池。
     ///
     /// This is the authoritative method for connection cleanup. It removes
     /// the connection from active connections mapping and address routing table,
@@ -240,7 +240,7 @@ impl FrameRouter {
         // Instead of forgetting the CID, move it to the draining state
         self.draining_pool.insert(cid);
 
-        debug!(cid = %cid, "清理连接状态完成，CID现在处于排水状态 | Cleaned up connection state. CID is now in draining state.");
+        debug!(cid = %cid, "清理连接状态完成，CID现在处于 draining 状态 | Cleaned up connection state. CID is now in draining state.");
     }
 
     /// 检查连接是否存在
@@ -249,13 +249,13 @@ impl FrameRouter {
         self.active_connections.contains_key(&cid)
     }
 
-    /// 检查CID是否在排水池中
+    /// 检查CID是否在 draining 池中
     /// Check if CID is in draining pool
     pub(crate) fn is_draining(&self, cid: u32) -> bool {
         self.draining_pool.contains(&cid)
     }
 
-    /// 清理排水池
+    /// 清理 draining 池
     /// Cleanup draining pool
     pub(crate) fn cleanup_draining_pool(&mut self) {
         self.draining_pool.cleanup();

@@ -8,7 +8,7 @@
 1.  **极致异步与无锁化 (Async-first & Lock-free):**
     *   所有IO操作和内部状态管理必须是完全异步的。
     *   严格禁止使用任何形式的阻塞锁 (`std::sync::Mutex`, `parking_lot::Mutex` 等)。
-    *   优先采用消息传递（`tokio::sync::mpsc`）和原子操作 (`std::sync::atomic`) 来管理并发状态，保证数据在不同任务间的安全流转，将共享状态的修改权限定在单一任务内。
+    *   优先采用消息传递（`tokio::sync::mpsc`）和原子操作 (`std::sync::atomic`, `ArcSwap`) 来管理并发状态，保证数据在不同任务间的安全流转，将共享状态的修改权限定在单一任务内。
 
 2.  **为极差网络环境优化 (Optimized for Unreliable Networks):**
     *   协议设计必须显式地处理高丢包率、高延迟和网络抖动（Jitter）的场景。
@@ -58,7 +58,7 @@
 
 **长头部 (Long Header)**
 *用于 `SYN`, `SYN-ACK`。包含版本信息和完整的连接ID。*
-格式待定，但至少应包含 `command`, `protocol_version`, `connection_id`。
+格式待定，但至少应包含 `command`, `protocol_version`, `source_cid`, `destination_cid`。
 
 ### 2.2. 连接生命周期 (Connection Lifecycle)
 
@@ -97,49 +97,66 @@
 
 ### 3.1. 核心组件 (Core Components)
 
-*   `ReliableUdpSocket`: 对外的主要接口。它内部持有一个UDP套接字，并负责接收所有传入的数据包。它像一个路由器，根据远端 `SocketAddr` 将包分发给对应的 `Endpoint` 实例。
-*   `Endpoint`: 代表一个独立的、可靠的连接端点。这是实现协议核心逻辑的地方。**每个 `Endpoint` 实例及其所有状态都应由一个独立的Tokio任务 (`tokio::task`)拥有和管理。** `Endpoint` 内部需要实现完整的协议状态机、可靠性机制和拥塞控制算法。
-*   `SendBuffer` / `ReceiveBuffer`: `Endpoint` 内部用于管理待发送、待确认、乱序到达等数据包的缓冲区。
+*   **`TransportReliableUdpSocket` / `TransportListener`**: 协议栈对外的统一用户接口。`TransportReliableUdpSocket`负责发起新连接，而`TransportListener`负责接收传入的连接。它们共同构成了用户与协议栈交互的入口点。
+*   **`SocketEventLoop`**: 协议栈的“大脑”和事件中枢。它在一个专用的异步任务中运行，负责统一处理所有I/O事件，包括接收UDP数据包、处理用户API命令（如`connect`）以及管理所有连接的生命周期。
+*   **`FrameRouter`**: `SocketEventLoop`内部的智能路由引擎。它维护着`ConnectionId -> Endpoint`和`SocketAddr -> ConnectionId`的双重映射，能准确地将网络帧分派给正确的`Endpoint`实例，并原生支持连接迁移（NAT穿透）。
+*   **`Endpoint`**: 代表一个独立的、可靠的连接端点。这是实现协议核心逻辑的地方。**每个`Endpoint`实例及其所有状态都由一个独立的Tokio任务(`tokio::task`)拥有和管理。** `Endpoint`内部实现了完整的协议状态机，并拥有一个`ReliabilityLayer`实例来处理可靠性机制。
+*   **`ReliabilityLayer`**: `Endpoint`内部的可靠性引擎，聚合了ARQ、SACK、拥塞控制（`Vegas`）、收发缓冲区等所有核心可靠性算法。
+*   **`transport_sender_task`**: 一个专职的、独立的批量发送任务。协议栈中所有需要发送的数据包都会通过MPSC通道发送给它，由它进行聚合和批量发送，以优化网络性能。
 
 ### 3.2. 无锁并发模型 (Lock-free Concurrency Model)
 
-1.  **主接收循环 (Main Receive Loop):** `ReliableUdpSocket` 在一个专用任务中循环调用 `socket.recv_from()`。
-2.  **包分发 (Packet Demultiplexing):** 收到包后，根据远端 `SocketAddr` 从一个 `DashMap<SocketAddr, mpsc::Sender<Frame>>` 中找到对应 `Endpoint` 任务的发送端。
-3.  **消息传递 (Message Passing):** 将数据包通过 `mpsc` channel 发送给对应的 `Endpoint` 任务。
-4.  **连接隔离 (Connection Isolation):** 每个 `Endpoint` 任务在一个循环中处理来自 `ReliableUdpSocket` 的入站包和来自用户API的出站数据。由于所有状态（如发送/接收缓冲区、RTO计时器、拥塞窗口等）都归此任务私有，因此完全不需要任何锁。
-5.  **用户API (`read`/`write`):** 用户调用 `stream.write(data)` 时，数据也是通过一个 `mpsc` channel 发送给 `Endpoint` 任务进行处理。`read` 则从一个出站 `mpsc` channel 中接收已排序好的数据。
+协议栈的并发模型基于Actor模型构建，通过`tokio::sync::mpsc`通道实现任务间的异步消息传递，完全避免了传统锁。
+
+1.  **读写分离的I/O任务**:
+    *   **接收路径**: `SocketEventLoop`在其主循环中拥有UDP套接字的**接收权**。它持续调用`transport.recv_frames()`，接收所有传入的数据报。
+    *   **发送路径**: 一个独立的`transport_sender_task`拥有UDP套接字的**发送权**。所有`Endpoint`任务产生的待发数据包，都会通过一个全局MPSC通道发送给此任务。
+
+2.  **智能分发与路由**:
+    *   `SocketEventLoop`收到数据报后，将其解码成`Frame`。
+    *   `FrameRouter`根据`Frame`头部的连接ID（CID）或源地址，从映射表中找到对应的`Endpoint`任务的通信通道。
+
+3.  **消息驱动的`Endpoint`**:
+    *   `FrameRouter`将`Frame`通过MPSC通道发送给目标`Endpoint`任务。
+    *   用户通过`Stream` API写入数据时，数据同样通过MPSC通道作为命令发送给`Endpoint`任务。
+
+4.  **隔离的连接状态**:
+    *   每个`Endpoint`任务拥有其连接的全部状态（`ReliabilityLayer`、缓冲区、状态机等）。由于所有状态修改都在这个单一的任务内完成，因此从根本上杜绝了数据竞争。
 
 ```mermaid
 graph TD
-    subgraph "AI 实现的库"
-        subgraph "端点任务 1"
-            direction LR
-            C1_State[连接状态]
-            C1_Buf[缓冲区]
-            C1_Logic[协议逻辑]
-        end
-
-        subgraph "端点任务 2"
-            direction LR
-            C2_State[连接状态]
-            C2_Buf[缓冲区]
-            C2_Logic[协议逻辑]
-        end
-
-        subgraph "主套接字任务"
-            A[UdpSocket] -- "接收自" --> B{包解复用器}
-        end
-
-        B -- "mpsc::send to 端点1" --> C1_Logic
-        B -- "mpsc::send to 端点2" --> C2_Logic
+    subgraph "用户应用"
+        UserApp -- "write()" --> StreamHandle
+        StreamHandle -- "read()" --> UserApp
     end
 
-    UserApp[用户应用] -- "write()" --> UserToConn1["mpsc::send"]
-    UserToConn1 --> C1_Logic
+    subgraph "协议栈任务"
+        subgraph "Socket EventLoop (接收和路由)"
+            direction LR
+            RecvTask["Transport::recv_frames()"] --> Router{FrameRouter}
+        end
 
-    C1_Logic --> Conn1ToUser["mpsc::recv"]
-    Conn1ToUser -- "read()" --> UserApp
+        subgraph "Endpoint 任务 (每个连接一个)"
+            direction LR
+            EndpointLogic[协议逻辑<br>ReliabilityLayer]
+        end
 
+        subgraph "Transport Sender (批量发送)"
+            direction LR
+            SenderTask["transport_sender_task"] -- "Transport::send_frames()" --> Network
+        end
+
+        Router -- "mpsc::send(Frame)" --> EndpointLogic
+        StreamHandle -- "mpsc::send(Data)" --> EndpointLogic
+        EndpointLogic -- "mpsc::send(FrameBatch)" --> SenderTask
+        EndpointLogic -- "mpsc::send(Data)" --> StreamHandle
+    end
+
+    Network[物理UDP套接字] --> RecvTask
+
+    style UserApp fill:#333,color:#fff
+    style StreamHandle fill:#333,color:#fff
+    style Network fill:#333,color:#fff
 ```
 
 ### 3.3. 用户接口：流式传输 (User-Facing API: Stream Interface)
@@ -167,4 +184,4 @@ src/
 *   **加密 (Cryptography):** 根据明确要求，**本项目不包含加密层**。所有数据均以明文形式传输。这简化了协议实现、提升了性能，但牺牲了数据机密性和完整性。
 *   **错误处理:** 使用 `thiserror` crate 定义详细、有意义的错误类型。
 *   **依赖管理:** 保持最小化的依赖。
-*   **性能分析:** 在后期阶段，使用 `tokio-console` 或其他工具分析性能瓶颈。 
+*   **性能分析:** 在后期阶段，使用 `tokio-console` 或其他工具分析性能瓶颈。
