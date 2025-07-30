@@ -2,19 +2,23 @@
 
 use super::{
     command::SocketActorCommand,
-    draining::DrainingPool,
+    event_loop::SocketEventLoop,
     transport::{transport_sender_task, BindableTransport, TransportCommand},
-    actor::TransportSocketActor,
 };
 use crate::{
     config::Config,
     core::stream::Stream,
     error::{Error, Result},
-    socket::zerortt::InitialData,
 };
 use std::{marker::PhantomData, net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
 use tracing::info;
+use initial_data::InitialData;
+use crate::socket::event_loop::draining::DrainingPool;
+use crate::socket::event_loop::routing::FrameRouter;
+use crate::socket::event_loop::session_coordinator::SocketSessionCoordinator;
+
+pub mod initial_data;
 
 /// A listener for incoming reliable UDP connections using transport layer.
 ///
@@ -82,20 +86,26 @@ impl<T: BindableTransport> TransportReliableUdpSocket<T> {
         
         // 创建帧路由管理器
         // Create frame router manager
-        let frame_router = super::routing::FrameRouter::new(
+        let frame_router = FrameRouter::new(
             DrainingPool::new(config.connection.drain_timeout)
         );
 
-        let mut actor = TransportSocketActor {
+        // 创建会话协调器
+        // Create session coordinator
+        let session_coordinator = SocketSessionCoordinator::new(
             transport_manager,
             frame_router,
-            config: config.clone(),
+            config.clone(),
             accept_tx,
+            command_tx.clone(),
+        );
+
+        let mut actor = SocketEventLoop {
+            session_coordinator,
             command_rx,
-            command_tx: command_tx.clone(),
         };
 
-        info!(addr = ?actor.transport_manager.local_addr().ok(), "TransportReliableUdpSocket actor created and running");
+        info!(addr = ?actor.session_coordinator.transport_manager().local_addr().ok(), "TransportReliableUdpSocket actor created and running");
 
         // Spawn the actor task
         tokio::spawn(async move {

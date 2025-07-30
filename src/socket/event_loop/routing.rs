@@ -1,10 +1,11 @@
 //! 帧路由分发层 - 负责帧的智能路由和连接映射管理
 //! Frame Routing Layer - Handles intelligent frame routing and connection mapping
 
-use super::{actor::ConnectionMeta, draining::DrainingPool};
+use crate::socket::event_loop::ConnectionMeta;
 use crate::packet::frame::Frame;
 use std::{collections::HashMap, net::SocketAddr};
 use tracing::debug;
+use crate::socket::event_loop::draining::DrainingPool;
 
 /// 帧路由管理器 - 负责帧的智能路由和连接映射管理
 /// Frame Router Manager - Handles intelligent frame routing and connection mapping

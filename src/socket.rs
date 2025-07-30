@@ -1,13 +1,10 @@
 //! The socket-level API, including the main actor, commands, and handles.
-pub mod actor;
+pub mod event_loop;
 pub mod command;
-mod draining;
 pub mod handle;
-mod routing;
 pub mod transport;
-pub mod zerortt;
 
-pub use command::{SocketActorCommand};
+pub use command::SocketActorCommand;
 pub use transport::TransportCommand;
 pub use transport::{BindableTransport, Transport, UdpTransport};
 pub use handle::{TransportListener, TransportReliableUdpSocket};
