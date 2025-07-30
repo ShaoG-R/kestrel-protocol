@@ -4,7 +4,7 @@
 
 use super::{
     command::SocketActorCommand,
-    draining::DrainingPool,
+    routing::FrameRouter,
     transport::{BindableTransport, TransportManager},
 };
 use crate::{
@@ -13,13 +13,14 @@ use crate::{
     error::{Result},
     packet::frame::Frame,
 };
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 /// Metadata associated with each connection managed by the `ReliableUdpSocket`.
 ///
 /// 与每个由 `ReliableUdpSocket` 管理的连接相关联的元数据。
+#[derive(Debug)]
 pub(crate) struct ConnectionMeta {
     /// The channel sender to the connection's `Endpoint` task.
     /// 到连接 `Endpoint` 任务的通道发送端。
@@ -38,9 +39,9 @@ pub(crate) struct TransportSocketActor<T: BindableTransport> {
     /// 传输管理器 - 负责所有底层传输操作
     /// Transport manager - responsible for all low-level transport operations
     pub(crate) transport_manager: TransportManager<T>,
-    pub(crate) connections: HashMap<u32, ConnectionMeta>,
-    pub(crate) addr_to_cid: HashMap<SocketAddr, u32>,
-    pub(crate) draining_pool: DrainingPool,
+    /// 帧路由管理器 - 负责帧路由和连接映射管理
+    /// Frame router manager - responsible for frame routing and connection mapping
+    pub(crate) frame_router: FrameRouter,
     pub(crate) config: Arc<Config>,
     pub(crate) accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
     pub(crate) command_rx: mpsc::Receiver<SocketActorCommand>,
@@ -96,7 +97,7 @@ impl<T: BindableTransport> TransportSocketActor<T> {
                 // 3. Handle periodic cleanup of draining CIDs.
                 // 3. 处理 draining CIDs 的定期清理。
                 _ = cleanup_interval.tick() => {
-                    self.draining_pool.cleanup();
+                    self.frame_router.cleanup_draining_pool();
                 }
                 else => break,
             }
@@ -115,8 +116,8 @@ impl<T: BindableTransport> TransportSocketActor<T> {
                 response_tx,
             } => {
                 let mut local_cid = rand::random();
-                while self.connections.contains_key(&local_cid)
-                    || self.draining_pool.contains(&local_cid)
+                while self.frame_router.connection_exists(local_cid)
+                    || self.frame_router.is_draining(local_cid)
                 {
                     local_cid = rand::random();
                 }
@@ -153,19 +154,15 @@ impl<T: BindableTransport> TransportSocketActor<T> {
                     }
                 });
 
-                // The key in the `connections` map is always OUR endpoint's CID.
-                // `connections` 映射中的键始终是我们端点的 CID。
-                self.connections.insert(
+                // Register the new connection with the frame router
+                // 在帧路由器中注册新连接
+                self.frame_router.register_connection(
                     local_cid,
+                    remote_addr,
                     ConnectionMeta {
                         sender: tx_to_endpoint,
                     },
                 );
-                // For outgoing connections, we initially map the remote address to our own CID
-                // until the handshake completes and we learn the peer's CID.
-                // 对于出站连接，我们最初将远程地址映射到我们自己的CID，
-                // 直到握手完成并获知对端的CID。
-                self.addr_to_cid.insert(remote_addr, local_cid);
 
                 let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
                 let _ = response_tx.send(Ok(stream));
@@ -178,20 +175,10 @@ impl<T: BindableTransport> TransportSocketActor<T> {
                 let _ = response_tx.send(result);
             }
             SocketActorCommand::UpdateAddr { cid, new_addr } => {
-                let mut old_addr = None;
-                for (addr, &c) in self.addr_to_cid.iter() {
-                    if c == cid {
-                        old_addr = Some(*addr);
-                        break;
-                    }
-                }
-                if let Some(addr) = old_addr {
-                    self.addr_to_cid.remove(&addr);
-                }
-                self.addr_to_cid.insert(new_addr, cid);
+                self.frame_router.update_connection_address(cid, new_addr);
             }
             SocketActorCommand::RemoveConnection { cid } => {
-                self.remove_connection_by_cid(cid);
+                self.frame_router.remove_connection_by_cid(cid);
             }
         }
         Ok(())
@@ -201,61 +188,11 @@ impl<T: BindableTransport> TransportSocketActor<T> {
     ///
     /// 将接收到的帧分派给一个合适的（已存在的）连接任务。
     async fn dispatch_frame(&mut self, frame: Frame, remote_addr: SocketAddr) {
-        let cid = frame.destination_cid();
-
-        // 1. Try to route to an established connection via its destination CID.
-        //    This is the primary routing mechanism and supports connection migration.
-        //    CIDs are non-zero for established connections.
-        // 1. 尝试通过目标CID路由到已建立的连接。
-        //    这是主要的路由机制，并支持连接迁移。
-        //    已建立连接的CID不为零。
-        if cid != 0 {
-            if let Some(meta) = self.connections.get(&cid) {
-                if meta.sender.send((frame, remote_addr)).await.is_err() {
-                    debug!(addr = %remote_addr, cid = %cid, "Endpoint (CID lookup) died. Removing.");
-                    self.remove_connection_by_cid(cid);
-                }
-                return;
-            }
-        }
-
-        // 2. Handle packets for connections that are still in handshake (e.g. retransmitted SYN)
-        //    by looking up the remote address.
-        //    但是要确保连接仍然存在，避免将帧发送到已关闭的连接。
-        // 2. 通过查找远程地址来处理仍处于握手状态的连接的数据包（例如重传的SYN）。
-        //    但是要确保连接仍然存在，避免将帧发送到已关闭的连接。
-        if let Some(&existing_cid) = self.addr_to_cid.get(&remote_addr) {
-            // Double-check that the connection still exists
-            // 双重检查连接是否仍然存在
-            if let Some(meta) = self.connections.get(&existing_cid) {
-                if meta.sender.send((frame, remote_addr)).await.is_err() {
-                    debug!(addr = %remote_addr, cid = %existing_cid, "Endpoint (addr lookup) died. Removing.");
-                    self.remove_connection_by_cid(existing_cid);
-                }
-                return;
-            } else {
-                // Connection no longer exists, clean up the stale address mapping
-                // 连接不再存在，清理过时的地址映射
-                debug!(addr = %remote_addr, cid = %existing_cid, "Removing stale address mapping for non-existent connection");
-                self.addr_to_cid.remove(&remote_addr);
-            }
-        }
-
-        // 3. If we get here, it's an unroutable, non-SYN packet.
-        //    We also check the draining CIDs to provide better logging for why a packet might be dropped.
-        // 3. 如果执行到这里，说明这是一个不可路由的、非SYN的数据包。
-        //    我们同时会检查draining CIDs，以便为数据包为何被丢弃提供更好的日志。
-        if self.draining_pool.contains(&cid) {
-            debug!(
-                "Ignoring packet for draining connection from {} with CID {}: {:?}",
-                remote_addr, cid, frame
-            );
-        } else {
-            debug!(
-                "Ignoring non-SYN packet from unknown source {} with unroutable CID {}: {:?}",
-                remote_addr, cid, frame
-            );
-        }
+        // 委托给帧路由管理器处理
+        // Delegate to frame router manager for handling
+        let _result = self.frame_router.dispatch_frame(frame, remote_addr).await;
+        // RoutingResult is already logged appropriately in the frame router
+        // RoutingResult已在帧路由器中适当记录
     }
 
     /// Handles a new connection attempt, which may include 0-RTT data frames.
@@ -274,19 +211,9 @@ impl<T: BindableTransport> TransportSocketActor<T> {
         let first_frame = frames.remove(0);
 
         if let Frame::Syn { header } = first_frame {
-            // If a connection already exists for this address, the new SYN indicates
-            // that the client has abandoned the old one and wants to start fresh.
-            // We honor this by tearing down the old state before creating the new one.
-            // 如果此地址已存在连接，则新的SYN表示客户端已放弃旧连接并希望重新开始。
-            // 我们通过在创建新连接之前拆除旧状态来满足此请求。
-            if let Some(&old_cid) = self.addr_to_cid.get(&remote_addr) {
-                info!(
-                    addr = %remote_addr,
-                    old_cid = old_cid,
-                    "Received new SYN from an address with a lingering connection. Replacing it."
-                );
-                self.remove_connection_by_cid(old_cid);
-            }
+            // If a connection already exists for this address, the frame router will handle
+            // the replacement automatically when we register the new connection.
+            // 如果此地址已存在连接，帧路由器在我们注册新连接时会自动处理替换。
 
             let config = self.config.as_ref();
             if header.protocol_version != config.protocol_version {
@@ -302,8 +229,8 @@ impl<T: BindableTransport> TransportSocketActor<T> {
             info!(addr = %remote_addr, "Accepting new connection attempt.");
             let peer_cid = header.source_cid;
             let mut local_cid = rand::random(); // This is OUR CID for the connection. 这是我们用于此连接的CID。
-            while self.connections.contains_key(&local_cid)
-                || self.draining_pool.contains(&local_cid)
+            while self.frame_router.connection_exists(local_cid)
+                || self.frame_router.is_draining(local_cid)
             {
                 local_cid = rand::random();
             }
@@ -353,17 +280,15 @@ impl<T: BindableTransport> TransportSocketActor<T> {
                 }
             });
 
-            // Add to connections map using OUR local_cid.
-            // 使用我们的 local_cid 添加到 connections 映射。
-            self.connections.insert(
+            // Register the connection with the frame router
+            // 在帧路由器中注册连接
+            self.frame_router.register_connection(
                 local_cid,
+                remote_addr,
                 ConnectionMeta {
                     sender: tx_to_endpoint,
                 },
             );
-            // Add to addr->cid map to find this connection for retransmitted SYNs.
-            // 添加到 addr->cid 映射，以便为重传的 SYN 找到此连接。
-            self.addr_to_cid.insert(remote_addr, local_cid);
 
             let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
             // Use `try_send` to avoid blocking the actor if the listener is slow or the
@@ -377,8 +302,7 @@ impl<T: BindableTransport> TransportSocketActor<T> {
                 );
                 // Clean up the state we just added for this failed connection attempt.
                 // 清理我们刚刚为这个失败的连接尝试添加的状态。
-                self.connections.remove(&local_cid);
-                self.addr_to_cid.remove(&remote_addr);
+                self.frame_router.remove_connection_by_cid(local_cid);
                 // The spawned endpoint task will eventually time out and die on its own
                 // because it will never receive a SYN-ACK confirmation from the user.
                 // 生成的端点任务最终会超时并自行消亡，因为它永远不会收到用户的SYN-ACK确认。
@@ -388,43 +312,5 @@ impl<T: BindableTransport> TransportSocketActor<T> {
         }
     }
 
-    /// Removes a connection and its associated state from the actor.
-    ///
-    /// This is the single authoritative place for connection cleanup.
-    /// It removes the connection from the main CID map and also cleans up
-    /// the temporary address-to-CID mapping used during handshakes.
-    ///
-    /// 移除一个连接及其关联的状态。
-    ///
-    /// 这是连接清理的唯一权威位置。它会从主CID映射中移除连接，
-    /// 并清理握手期间使用的临时地址到CID的映射。
-    fn remove_connection_by_cid(&mut self, cid: u32) {
-        let was_present = self.connections.remove(&cid).is_some();
-        if !was_present {
-            debug!(cid = %cid, "Connection already removed, nothing to do");
-            return; // Already removed, nothing to do. 已被移除，无需任何操作。
-        }
 
-        // Find and remove the corresponding address mapping.
-        // Only remove if it maps to this specific CID to avoid removing newer mappings.
-        // 查找并移除对应的地址映射。
-        // 只有当映射到这个特定CID时才移除，以避免移除更新的映射。
-        let mut addr_to_remove = None;
-        for (addr, &mapped_cid) in self.addr_to_cid.iter() {
-            if mapped_cid == cid {
-                addr_to_remove = Some(*addr);
-                break;
-            }
-        }
-        if let Some(addr) = addr_to_remove {
-            self.addr_to_cid.remove(&addr);
-            debug!(cid = %cid, addr = %addr, "Removed address mapping for connection");
-        }
-        
-        // Instead of forgetting the CID, move it to the draining state.
-        // 不直接丢弃CID，而是将其移至draining状态。
-        self.draining_pool.insert(cid);
-
-        info!(cid = %cid, "Cleaned up connection state. CID is now in draining state.");
-    }
 }

@@ -3,6 +3,7 @@ pub mod actor;
 pub mod command;
 mod draining;
 pub mod handle;
+mod routing;
 pub mod transport;
 pub mod zerortt;
 

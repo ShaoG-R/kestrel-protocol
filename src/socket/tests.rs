@@ -102,12 +102,16 @@ impl ActorTestHarness {
         // 创建传输管理器用于测试
         // Create transport manager for testing
         let transport_manager = super::transport::TransportManager::new(mock_transport.clone(), send_tx);
+        
+        // 创建帧路由管理器用于测试
+        // Create frame router manager for testing
+        let frame_router = super::routing::FrameRouter::new(
+            DrainingPool::new(config.connection.drain_timeout)
+        );
 
         let mut actor = TransportSocketActor {
             transport_manager,
-            connections: HashMap::new(),
-            addr_to_cid: HashMap::new(),
-            draining_pool: DrainingPool::new(config.connection.drain_timeout),
+            frame_router,
             config: config.clone(),
             accept_tx,
             command_rx,

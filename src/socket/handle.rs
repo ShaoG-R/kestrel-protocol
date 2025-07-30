@@ -79,12 +79,16 @@ impl<T: BindableTransport> TransportReliableUdpSocket<T> {
         // 创建传输管理器
         // Create transport manager
         let transport_manager = super::transport::TransportManager::new(transport, send_tx);
+        
+        // 创建帧路由管理器
+        // Create frame router manager
+        let frame_router = super::routing::FrameRouter::new(
+            DrainingPool::new(config.connection.drain_timeout)
+        );
 
         let mut actor = TransportSocketActor {
             transport_manager,
-            connections: std::collections::HashMap::new(),
-            addr_to_cid: std::collections::HashMap::new(),
-            draining_pool: DrainingPool::new(config.connection.drain_timeout),
+            frame_router,
             config: config.clone(),
             accept_tx,
             command_rx,
