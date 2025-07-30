@@ -38,27 +38,27 @@
 
 ```mermaid
 graph TD
-    subgraph "Endpoint Layer"
-        A["User Write (Bytes)"] --> B[ReliabilityLayer::write_to_stream]
-        C[ReliabilityLayer::packetize_stream_data] -- "PUSH Frames" --> D[Frames to Send]
-        E["Network Frame (ACK)"] --> F[ReliabilityLayer::handle_ack]
-        G[ReliabilityLayer::reassemble] -- "Ordered Bytes" --> H[User Read]
+    subgraph "Endpoint层"
+        A["用户写入 (字节)"] --> B[ReliabilityLayer::write_to_stream]
+        C[ReliabilityLayer::packetize_stream_data] -- "PUSH帧" --> D["待发送帧"]
+        E["网络帧 (ACK)"] --> F[ReliabilityLayer::handle_ack]
+        G[ReliabilityLayer::reassemble] -- "有序字节" --> H["用户读取"]
     end
 
-    subgraph "Reliability Layer Internal"
+    subgraph "Reliability层内部"
         B --> SB(SendBuffer)
-        P[Packetizer] -- "Reads from" --> SB
-        P -- "Creates" --> C
+        P(Packetizer) -- "读取自" --> SB
+        P -- "创建" --> C
         
-        F -- "Updates" --> SM(SackManager)
-        F -- "Updates" --> CC(CongestionControl)
-        SM -- "RTT Samples" --> RTT(RttEstimator)
+        F -- "更新" --> SM(SackManager)
+        F -- "更新" --> CC(CongestionControl)
+        SM -- "RTT样本" --> RTT(RttEstimator)
         RTT -- "SRTT" --> CC
-        SM -- "Triggers" --> FR[Fast Retransmission]
+        SM -- "触发" --> FR["快速重传"]
         
-        RB(ReceiveBuffer) -- "SACK Info" --> F
-        RB -- "Provides data for" --> G
-        NF["Network Frame (PUSH)"] --> RB
+        RB(ReceiveBuffer) -- "SACK信息" --> F
+        RB -- "为...提供数据" --> G
+        NF["网络帧 (PUSH)"] --> RB
     end
     
     style SB fill:#bbf,stroke:#333,stroke-width:2px

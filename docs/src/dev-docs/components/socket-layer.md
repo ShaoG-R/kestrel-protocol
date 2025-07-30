@@ -66,9 +66,9 @@ graph TD
     end
     
     subgraph "连接处理层"
-        E --> H[Endpoint Tasks]
+        E --> H["Endpoint任务"]
     end
-    
+
     subgraph "网络传输层"
         F --> I[UdpTransport]
     end

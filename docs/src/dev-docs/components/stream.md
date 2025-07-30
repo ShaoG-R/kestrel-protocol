@@ -32,22 +32,22 @@
 
 ```mermaid
 graph TD
-    subgraph "User Application"
-        A[User Code] -- "calls read()/write()" --> B(Stream)
+    subgraph "用户应用"
+        A["用户代码"] -- "调用 read()/write()" --> B(Stream)
     end
 
-    subgraph "Stream Handle"
-        B -- "Sends StreamCommand" --> C(tx_to_endpoint)
-        B -- "Receives Vec<Bytes>" --> D(rx_from_endpoint)
-        B -- "Buffers data in" --> E[read_buffer: VecDeque<Bytes>]
+    subgraph "Stream句柄"
+        B -- "发送 StreamCommand" --> C(tx_to_endpoint)
+        B -- "接收 Vec<Bytes>" --> D(rx_from_endpoint)
+        B -- "缓冲数据至" --> E["read_buffer: VecDeque<Bytes>"]
     end
 
-    subgraph "Endpoint Task"
-        F[Endpoint EventLoop] -- "Receives" --> C
-        F -- "Sends" --> D
+    subgraph "Endpoint任务"
+        F["Endpoint事件循环"] -- "接收" --> C
+        F -- "发送" --> D
     end
 
-    A -- "Reads from" --> E
+    A -- "读取自" --> E
 ```
 **数据流解读:**
 - **写入流程**:

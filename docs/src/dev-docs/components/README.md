@@ -10,29 +10,29 @@
 graph TD
     A["用户应用"]
     
-    subgraph "协议栈 (Protocol Stack)"
+    subgraph "协议栈"
         direction TB
-        L1["Stream API Layer<br>(stream.rs)"]
-        L2["Connection Management Layer<br>(socket/)"]
-        L3["Per-Connection State Machine<br>(endpoint/)"]
-        L4["Reliable Transport Protocol Layer<br>(reliability/)"]
-        L5["UDP I/O Layer<br>(transport/)"]
-        L6["Data Serialization Layer<br>(packet/)"]
+        L1["流API层<br>(stream.rs)"]
+        L2["连接管理层<br>(socket/)"]
+        L3["单连接状态机<br>(endpoint/)"]
+        L4["可靠传输协议层<br>(reliability/)"]
+        L5["UDP I/O层<br>(transport/)"]
+        L6["数据序列化层<br>(packet/)"]
     end
     
-    B["Operating System<br>UDP Socket"]
+    B["操作系统<br>UDP套接字"]
 
     A -- "read()/write()" --> L1
     L1 -- "StreamCommand" --> L3
-    L2 -- "Manages" --> L3
-    L2 -- "Routes Frames to" --> L3
-    L3 -- "Uses" --> L4
-    L3 -- "Submits FrameBatch to" --> L2
-    L2 -- "Sends FrameBatch via" --> L5
-    L4 -- "Uses" --> L6
-    L5 -- "Receives/Sends UDP Datagrams" --> B
-    L5 -- "Parses into Frames using" --> L6
-    L6 -- "Defines wire format" --> B
+    L2 -- "管理" --> L3
+    L2 -- "路由帧至" --> L3
+    L3 -- "使用" --> L4
+    L3 -- "提交FrameBatch至" --> L2
+    L2 -- "发送FrameBatch" --> L5
+    L4 -- "使用" --> L6
+    L5 -- "收发UDP数据报" --> B
+    L5 -- "调用L6解析帧" --> L6
+    L6 -- "定义线路格式" --> B
 
     classDef layer fill:#f9f,stroke:#333,stroke-width:2px;
     class L1,L2,L3,L4,L5,L6 layer;

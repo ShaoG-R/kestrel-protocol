@@ -38,11 +38,11 @@
 
 ```mermaid
 graph TD
-    subgraph "Packet Definition"
-        C["Command Enum<br>(SYN, PUSH, ACK...)"]
-        LH["LongHeader Struct<br>(version, src_cid, dst_cid)"]
-        SH["ShortHeader Struct<br>(cid, seq, ts...)"]
-        SR["SackRange Struct<br>(start, end)"]
+    subgraph "包定义"
+        C["Command枚举<br>(SYN, PUSH, ACK...)"]
+        LH["LongHeader结构体<br>(版本, 源CID, 目标CID)"]
+        SH["ShortHeader结构体<br>(CID, 序号, 时间戳...)"]
+        SR["SackRange结构体<br>(起始, 结束)"]
 
         C --> LH
         C --> SH
@@ -50,16 +50,16 @@ graph TD
         LH --> F_SYN(Frame::Syn)
         SH --> F_PUSH(Frame::Push)
         SH --> F_ACK(Frame::Ack)
-        SR -- "Encoded into" --> F_ACK_Payload(ACK Payload)
-        F_ACK -- "contains" --> F_ACK_Payload
+        SR -- "编码进" --> F_ACK_Payload("ACK载荷")
+        F_ACK -- "包含" --> F_ACK_Payload
     end
 
-    subgraph "Serialization Flow"
-        User_Frame(Frame Enum Instance) -- "Frame::encode()" --> Encoded_Bytes[Encoded Bytes for Network]
+    subgraph "序列化流程"
+        User_Frame("Frame枚举实例") -- "Frame::encode()" --> Encoded_Bytes["编码后的网络字节"]
     end
 
-    subgraph "Deserialization Flow"
-        Raw_Bytes[Raw Bytes from Network] -- "Frame::decode()" --> Decoded_Frame(Result<Frame, Error>)
+    subgraph "反序列化流程"
+        Raw_Bytes["来自网络的原始字节"] -- "Frame::decode()" --> Decoded_Frame("Result<Frame, Error>")
     end
 
     style C fill:#f9f,stroke:#333,stroke-width:2px
