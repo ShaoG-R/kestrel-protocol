@@ -166,4 +166,17 @@ impl<T: BindableTransport> TransportReliableUdpSocket<T> {
             .map_err(|_| Error::ChannelClosed)?;
         response_rx.await.map_err(|_| Error::ChannelClosed)?
     }
+
+    /// Gets the current local address of the socket.
+    ///
+    /// 获取套接字的当前本地地址。
+    pub async fn local_addr(&self) -> Result<SocketAddr> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let cmd = SocketActorCommand::GetLocalAddr { response_tx };
+        self.command_tx
+            .send(cmd)
+            .await
+            .map_err(|_| Error::ChannelClosed)?;
+        response_rx.await.map_err(|_| Error::ChannelClosed)?
+    }
 }

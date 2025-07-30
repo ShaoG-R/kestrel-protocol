@@ -384,4 +384,37 @@ async fn test_transport_layer_integration() {
     let _sent_packets = harness.get_sent_packets().await;
     // Note: sent_packets might be empty because our mock doesn't actually execute the send
     // but the important thing is that the command was dispatched correctly
+}
+
+#[tokio::test]
+async fn test_socket_local_addr() {
+    use super::handle::TransportReliableUdpSocket;
+    use super::transport::udp::UdpTransport;
+    
+    // 创建两个真实的UDP socket，并测试local_addr API
+    // Create two real UDP sockets and test the local_addr API
+    let (socket_a, _listener_a) = TransportReliableUdpSocket::<UdpTransport>::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let (socket_b, _listener_b) = TransportReliableUdpSocket::<UdpTransport>::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+
+    // 获取它们的本地地址
+    // Get their local addresses
+    let addr_a = socket_a.local_addr().await.unwrap();
+    let addr_b = socket_b.local_addr().await.unwrap();
+
+    // 验证地址不同
+    // Verify the addresses are different
+    assert_ne!(addr_a, addr_b, "Different sockets should have different addresses");
+    
+    // 验证地址有效
+    // Verify the addresses are valid
+    assert!(addr_a.port() > 0, "Socket A should have a valid port");
+    assert!(addr_b.port() > 0, "Socket B should have a valid port");
+    
+    // 验证都绑定到localhost
+    // Verify both are bound to localhost
+    assert_eq!(addr_a.ip().to_string(), "127.0.0.1");
+    assert_eq!(addr_b.ip().to_string(), "127.0.0.1");
+    
+    println!("Socket A local address: {}", addr_a);
+    println!("Socket B local address: {}", addr_b);
 } 

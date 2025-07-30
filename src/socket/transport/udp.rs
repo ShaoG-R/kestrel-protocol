@@ -317,6 +317,24 @@ impl UdpTransport {
         Self::from_socket(socket)
     }
 
+    /// Gets the local address by querying the actor directly, ensuring it's fresh from the socket.
+    /// This is useful when you need to ensure you're getting the most up-to-date address.
+    ///
+    /// 通过直接查询actor获取本地地址，确保它是从套接字获取的最新地址。
+    /// 当您需要确保获取最新地址时，这很有用。
+    pub async fn fresh_local_addr(&self) -> Result<SocketAddr> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let command = UdpTransportCommand::GetLocalAddr { response_tx };
+
+        if self.send_command_tx.send(command).await.is_err() {
+            return Err(crate::error::Error::ChannelClosed);
+        }
+
+        response_rx
+            .await
+            .map_err(|_| crate::error::Error::ChannelClosed)?
+    }
+
     /// Shuts down the transport actor and receiver task gracefully.
     ///
     /// 优雅地关闭传输actor和接收器任务。
@@ -358,6 +376,8 @@ impl Transport for UdpTransport {
     }
 
     fn local_addr(&self) -> Result<SocketAddr> {
+        // 大多数情况下直接使用缓存的地址即可，这样更高效
+        // In most cases, use the cached address directly, which is more efficient
         Ok(**self.local_addr.load())
     }
 }
@@ -548,5 +568,22 @@ mod tests {
         let final_result = inner_result.unwrap();
         assert!(final_result.is_err(), "Expected channel closed error");
         assert!(matches!(final_result.unwrap_err(), crate::error::Error::ChannelClosed));
+    }
+
+    #[tokio::test]
+    async fn test_local_addr_methods() {
+        let transport = UdpTransport::new("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        
+        // Test the cached local_addr method
+        let cached_addr = transport.local_addr().unwrap();
+        assert!(cached_addr.port() > 0);
+        
+        // Test the fresh_local_addr method that uses GetLocalAddr command
+        let fresh_addr = transport.fresh_local_addr().await.unwrap();
+        assert_eq!(cached_addr, fresh_addr, "Cached and fresh addresses should match");
+        
+        // Test that both addresses have the same IP and port
+        assert_eq!(cached_addr.ip(), fresh_addr.ip());
+        assert_eq!(cached_addr.port(), fresh_addr.port());
     }
 }

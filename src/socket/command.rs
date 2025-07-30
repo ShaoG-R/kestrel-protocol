@@ -40,4 +40,9 @@ pub enum SocketActorCommand {
     ///
     /// 来自端点的命令，表示它已经终止，应该被移除。
     RemoveConnection { cid: u32 },
+    /// Command from the public API to get the current local address.
+    /// 来自公共API的命令，用于获取当前本地地址。
+    GetLocalAddr {
+        response_tx: oneshot::Sender<Result<SocketAddr>>,
+    },
 } 

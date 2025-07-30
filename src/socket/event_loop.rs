@@ -137,6 +137,12 @@ impl<T: BindableTransport> SocketEventLoop<T> {
                     .frame_router_mut()
                     .remove_connection_by_cid(cid);
             }
+            SocketActorCommand::GetLocalAddr { response_tx } => {
+                let result = self.session_coordinator
+                    .transport_manager()
+                    .local_addr();
+                let _ = response_tx.send(result);
+            }
         }
         Ok(())
     }
