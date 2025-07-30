@@ -48,6 +48,14 @@ graph TD
     end
 
     A -- "读取自" --> E
+
+    style A fill:#333,color:#fff
+    style B fill:#333,color:#fff
+    style C fill:#333,color:#fff
+    style D fill:#333,color:#fff
+    style E fill:#333,color:#fff
+    style F fill:#333,color:#fff
+	
 ```
 **数据流解读:**
 - **写入流程**:

@@ -68,6 +68,17 @@ graph TD
         F --> I[UDP Socket]
         G --> I
     end
+
+    style A fill:#333,color:#fff
+    style B fill:#333,color:#fff
+    style C fill:#333,color:#fff
+    style D fill:#333,color:#fff
+    style E fill:#333,color:#fff
+    style F fill:#333,color:#fff
+    style G fill:#333,color:#fff
+    style H fill:#333,color:#fff
+    style I fill:#333,color:#fff
+	
 ```
 
 **层次说明:**
@@ -238,6 +249,15 @@ graph TD
         H[Transport Trait API] --> A
         H --> B
     end
+
+    style A fill:#333,color:#fff
+    style B fill:#333,color:#fff
+    style D fill:#333,color:#fff
+    style E fill:#333,color:#fff
+    style F fill:#333,color:#fff
+    style G fill:#333,color:#fff
+    style H fill:#333,color:#fff
+	
 ```
 
 ### 组件职责分析

@@ -61,10 +61,22 @@ graph TD
         NF["网络帧 (PUSH)"] --> RB
     end
     
-    style SB fill:#bbf,stroke:#333,stroke-width:2px
-    style RB fill:#bbf,stroke:#333,stroke-width:2px
-    style SM fill:#f9f,stroke:#333,stroke-width:2px
-    style CC fill:#ccf,stroke:#333,stroke-width:2px
+    style A fill:#333,color:#fff
+    style B fill:#333,color:#fff
+    style C fill:#333,color:#fff
+    style D fill:#333,color:#fff
+    style E fill:#333,color:#fff
+    style F fill:#333,color:#fff
+    style G fill:#333,color:#fff
+    style H fill:#333,color:#fff
+    style P fill:#333,color:#fff
+    style RTT fill:#333,color:#fff
+    style FR fill:#333,color:#fff
+    style NF fill:#333,color:#fff
+    style SB fill:#00008B,color:#fff,stroke:#fff,stroke-width:2px
+    style RB fill:#00008B,color:#fff,stroke:#fff,stroke-width:2px
+    style SM fill:#8B008B,color:#fff,stroke:#fff,stroke-width:2px
+    style CC fill:#006400,color:#fff,stroke:#fff,stroke-width:2px
 ```
 **数据流解读:**
 1.  **发送路径**:

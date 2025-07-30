@@ -62,9 +62,18 @@ graph TD
         Raw_Bytes["来自网络的原始字节"] -- "Frame::decode()" --> Decoded_Frame("Result<Frame, Error>")
     end
 
-    style C fill:#f9f,stroke:#333,stroke-width:2px
-    style LH fill:#bbf,stroke:#333,stroke-width:2px
-    style SH fill:#bbf,stroke:#333,stroke-width:2px
+    style C fill:#8B008B,color:#fff,stroke:#fff,stroke-width:2px
+    style LH fill:#00008B,color:#fff,stroke:#fff,stroke-width:2px
+    style SH fill:#00008B,color:#fff,stroke:#fff,stroke-width:2px
+    style SR fill:#333,color:#fff
+    style F_SYN fill:#333,color:#fff
+    style F_PUSH fill:#333,color:#fff
+    style F_ACK fill:#333,color:#fff
+    style F_ACK_Payload fill:#333,color:#fff
+    style User_Frame fill:#333,color:#fff
+    style Encoded_Bytes fill:#333,color:#fff
+    style Raw_Bytes fill:#333,color:#fff
+    style Decoded_Frame fill:#333,color:#fff
 ```
 **核心结构解析:**
 

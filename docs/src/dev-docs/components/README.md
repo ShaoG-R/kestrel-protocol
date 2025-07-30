@@ -34,7 +34,9 @@ graph TD
     L5 -- "调用L6解析帧" --> L6
     L6 -- "定义线路格式" --> B
 
-    classDef layer fill:#f9f,stroke:#333,stroke-width:2px;
+    style A fill:#333,color:#fff
+    style B fill:#333,color:#fff
+    classDef layer fill:#333,color:#fff,stroke:#fff,stroke-width:1px;
     class L1,L2,L3,L4,L5,L6 layer;
 ```
 
