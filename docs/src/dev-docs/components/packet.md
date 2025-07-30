@@ -39,10 +39,10 @@
 ```mermaid
 graph TD
     subgraph "Packet Definition"
-        C[Command Enum<br>(SYN, PUSH, ACK...)]
-        LH[LongHeader Struct<br>(version, src_cid, dst_cid)]
-        SH[ShortHeader Struct<br>(cid, seq, ts...)]
-        SR[SackRange Struct<br>(start, end)]
+        C["Command Enum<br>(SYN, PUSH, ACK...)"]
+        LH["LongHeader Struct<br>(version, src_cid, dst_cid)"]
+        SH["ShortHeader Struct<br>(cid, seq, ts...)"]
+        SR["SackRange Struct<br>(start, end)"]
 
         C --> LH
         C --> SH

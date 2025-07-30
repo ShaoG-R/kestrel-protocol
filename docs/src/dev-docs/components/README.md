@@ -8,25 +8,19 @@
 
 ```mermaid
 graph TD
-    subgraph " "
-        direction TB
-        A(User Application)
-    end
+    A["用户应用"]
     
     subgraph "协议栈 (Protocol Stack)"
         direction TB
-        L1[Stream API Layer<br>(stream.rs)]
-        L2[Connection Management Layer<br>(socket/)]
-        L3[Per-Connection State Machine<br>(endpoint/)]
-        L4[Reliable Transport Protocol Layer<br>(reliability/)]
-        L5[UDP I/O Layer<br>(transport/)]
-        L6[Data Serialization Layer<br>(packet/)]
+        L1["Stream API Layer<br>(stream.rs)"]
+        L2["Connection Management Layer<br>(socket/)"]
+        L3["Per-Connection State Machine<br>(endpoint/)"]
+        L4["Reliable Transport Protocol Layer<br>(reliability/)"]
+        L5["UDP I/O Layer<br>(transport/)"]
+        L6["Data Serialization Layer<br>(packet/)"]
     end
     
-    subgraph ""
-        direction TB
-        B(Operating System<br>UDP Socket)
-    end
+    B["Operating System<br>UDP Socket"]
 
     A -- "read()/write()" --> L1
     L1 -- "StreamCommand" --> L3

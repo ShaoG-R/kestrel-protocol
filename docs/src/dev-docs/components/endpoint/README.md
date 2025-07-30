@@ -37,10 +37,10 @@
 ```mermaid
 graph TD
     subgraph "Endpoint"
-        A[User-Facing Logic<br>(Stream API Adaptation)]
-        B[Connection Lifecycle Management<br>(`lifecycle` module)]
-        C[Event Processing & Dispatching<br>(`processing` module)]
-        D[Reliability & Congestion Control<br>(`ReliabilityLayer`)]
+        A["User-Facing Logic<br>(Stream API Adaptation)"]
+        B["Connection Lifecycle Management<br>(`lifecycle` module)"]
+        C["Event Processing & Dispatching<br>(`processing` module)"]
+        D["Reliability & Congestion Control<br>(`ReliabilityLayer`)"]
     end
 
     A --> B

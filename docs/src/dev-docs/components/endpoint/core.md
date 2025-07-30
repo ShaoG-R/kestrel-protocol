@@ -44,7 +44,7 @@ graph TD
     end
 
     subgraph "Endpoint Core"
-        B(Channel: rx_from_stream) --> C{Event Loop (`tokio::select!`)}
+        B(Channel: rx_from_stream) --> C{"Event Loop (tokio::select!)"}
         
         C -- "Process Frame" --> D[EventDispatcher]
         D -- "Call handler by state" --> E[State-specific Logic]
@@ -52,7 +52,7 @@ graph TD
         C -- "Process Command" --> F[Stream Command Handler]
         F -- "Write to buffer" --> G[Reliability Layer]
 
-        C -- "Timeout" --> H[Timeout Handlers (RTO, Idle)]
+        C -- "Timeout" --> H["Timeout Handlers (RTO, Idle)"]
         H -- "Get frames to retransmit" --> G
         
         I[Packetize & Send Logic] -- "Pull data" --> G

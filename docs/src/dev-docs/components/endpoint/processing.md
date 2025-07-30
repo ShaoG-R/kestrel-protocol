@@ -40,7 +40,7 @@
 ```mermaid
 graph TD
     subgraph "Event Loop"
-        A[Event Captured: (Frame, SocketAddr)] --> B(EventDispatcher::dispatch_frame)
+        A["Event Captured: (Frame, SocketAddr)"] --> B(EventDispatcher::dispatch_frame)
     end
 
     subgraph "Processing Module"

@@ -39,9 +39,9 @@
 ```mermaid
 graph TD
     subgraph "Endpoint Layer"
-        A[User Write (Bytes)] --> B[ReliabilityLayer::write_to_stream]
+        A["User Write (Bytes)"] --> B[ReliabilityLayer::write_to_stream]
         C[ReliabilityLayer::packetize_stream_data] -- "PUSH Frames" --> D[Frames to Send]
-        E[Network Frame (ACK)] --> F[ReliabilityLayer::handle_ack]
+        E["Network Frame (ACK)"] --> F[ReliabilityLayer::handle_ack]
         G[ReliabilityLayer::reassemble] -- "Ordered Bytes" --> H[User Read]
     end
 
@@ -58,7 +58,7 @@ graph TD
         
         RB(ReceiveBuffer) -- "SACK Info" --> F
         RB -- "Provides data for" --> G
-        NF[Network Frame (PUSH)] --> RB
+        NF["Network Frame (PUSH)"] --> RB
     end
     
     style SB fill:#bbf,stroke:#333,stroke-width:2px
