@@ -13,7 +13,7 @@ use crate::timer::{
     wheel::{TimingWheel, TimerEntryId},
 };
 use crate::core::endpoint::timing::TimeoutEvent;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -191,9 +191,9 @@ pub struct GlobalTimerTask {
     /// 命令发送通道（用于创建句柄）
     /// Command sender channel (for creating handles)
     command_tx: mpsc::Sender<TimerTaskCommand>,
-    /// 连接到定时器条目的映射
-    /// Connection to timer entries mapping
-    connection_timers: HashMap<ConnectionId, Vec<TimerEntryId>>,
+    /// 连接到定时器条目的映射（使用HashSet实现O(1)删除）
+    /// Connection to timer entries mapping (using HashSet for O(1) deletion)
+    connection_timers: HashMap<ConnectionId, HashSet<TimerEntryId>>,
     /// 定时器条目到连接的反向映射，用于O(1)查找
     /// Reverse mapping from timer entry to connection for O(1) lookup
     entry_to_connection: HashMap<TimerEntryId, ConnectionId>,
@@ -367,7 +367,7 @@ impl GlobalTimerTask {
         self.connection_timers
             .entry(registration.connection_id)
             .or_default()
-            .push(entry_id);
+            .insert(entry_id);
         
         // 记录反向映射
         // Record reverse mapping
@@ -399,7 +399,7 @@ impl GlobalTimerTask {
             // Use reverse mapping to quickly locate connection and remove timer entry
             if let Some(connection_id) = self.entry_to_connection.remove(&entry_id) {
                 if let Some(entry_ids) = self.connection_timers.get_mut(&connection_id) {
-                    entry_ids.retain(|&id| id != entry_id);
+                    entry_ids.remove(&entry_id);
                     // 如果该连接没有更多定时器，移除连接条目
                     // If connection has no more timers, remove connection entry
                     if entry_ids.is_empty() {
@@ -447,29 +447,77 @@ impl GlobalTimerTask {
         let now = Instant::now();
         let expired_timers = self.timing_wheel.advance(now);
 
-        for entry in expired_timers {
-            let entry_id = entry.id;
-            let connection_id = entry.event.data.connection_id;
-            let event_type = entry.event.data.timeout_event.clone();
-            
-            // 使用反向映射快速移除定时器条目
-            // Use reverse mapping to quickly remove timer entry
-            if let Some(conn_id) = self.entry_to_connection.remove(&entry_id) {
-                if let Some(entry_ids) = self.connection_timers.get_mut(&conn_id) {
-                    entry_ids.retain(|&id| id != entry_id);
-                    // 如果该连接没有更多定时器，移除连接条目
-                    // If connection has no more timers, remove connection entry
-                    if entry_ids.is_empty() {
-                        self.connection_timers.remove(&conn_id);
-                    }
+        if expired_timers.is_empty() {
+            return;
+        }
+
+        // 第一步：收集到期定时器的连接映射信息（在清理前）
+        // Step 1: Collect connection mapping info for expired timers (before cleanup)
+        let mut expired_by_connection: std::collections::HashMap<u32, Vec<u64>> = std::collections::HashMap::new();
+        for entry in &expired_timers {
+            if let Some(&conn_id) = self.entry_to_connection.get(&entry.id) {
+                expired_by_connection.entry(conn_id).or_default().push(entry.id);
+            }
+        }
+
+        // 第二步：清理反向映射关系
+        // Step 2: Clean up reverse mapping relationships
+        for entry in &expired_timers {
+            self.entry_to_connection.remove(&entry.id);
+        }
+
+        // 第三步：批量清理连接定时器映射，使用HashSet进行O(1)删除
+        // Step 3: Batch cleanup connection timer mappings using HashSet for O(1) deletion
+        for (conn_id, expired_ids) in expired_by_connection {
+            if let Some(entry_ids) = self.connection_timers.get_mut(&conn_id) {
+                // 直接从HashSet中移除，O(1)操作
+                // Direct removal from HashSet, O(1) operation
+                for expired_id in expired_ids {
+                    entry_ids.remove(&expired_id);
+                }
+                
+                // 如果该连接没有更多定时器，移除连接条目
+                // If connection has no more timers, remove connection entry
+                if entry_ids.is_empty() {
+                    self.connection_timers.remove(&conn_id);
                 }
             }
+        }
 
-            // 触发定时器事件
-            // Trigger timer event
-            entry.event.trigger().await;
-            self.stats.processed_timers += 1;
-            
+        // 第四步：批量并发触发所有定时器 - 关键性能优化
+        // Step 4: Batch concurrent trigger all timers - key performance optimization
+        let trigger_futures: Vec<_> = expired_timers
+            .into_iter()
+            .map(|entry| {
+                let entry_id = entry.id;
+                let connection_id = entry.event.data.connection_id;
+                let event_type = entry.event.data.timeout_event.clone();
+                
+                async move {
+                    entry.event.trigger().await;
+                    (entry_id, connection_id, event_type)
+                }
+            })
+            .collect();
+
+        // 并发执行所有定时器触发，大幅提升性能
+        // Execute all timer triggers concurrently, significantly improve performance
+        let results = futures::future::join_all(trigger_futures).await;
+        
+        // 更新统计信息
+        // Update statistics
+        self.stats.processed_timers += results.len() as u64;
+        
+        // 批量记录日志，减少单个trace调用开销
+        // Batch log recording, reduce individual trace call overhead
+        if results.len() > 1 {
+            debug!(
+                processed_count = results.len(),
+                "Batch processed expired timers"
+            );
+        }
+        
+        for (entry_id, connection_id, event_type) in results {
             trace!(
                 entry_id,
                 connection_id,
@@ -871,6 +919,109 @@ mod tests {
         }
         let cancellation_duration = start_time.elapsed();
         println!("取消{}个定时器耗时: {:?}", timer_count, cancellation_duration);
+        
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_batch_timer_performance() {
+        let handle = start_global_timer_task();
+        let (callback_tx, mut callback_rx) = mpsc::channel(10000);
+        
+        // 测试批量到期处理的性能
+        // Test batch expiry processing performance
+        let timer_count = 500; // 减少数量以确保更可靠的测试
+        let start_time = tokio::time::Instant::now();
+        
+        // 注册相同延迟的定时器以确保它们同时到期（测试批量处理）
+        // Register timers with same delay to ensure they expire together (test batch processing)
+        for i in 0..timer_count {
+            let registration = TimerRegistration::new(
+                i,
+                Duration::from_millis(200), // 统一200ms延迟
+                TimeoutEvent::IdleTimeout,
+                callback_tx.clone(),
+            );
+            handle.register_timer(registration).await.unwrap();
+        }
+        
+        let registration_duration = start_time.elapsed();
+        println!("批量注册{}个定时器耗时: {:?}", timer_count, registration_duration);
+        
+        // 等待所有定时器到期并测量批量处理时间
+        // Wait for all timers to expire and measure batch processing time
+        let batch_start = tokio::time::Instant::now();
+        let mut received_count = 0;
+        
+        // 给足够时间让所有定时器到期
+        // Give enough time for all timers to expire
+        while received_count < timer_count {
+            match tokio::time::timeout(Duration::from_secs(2), callback_rx.recv()).await {
+                Ok(Some(_)) => received_count += 1,
+                Ok(None) => break,
+                Err(_) => {
+                    println!("超时等待定时器事件，已接收: {}", received_count);
+                    break;
+                }
+            }
+        }
+        
+        let batch_duration = batch_start.elapsed();
+        println!("批量处理{}个定时器耗时: {:?}", received_count, batch_duration);
+        if received_count > 0 {
+            println!("平均每个定时器处理时间: {:?}", batch_duration / received_count as u32);
+        }
+        
+        // 验证大部分定时器都被正确处理了
+        // Verify most timers were processed correctly
+        assert!(received_count >= timer_count * 9 / 10, 
+            "至少90%的定时器应该被处理，实际: {}/{}", received_count, timer_count);
+        
+        // 性能检查：批量处理应该是合理的
+        // Performance check: batch processing should be reasonable
+        if received_count > 0 {
+            let avg_per_timer = batch_duration / received_count as u32;
+            println!("优化后平均处理时间: {:?}", avg_per_timer);
+            // 在debug模式下，每个定时器处理时间应该小于10ms（这是很宽松的要求）
+            assert!(avg_per_timer < Duration::from_millis(10), 
+                "每个定时器处理时间过长: {:?}", avg_per_timer);
+        }
+        
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cache_performance() {
+        let handle = start_global_timer_task();
+        let (callback_tx, _callback_rx) = mpsc::channel(1000);
+        
+        // 测试缓存优化的性能
+        // Test cache optimization performance
+        let timer_count = 500;
+        
+        // 注册定时器
+        for i in 0..timer_count {
+            let registration = TimerRegistration::new(
+                i,
+                Duration::from_secs(60 + i as u64), // 不同到期时间
+                TimeoutEvent::IdleTimeout,
+                callback_tx.clone(),
+            );
+            handle.register_timer(registration).await.unwrap();
+        }
+        
+        // 多次获取统计信息，测试缓存效果
+        let start_time = tokio::time::Instant::now();
+        for _ in 0..100 {
+            handle.get_stats().await.unwrap();
+        }
+        let stats_duration = start_time.elapsed();
+        
+        println!("100次统计查询耗时: {:?}", stats_duration);
+        println!("平均每次查询: {:?}", stats_duration / 100);
+        
+        // 性能断言：多次查询应该受益于缓存
+        assert!(stats_duration < Duration::from_millis(10), "统计查询性能不达标");
         
         handle.shutdown().await.unwrap();
     }

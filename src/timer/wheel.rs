@@ -189,9 +189,14 @@ impl TimingWheel {
             // 检查槽位和位置是否有效
             // Check if slot and position are valid
             if slot_index < self.slots.len() && position_in_slot < self.slots[slot_index].len() {
+                let slot = &mut self.slots[slot_index];
+                
+                // 智能缓存失效：在移除前先获取被取消定时器的到期时间
+                // Smart cache invalidation: get cancelled timer's expiry before removal
+                let cancelled_expiry = slot.get(position_in_slot).map(|entry| entry.expiry_time);
+                
                 // 从槽位中移除定时器
                 // Remove timer from slot
-                let slot = &mut self.slots[slot_index];
                 if position_in_slot == slot.len() - 1 {
                     // 如果是最后一个元素，直接弹出
                     // If it's the last element, just pop
@@ -209,12 +214,16 @@ impl TimingWheel {
                     }
                 }
 
-                // 如果取消的是缓存的最早定时器，清除缓存
-                // If cancelling the cached earliest timer, clear cache
-                if self.cached_next_expiry.is_some() {
-                    // 简单策略：如果取消任何定时器，都清除缓存（避免复杂的比较逻辑）
-                    // Simple strategy: clear cache if any timer is cancelled (avoids complex comparison logic)
-                    self.cached_next_expiry = None;
+                // 智能缓存失效：只有当取消的定时器可能影响最早时间时才清除缓存
+                // Smart cache invalidation: only clear cache if cancelled timer might affect earliest time
+                if let (Some(cached_expiry), Some(cancelled_expiry)) = (self.cached_next_expiry, cancelled_expiry) {
+                    // 只有当被取消的定时器到期时间小于等于缓存时间时才清除缓存
+                    // Only clear cache if cancelled timer's expiry is less than or equal to cached time
+                    if cancelled_expiry <= cached_expiry + Duration::from_millis(1) {
+                        self.cached_next_expiry = None;
+                    }
+                    // 否则缓存仍然有效，因为被取消的定时器不是最早的
+                    // Otherwise cache is still valid as cancelled timer wasn't the earliest
                 }
                 
                 trace!(entry_id, "Timer cancelled successfully");
@@ -336,27 +345,66 @@ impl TimingWheel {
             return Some(cached);
         }
         
-        // 如果没有缓存，计算并缓存最早的定时器到期时间
-        // If no cache, calculate and cache earliest timer expiry time
+        // 如果没有定时器，直接返回None
+        // If no timers, return None directly
+        if self.timer_map.is_empty() {
+            return None;
+        }
+        
+        // 使用优化算法：按时间顺序检查槽位，大幅提升性能
+        // Use optimized algorithm: check slots in time order, significantly improve performance
         let mut earliest_time: Option<Instant> = None;
-
-        // 遍历所有槽位寻找最早的定时器
-        // Iterate through all slots to find earliest timer
-        for slot in &self.slots {
+        
+        // 从当前槽位开始，按时间顺序检查最多一轮槽位
+        // Starting from current slot, check at most one round of slots in time order
+        for offset in 0..self.slot_count {
+            let slot_index = (self.current_slot + offset) & self.slot_mask;
+            let slot = &self.slots[slot_index];
+            
+            if slot.is_empty() {
+                continue; // 跳过空槽位，O(1)操作
+            }
+            
+            // 找到第一个非空槽位，在其中寻找最早的定时器
+            // Found first non-empty slot, find earliest timer in it
+            let mut slot_earliest: Option<Instant> = None;
             for entry in slot {
-                match earliest_time {
-                    None => earliest_time = Some(entry.expiry_time),
-                    Some(current_earliest) => {
-                        if entry.expiry_time < current_earliest {
-                            earliest_time = Some(entry.expiry_time);
+                match slot_earliest {
+                    None => slot_earliest = Some(entry.expiry_time),
+                    Some(current) => {
+                        if entry.expiry_time < current {
+                            slot_earliest = Some(entry.expiry_time);
                         }
                     }
                 }
             }
+            
+            // 比较当前槽位的最早时间和全局最早时间
+            // Compare current slot's earliest time with global earliest time
+            match (earliest_time, slot_earliest) {
+                (None, Some(slot_time)) => earliest_time = Some(slot_time),
+                (Some(global_time), Some(slot_time)) => {
+                    if slot_time < global_time {
+                        earliest_time = Some(slot_time);
+                    }
+                }
+                _ => {}
+            }
+            
+            // 早期退出优化：如果找到的时间在当前或更早的时间槽位，
+            // 且该时间小于等于下一个槽位的基准时间，则可以确定这是最早的
+            // Early exit optimization: if found time is in current or earlier slot,
+            // and it's <= next slot's baseline time, we can confirm it's the earliest
+            if let Some(time) = earliest_time {
+                let next_slot_baseline = self.current_time + self.slot_duration * offset as u32;
+                if time <= next_slot_baseline + self.slot_duration {
+                    break; // 提前退出，找到了最优解
+                }
+            }
         }
 
-        // 缓存结果
-        // Cache the result
+        // 缓存结果以供后续快速访问
+        // Cache the result for subsequent fast access
         self.cached_next_expiry = earliest_time;
         earliest_time
     }
