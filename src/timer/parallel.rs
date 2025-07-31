@@ -60,6 +60,12 @@ pub mod single_thread_bypass {
         bypass_threshold: usize,
     }
     
+    impl Default for ExecutionModeSelector {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl ExecutionModeSelector {
         pub fn new() -> Self {
             Self {
@@ -107,6 +113,12 @@ pub mod single_thread_bypass {
         /// 处理统计
         /// Processing statistics
         processed_count: usize,
+    }
+
+    impl Default for BypassTimerProcessor {
+        fn default() -> Self {
+            Self::new()
+        }
     }
     
     impl BypassTimerProcessor {
@@ -261,6 +273,12 @@ pub mod memory_optimization {
         /// 栈缓冲区使用计数
         /// Stack buffer usage count
         stack_usage: usize,
+    }
+
+    impl Default for ZeroAllocProcessor {
+        fn default() -> Self {
+            Self::new()
+        }
     }
     
     impl ZeroAllocProcessor {
@@ -650,7 +668,7 @@ impl HybridParallelTimerSystem {
             processed_count: processed_data.len(),
             detailed_stats: DetailedProcessingStats {
                 simd_operations: processed_data.len() / 8 + 1,
-                rayon_chunks_processed: (processed_data.len() + 511) / 512, // 512 per chunk
+                rayon_chunks_processed: processed_data.len().div_ceil(512), // 512 per chunk
                 async_dispatches: final_dispatch_count,
                 memory_allocations: 1, // 一次批量分配
                 ..Default::default()
@@ -706,7 +724,7 @@ impl HybridParallelTimerSystem {
             processed_count: processed_data.len(),
             detailed_stats: DetailedProcessingStats {
                 simd_operations: processed_data.len() / 8 + 1,
-                rayon_chunks_processed: (processed_data.len() + 511) / 512,
+                rayon_chunks_processed: processed_data.len().div_ceil(512),
                 async_dispatches: total_dispatches,
                 memory_allocations: if batch_size <= 4095 { 1 } else { 2 }, // 直接路径vs spawn_blocking
                 ..Default::default()
@@ -769,6 +787,12 @@ struct ProcessingResult {
     detailed_stats: DetailedProcessingStats,
 }
 
+impl Default for SIMDTimerProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SIMDTimerProcessor {
     pub fn new() -> Self {
         Self {
@@ -800,8 +824,7 @@ impl SIMDTimerProcessor {
             .iter()
             .map(|entry| {
                 // 将tokio::time::Instant转换为纳秒时间戳
-                let duration_since_epoch = entry.expiry_time.elapsed().as_nanos() as u64;
-                duration_since_epoch
+                entry.expiry_time.elapsed().as_nanos() as u64
             })
             .collect();
 
@@ -896,9 +919,11 @@ impl SIMDTimerProcessor {
         
         Ok(())
     }
-
-    /// 克隆处理器（用于多线程）
-    pub fn clone(&self) -> Self {
+}
+/// 克隆处理器（用于多线程）
+/// Clone processor (for multi-thread)
+impl Clone for SIMDTimerProcessor {
+    fn clone(&self) -> Self {
         Self::new()
     }
 }
@@ -947,11 +972,20 @@ impl RayonBatchExecutor {
         Ok(final_results)
     }
 
-    pub fn clone(&self) -> Self {
+}
+
+impl Clone for RayonBatchExecutor {
+    fn clone(&self) -> Self {
         Self {
             chunk_size: self.chunk_size,
             thread_pool_size: self.thread_pool_size,
         }
+    }
+}
+
+impl Default for AsyncEventDispatcher {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1011,10 +1045,8 @@ impl AsyncEventDispatcher {
 
         // 等待所有分发完成
         let results = futures::future::join_all(dispatch_futures).await;
-        for result in results {
-            if let Ok(Ok(count)) = result {
-                dispatch_count += count;
-            }
+        for result in results.into_iter().flatten() {
+            dispatch_count += result.unwrap_or(0);
         }
 
         Ok(dispatch_count)

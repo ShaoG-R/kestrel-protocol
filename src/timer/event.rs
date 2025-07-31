@@ -16,7 +16,7 @@ use wide::{u32x4, u32x8};
 /// Zero-copy event delivery system - uses reference passing to avoid data cloning  
 pub mod zero_copy {
     use super::*;
-    use std::sync::RwLock;
+    use arc_swap::ArcSwap;
     
     /// 零拷贝事件传递接口
     /// Zero-copy event delivery interface
@@ -33,9 +33,9 @@ pub mod zero_copy {
     /// 高性能无锁事件槽位系统
     /// High-performance lock-free event slot system
     pub struct FastEventSlot {
-        /// 事件槽位，使用原子操作避免锁
-        /// Event slots using atomic operations to avoid locks
-        slots: Vec<Arc<RwLock<Option<TimerEventData>>>>,
+        /// 事件槽位，使用 ArcSwap 实现无锁读写
+        /// Event slots using ArcSwap for lock-free read/write
+        slots: Vec<ArcSwap<Option<TimerEventData>>>,
         /// 写入索引
         /// Write index
         write_index: AtomicUsize,
@@ -46,20 +46,23 @@ pub mod zero_copy {
         /// Slot mask (must be power of 2 - 1)
         slot_mask: usize,
     }
-    
+
     impl FastEventSlot {
         /// 创建新的快速事件槽位
         /// Create new fast event slot
         pub fn new(slot_count: usize) -> Self {
             // 确保slot_count是2的幂
+            // Ensure slot_count is a power of two
             let slot_count = slot_count.next_power_of_two();
             let slot_mask = slot_count - 1;
-            
+
             let mut slots = Vec::with_capacity(slot_count);
             for _ in 0..slot_count {
-                slots.push(Arc::new(RwLock::new(None)));
+                // 初始化每个槽位为 None
+                // Initialize each slot with None
+                slots.push(ArcSwap::new(Arc::new(None)));
             }
-            
+
             Self {
                 slots,
                 write_index: AtomicUsize::new(0),
@@ -67,64 +70,87 @@ pub mod zero_copy {
                 slot_mask,
             }
         }
-        
+
         /// 零拷贝写入事件（移动语义）
         /// Zero-copy write event (move semantics)
         pub fn write_event(&self, event: TimerEventData) -> bool {
             let write_idx = self.write_index.fetch_add(1, Ordering::AcqRel);
             let slot_idx = write_idx & self.slot_mask;
+
+            let slot = &self.slots[slot_idx];
             
-            if let Ok(mut slot) = self.slots[slot_idx].try_write() {
-                if slot.is_none() {
-                    *slot = Some(event);
-                    return true;
+            // 加载当前槽位的值
+            // Load the current value of the slot
+            let guard = slot.load();
+            
+            // 只有当槽位为空时才写入，这可以防止覆盖未读的事件
+            // Only write if the slot is empty, which prevents overwriting unread events
+            if guard.is_none() {
+                let new_arc = Arc::new(Some(event));
+                // 尝试原子地将 None 替换为 Some(event)
+                // Atomically try to swap None with Some(event)
+                if Arc::ptr_eq(&slot.compare_and_swap(&guard, new_arc), &guard) {
+                    return true; // 写入成功
                 }
             }
+            
+            // 如果槽位不为空，或是在我们写入时被其它线程修改，则写入失败
+            // The write fails if the slot was not empty or was modified by another thread
             false
         }
-        
+
         /// 零拷贝读取事件（移动语义）
         /// Zero-copy read event (move semantics)
         pub fn read_event(&self) -> Option<TimerEventData> {
             let read_idx = self.read_index.load(Ordering::Acquire);
             let write_idx = self.write_index.load(Ordering::Acquire);
-            
+
             if read_idx == write_idx {
                 return None; // 队列为空
             }
-            
+
             let slot_idx = read_idx & self.slot_mask;
-            if let Ok(mut slot) = self.slots[slot_idx].try_write() {
-                if let Some(event) = slot.take() {
-                    self.read_index.fetch_add(1, Ordering::AcqRel);
-                    return Some(event);
-                }
-            }
-            None
+            let slot = &self.slots[slot_idx];
+            
+            // 原子地取出槽位中的值，并用 None 替换它
+            // Atomically take the value from the slot, replacing it with None
+            let maybe_event_arc = slot.swap(Arc::new(None));
+
+            // 因为我们已经“消耗”了这个槽位，所以推进读取索引
+            // Advance the read index as we have "consumed" this slot
+            self.read_index.store(read_idx.wrapping_add(1), Ordering::Release);
+
+            // 尝试从 Arc 中解包事件数据
+            // Try to unwrap the event data from the Arc
+            // 在SPSC模型中，try_unwrap 应该总是成功的
+            // In an SPSC model, try_unwrap should always succeed
+            Arc::try_unwrap(maybe_event_arc).ok().flatten()
         }
-        
+
         /// 批量读取事件（零拷贝）
         /// Batch read events (zero-copy)
         pub fn batch_read_events(&self, max_count: usize) -> Vec<TimerEventData> {
             let mut events = Vec::with_capacity(max_count);
-            
+
             for _ in 0..max_count {
                 if let Some(event) = self.read_event() {
                     events.push(event);
                 } else {
-                    break;
+                    break; // 队列已空
                 }
             }
-            
+
             events
         }
-        
+
         /// 获取未读事件数量
         /// Get count of unread events
         pub fn pending_count(&self) -> usize {
             let write_idx = self.write_index.load(Ordering::Acquire);
             let read_idx = self.read_index.load(Ordering::Acquire);
-            (write_idx.wrapping_sub(read_idx)) & self.slot_mask
+            // 返回写入索引和读取索引之间的差值
+            // Return the difference between the write and read indices
+            write_idx.wrapping_sub(read_idx)
         }
     }
     
@@ -258,11 +284,11 @@ pub type ConnectionId = u32;
 /// 高性能对象池，用于复用TimerEventData对象
 /// High-performance object pool for reusing TimerEventData objects
 pub struct TimerEventDataPool {
-    pool: Mutex<Vec<Box<TimerEventData>>>,
+    pool: Mutex<Vec<TimerEventData>>,
     max_size: usize,
     /// 批量操作缓存，避免频繁锁定
     /// Batch operation cache to avoid frequent locking
-    batch_cache: Mutex<Vec<Box<TimerEventData>>>,
+    batch_cache: Mutex<Vec<TimerEventData>>,
     batch_cache_size: usize,
 }
 
@@ -281,7 +307,7 @@ impl TimerEventDataPool {
 
     /// 从池中获取对象，如果池为空则创建新对象
     /// Get object from pool, create new if pool is empty
-    pub fn acquire(&self, connection_id: ConnectionId, timeout_event: TimeoutEvent) -> Box<TimerEventData> {
+    pub fn acquire(&self, connection_id: ConnectionId, timeout_event: TimeoutEvent) -> TimerEventData {
         if let Ok(mut pool) = self.pool.lock() {
             if let Some(mut obj) = pool.pop() {
                 // 重用现有对象
@@ -293,12 +319,12 @@ impl TimerEventDataPool {
         }
         // 池为空或锁定失败，创建新对象
         // Pool empty or lock failed, create new object
-        Box::new(TimerEventData::new(connection_id, timeout_event))
+        TimerEventData::new(connection_id, timeout_event)
     }
 
     /// 将对象返回池中以供重用
     /// Return object to pool for reuse
-    pub fn release(&self, obj: Box<TimerEventData>) {
+    pub fn release(&self, obj: TimerEventData) {
         if let Ok(mut pool) = self.pool.lock() {
             if pool.len() < self.max_size {
                 pool.push(obj);
@@ -310,7 +336,7 @@ impl TimerEventDataPool {
 
     /// 批量获取对象（SIMD优化版本）
     /// Batch acquire objects (SIMD optimized version)
-    pub fn batch_acquire(&self, requests: &[(ConnectionId, TimeoutEvent)]) -> Vec<Box<TimerEventData>> {
+    pub fn batch_acquire(&self, requests: &[(ConnectionId, TimeoutEvent)]) -> Vec<TimerEventData> {
         let count = requests.len();
         if count == 0 {
             return Vec::new();
@@ -345,9 +371,9 @@ impl TimerEventDataPool {
     /// SIMD optimized batch fill from cache
     fn simd_fill_from_cache(
         &self,
-        result: &mut Vec<Box<TimerEventData>>,
+        result: &mut Vec<TimerEventData>,
         requests: &[(ConnectionId, TimeoutEvent)],
-        batch_cache: &mut Vec<Box<TimerEventData>>,
+        batch_cache: &mut Vec<TimerEventData>,
     ) {
         let count = requests.len();
         let mut i = result.len();
@@ -372,7 +398,7 @@ impl TimerEventDataPool {
             for j in 0..8 {
                 if let Some(mut obj) = batch_cache.pop() {
                     obj.connection_id = validated_ids[j];
-                    obj.timeout_event = requests[i + j].1.clone();
+                    obj.timeout_event = requests[i + j].1;
                     result.push(obj);
                 }
             }
@@ -398,7 +424,7 @@ impl TimerEventDataPool {
             for j in 0..4 {
                 if let Some(mut obj) = batch_cache.pop() {
                     obj.connection_id = validated_ids[j];
-                    obj.timeout_event = requests[i + j].1.clone();
+                    obj.timeout_event = requests[i + j].1;
                     result.push(obj);
                 }
             }
@@ -412,7 +438,7 @@ impl TimerEventDataPool {
             if let Some(mut obj) = batch_cache.pop() {
                 let (connection_id, timeout_event) = &requests[i];
                 obj.connection_id = *connection_id;
-                obj.timeout_event = timeout_event.clone();
+                obj.timeout_event = *timeout_event;
                 result.push(obj);
                 i += 1;
             }
@@ -423,9 +449,9 @@ impl TimerEventDataPool {
     /// SIMD optimized batch fill from main pool
     fn simd_fill_from_pool(
         &self,
-        result: &mut Vec<Box<TimerEventData>>,
+        result: &mut Vec<TimerEventData>,
         requests: &[(ConnectionId, TimeoutEvent)],
-        pool: &mut Vec<Box<TimerEventData>>,
+        pool: &mut Vec<TimerEventData>,
     ) {
         let count = requests.len();
         let mut i = result.len();
@@ -447,7 +473,7 @@ impl TimerEventDataPool {
             for j in 0..8 {
                 if let Some(mut obj) = pool.pop() {
                     obj.connection_id = processed_ids[j];
-                    obj.timeout_event = requests[i + j].1.clone();
+                    obj.timeout_event = requests[i + j].1;
                     result.push(obj);
                 }
             }
@@ -472,7 +498,7 @@ impl TimerEventDataPool {
             for j in 0..4 {
                 if let Some(mut obj) = pool.pop() {
                     obj.connection_id = processed_ids[j];
-                    obj.timeout_event = requests[i + j].1.clone();
+                    obj.timeout_event = requests[i + j].1;
                     result.push(obj);
                 }
             }
@@ -486,7 +512,7 @@ impl TimerEventDataPool {
             if let Some(mut obj) = pool.pop() {
                 let (connection_id, timeout_event) = &requests[i];
                 obj.connection_id = *connection_id;
-                obj.timeout_event = timeout_event.clone();
+                obj.timeout_event = *timeout_event;
                 result.push(obj);
                 i += 1;
             }
@@ -497,7 +523,7 @@ impl TimerEventDataPool {
     /// SIMD optimized batch create remaining objects
     fn simd_create_remaining_objects(
         &self,
-        result: &mut Vec<Box<TimerEventData>>,
+        result: &mut Vec<TimerEventData>,
         requests: &[(ConnectionId, TimeoutEvent)],
     ) {
         let count = requests.len();
@@ -520,7 +546,7 @@ impl TimerEventDataPool {
             for j in 0..8 {
                 let connection_id = processed_ids[j];
                 let timeout_event = &requests[i + j].1;
-                result.push(Box::new(TimerEventData::new(connection_id, timeout_event.clone())));
+                result.push(TimerEventData::new(connection_id, *timeout_event));
             }
             
             i += 8;
@@ -543,7 +569,7 @@ impl TimerEventDataPool {
             for j in 0..4 {
                 let connection_id = processed_ids[j];
                 let timeout_event = &requests[i + j].1;
-                result.push(Box::new(TimerEventData::new(connection_id, timeout_event.clone())));
+                result.push(TimerEventData::new(connection_id, *timeout_event));
             }
             
             i += 4;
@@ -553,14 +579,14 @@ impl TimerEventDataPool {
         // Create remaining objects
         while i < count {
             let (connection_id, timeout_event) = &requests[i];
-            result.push(Box::new(TimerEventData::new(*connection_id, timeout_event.clone())));
+            result.push(TimerEventData::new(*connection_id, *timeout_event));
             i += 1;
         }
     }
 
     /// 批量释放对象（高性能版本）
     /// Batch release objects (high-performance version)
-    pub fn batch_release(&self, objects: Vec<Box<TimerEventData>>) {
+    pub fn batch_release(&self, objects: Vec<TimerEventData>) {
         if objects.is_empty() {
             return;
         }
@@ -628,25 +654,25 @@ impl TimerEventData {
 
     /// 使用对象池高效创建定时器事件数据
     /// Efficiently create timer event data using object pool
-    pub fn from_pool(connection_id: ConnectionId, timeout_event: TimeoutEvent) -> Box<Self> {
+    pub fn from_pool(connection_id: ConnectionId, timeout_event: TimeoutEvent) -> Self {
         TIMER_EVENT_DATA_POOL.acquire(connection_id, timeout_event)
     }
 
     /// 批量创建定时器事件数据（高性能版本）
     /// Batch create timer event data (high-performance version)
-    pub fn batch_from_pool(requests: &[(ConnectionId, TimeoutEvent)]) -> Vec<Box<Self>> {
+    pub fn batch_from_pool(requests: &[(ConnectionId, TimeoutEvent)]) -> Vec<Self> {
         TIMER_EVENT_DATA_POOL.batch_acquire(requests)
     }
 
     /// 将对象返回到对象池中
     /// Return object to object pool
-    pub fn return_to_pool(self: Box<Self>) {
+    pub fn return_to_pool(self) {
         TIMER_EVENT_DATA_POOL.release(self);
     }
 
     /// 批量将对象返回到对象池中
     /// Batch return objects to object pool
-    pub fn batch_return_to_pool(objects: Vec<Box<Self>>) {
+    pub fn batch_return_to_pool(objects: Vec<Self>) {
         TIMER_EVENT_DATA_POOL.batch_release(objects);
     }
 }
@@ -660,7 +686,7 @@ pub struct TimerEvent {
     pub id: TimerEventId,
     /// 事件数据（使用Box以支持对象池）
     /// Event data (using Box for object pool support)
-    pub data: Box<TimerEventData>,
+    pub data: TimerEventData,
     /// 回调通道，用于向注册者发送超时通知
     /// Callback channel, used to send timeout notifications to registrant
     pub callback_tx: mpsc::Sender<TimerEventData>,
@@ -676,7 +702,7 @@ impl TimerEvent {
     ) -> Self {
         Self {
             id,
-            data: Box::new(data),
+            data,
             callback_tx,
         }
     }
@@ -730,11 +756,11 @@ impl TimerEvent {
     pub async fn trigger(self) {
         let timer_id = self.id;
         let connection_id = self.data.connection_id;
-        let event_type = self.data.timeout_event.clone();
+        let event_type = self.data.timeout_event;
         
         // 克隆数据用于发送，原对象将被回收到池中
         // Clone data for sending, original object will be recycled to pool
-        let data_for_send = TimerEventData::new(connection_id, event_type.clone());
+        let data_for_send = TimerEventData::new(connection_id, event_type);
         
         if let Err(err) = self.callback_tx.send(data_for_send).await {
             tracing::warn!(

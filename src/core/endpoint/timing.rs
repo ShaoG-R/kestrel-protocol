@@ -108,7 +108,7 @@ impl TimerManager {
         let registration = TimerRegistration::new(
             self.connection_id,
             delay,
-            timeout_event.clone(),
+            timeout_event,
             self.timeout_tx.clone(),
         );
 
@@ -133,10 +133,7 @@ impl TimerManager {
     /// Cancel timer of specified type
     pub async fn cancel_timer(&mut self, timeout_event: &TimeoutEvent) -> bool {
         if let Some(handle) = self.active_timers.remove(timeout_event) {
-            match handle.cancel().await {
-                Ok(cancelled) => cancelled,
-                Err(_) => false,
-            }
+            handle.cancel().await.unwrap_or_default()
         } else {
             false
         }

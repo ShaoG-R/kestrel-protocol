@@ -138,6 +138,12 @@ pub struct BatchTimerResult<T> {
     pub failures: Vec<(usize, TimerError)>, // (index, error)
 }
 
+impl Default for BatchTimerResult<TimerHandle> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> BatchTimerResult<T> {
     /// 创建新的批量结果
     /// Create new batch result
@@ -578,7 +584,7 @@ impl GlobalTimerTask {
         // 为批量对象池API准备数据
         // Prepare data for batch object pool API
         let pool_requests: Vec<_> = registrations.iter()
-            .map(|reg| (reg.connection_id, reg.timeout_event.clone()))
+            .map(|reg| (reg.connection_id, reg.timeout_event))
             .collect();
         let callback_txs: Vec<_> = registrations.iter()
             .map(|reg| reg.callback_tx.clone())
@@ -794,7 +800,7 @@ impl GlobalTimerTask {
             .map(|entry| {
                 let entry_id = entry.id;
                 let connection_id = entry.event.data.connection_id;
-                let event_type = entry.event.data.timeout_event.clone();
+                let event_type = entry.event.data.timeout_event;
                 
                 async move {
                     entry.event.trigger().await;
