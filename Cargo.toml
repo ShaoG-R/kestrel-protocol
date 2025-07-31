@@ -15,6 +15,8 @@ thiserror = "2.0.12"
 tokio = { version = "1.47.0", features = ["full", "test-util"] }
 tracing = "0.1.41"
 wide = "0.7"
+rayon = "1.10.0"
+num_cpus = "1.16"
 
 [dev-dependencies]
 tracing-subscriber  = { version = "0.3.19", features = ["env-filter"] }

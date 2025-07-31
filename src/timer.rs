@@ -9,6 +9,7 @@
 //! including retransmission timeouts, idle timeouts, path validation timeouts, etc.
 
 pub mod event;
+pub mod parallel;
 pub mod task;
 pub mod wheel;
 
@@ -16,5 +17,9 @@ pub mod wheel;
 mod tests;
 
 pub use event::{TimerEvent, TimerEventData};
+pub use parallel::{
+    HybridParallelTimerSystem, OptimalParallelStrategy, 
+    ProcessedTimerData, ParallelProcessingResult, ParallelProcessingStats
+};
 pub use task::{GlobalTimerTask, TimerRegistration, TimerHandle};
 pub use wheel::{TimingWheel, TimerEntry, TimerEntryId};
