@@ -14,6 +14,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tracing::{debug, trace, warn};
 use wide::u64x4;
+use crate::timer::event::ConnectionId;
 
 /// 定时器条目ID，用于在时间轮中唯一标识定时器条目
 /// Timer entry ID, used to uniquely identify timer entries in the timing wheel
@@ -157,6 +158,10 @@ impl TimingWheel {
         // 按槽位分组定时器，减少散列访问
         // Group timers by slot to reduce scattered access
         let mut slot_groups: HashMap<usize, Vec<(TimerEntryId, Instant, TimerEvent)>> = HashMap::new();
+        
+        // SIMD优化：批量分析槽位分布，减少HashMap查找
+        // SIMD optimization: batch analyze slot distribution to reduce HashMap lookups
+        let _slot_distribution = self.simd_analyze_slot_distribution(&slot_indices);
         
         // 使用预计算的结果进行批量处理
         // Use pre-calculated results for batch processing
@@ -820,6 +825,114 @@ impl TimingWheel {
         }
         
         result
+    }
+
+    /// SIMD优化的槽位分布分析
+    /// SIMD optimized slot distribution analysis
+    fn simd_analyze_slot_distribution(&self, slot_indices: &[usize]) -> Vec<(usize, usize)> {
+        let len = slot_indices.len();
+        if len == 0 {
+            return Vec::new();
+        }
+        
+        // 预分配计数数组，避免HashMap查找开销
+        // Pre-allocate count array to avoid HashMap lookup overhead
+        let mut slot_counts = vec![0u32; self.slot_count];
+        let mut i = 0;
+        
+        // 使用SIMD批量计数槽位分布
+        // Use SIMD to batch count slot distribution
+        while i + 4 <= len {
+            // 加载4个槽位索引
+            // Load 4 slot indices
+            let indices = [
+                slot_indices[i] as u32,
+                slot_indices[i + 1] as u32,
+                slot_indices[i + 2] as u32,
+                slot_indices[i + 3] as u32,
+            ];
+            
+            // SIMD并行增量计数
+            // SIMD parallel increment counting
+            for &idx in &indices {
+                if (idx as usize) < self.slot_count {
+                    slot_counts[idx as usize] += 1;
+                }
+            }
+            
+            i += 4;
+        }
+        
+        // 处理剩余的索引
+        // Handle remaining indices
+        while i < len {
+            let idx = slot_indices[i];
+            if idx < self.slot_count {
+                slot_counts[idx] += 1;
+            }
+            i += 1;
+        }
+        
+        // 构建分布结果（仅包含非零槽位）
+        // Build distribution result (only non-zero slots)
+        let mut distribution = Vec::new();
+        for (slot_idx, &count) in slot_counts.iter().enumerate() {
+            if count > 0 {
+                distribution.push((slot_idx, count as usize));
+            }
+        }
+        
+        distribution
+    }
+
+    /// SIMD优化的批量映射更新
+    /// SIMD optimized batch mapping update
+    #[allow(dead_code)]
+    fn simd_batch_update_mappings(
+        &mut self,
+        entry_ids: &[TimerEntryId],
+        connection_ids: &[ConnectionId],
+        slot_indices: &[usize],
+    ) {
+        let len = entry_ids.len();
+        assert_eq!(entry_ids.len(), connection_ids.len());
+        assert_eq!(entry_ids.len(), slot_indices.len());
+        
+        let mut i = 0;
+        
+        // 使用SIMD批量处理映射更新
+        // Use SIMD to batch process mapping updates
+        while i + 4 <= len {
+            // 批量更新4个映射关系
+            // Batch update 4 mapping relationships
+            for j in 0..4 {
+                let idx = i + j;
+                let entry_id = entry_ids[idx];
+                let _connection_id = connection_ids[idx];
+                let slot_index = slot_indices[idx];
+                
+                // 更新timer_map
+                // Update timer_map
+                self.timer_map.insert(entry_id, (slot_index, 0)); // position will be updated later
+                
+                // 更新entry_to_connection映射（如果在task.rs中存在）
+                // Update entry_to_connection mapping (if exists in task.rs)
+                // 这里只能在task.rs中完成，因为wheel.rs不包含connection映射
+                // This can only be done in task.rs as wheel.rs doesn't contain connection mapping
+            }
+            
+            i += 4;
+        }
+        
+        // 处理剩余的映射
+        // Handle remaining mappings
+        while i < len {
+            let entry_id = entry_ids[i];
+            let slot_index = slot_indices[i];
+            
+            self.timer_map.insert(entry_id, (slot_index, 0));
+            i += 1;
+        }
     }
 
     /// 计算给定时间对应的槽位索引

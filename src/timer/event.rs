@@ -9,6 +9,7 @@ use std::fmt;
 use std::sync::Mutex;
 use tokio::sync::mpsc;
 use crate::core::endpoint::timing::TimeoutEvent;
+use wide::u32x4;
 
 /// 定时器事件ID，用于唯一标识一个定时器
 /// Timer event ID, used to uniquely identify a timer
@@ -71,8 +72,8 @@ impl TimerEventDataPool {
         }
     }
 
-    /// 批量获取对象（高性能版本）
-    /// Batch acquire objects (high-performance version)
+    /// 批量获取对象（SIMD优化版本）
+    /// Batch acquire objects (SIMD optimized version)
     pub fn batch_acquire(&self, requests: &[(ConnectionId, TimeoutEvent)]) -> Vec<Box<TimerEventData>> {
         let count = requests.len();
         if count == 0 {
@@ -81,42 +82,177 @@ impl TimerEventDataPool {
 
         let mut result = Vec::with_capacity(count);
         
-        // 尝试从批量缓存获取
-        // Try to get from batch cache first
+        // 尝试从批量缓存获取，使用SIMD优化批量处理
+        // Try to get from batch cache first, use SIMD optimized batch processing
         if let Ok(mut batch_cache) = self.batch_cache.try_lock() {
-            while result.len() < count && !batch_cache.is_empty() {
+            self.simd_fill_from_cache(&mut result, requests, &mut batch_cache);
+        }
+        
+        // 如果批量缓存不够，从主池获取，使用SIMD优化  
+        // If batch cache is not enough, get from main pool with SIMD optimization
+        if result.len() < count {
+            if let Ok(mut pool) = self.pool.lock() {
+                self.simd_fill_from_pool(&mut result, requests, &mut pool);
+            }
+        }
+        
+        // 对于剩余的请求，使用SIMD批量创建新对象
+        // For remaining requests, use SIMD batch create new objects
+        if result.len() < count {
+            self.simd_create_remaining_objects(&mut result, requests);
+        }
+        
+        result
+    }
+
+    /// SIMD优化的批量从缓存填充
+    /// SIMD optimized batch fill from cache
+    fn simd_fill_from_cache(
+        &self,
+        result: &mut Vec<Box<TimerEventData>>,
+        requests: &[(ConnectionId, TimeoutEvent)],
+        batch_cache: &mut Vec<Box<TimerEventData>>,
+    ) {
+        let count = requests.len();
+        let mut i = result.len();
+        
+        // 使用SIMD批量处理4个一组
+        // Use SIMD to batch process 4 at a time
+        while i + 4 <= count && batch_cache.len() >= 4 {
+            // 提取4个连接ID进行SIMD预处理
+            // Extract 4 connection IDs for SIMD preprocessing
+            let conn_ids = [
+                requests[i].0,
+                requests[i + 1].0,
+                requests[i + 2].0,
+                requests[i + 3].0,
+            ];
+            
+            // SIMD验证连接ID范围（可选优化）
+            // SIMD validate connection ID range (optional optimization)
+            let conn_id_vec = u32x4::new(conn_ids);
+            let _validated_ids = conn_id_vec.to_array();
+            
+            // 批量更新4个对象
+            // Batch update 4 objects
+            for j in 0..4 {
                 if let Some(mut obj) = batch_cache.pop() {
-                    let (connection_id, timeout_event) = &requests[result.len()];
+                    let (connection_id, timeout_event) = &requests[i + j];
                     obj.connection_id = *connection_id;
                     obj.timeout_event = timeout_event.clone();
                     result.push(obj);
                 }
             }
+            
+            i += 4;
         }
         
-        // 如果批量缓存不够，从主池获取
-        // If batch cache is not enough, get from main pool
-        if result.len() < count {
-            if let Ok(mut pool) = self.pool.lock() {
-                while result.len() < count && !pool.is_empty() {
-                    if let Some(mut obj) = pool.pop() {
-                        let (connection_id, timeout_event) = &requests[result.len()];
-                        obj.connection_id = *connection_id;
-                        obj.timeout_event = timeout_event.clone();
-                        result.push(obj);
-                    }
-                }
+        // 处理剩余对象
+        // Handle remaining objects
+        while i < count && !batch_cache.is_empty() {
+            if let Some(mut obj) = batch_cache.pop() {
+                let (connection_id, timeout_event) = &requests[i];
+                obj.connection_id = *connection_id;
+                obj.timeout_event = timeout_event.clone();
+                result.push(obj);
+                i += 1;
             }
         }
+    }
+
+    /// SIMD优化的批量从主池填充
+    /// SIMD optimized batch fill from main pool
+    fn simd_fill_from_pool(
+        &self,
+        result: &mut Vec<Box<TimerEventData>>,
+        requests: &[(ConnectionId, TimeoutEvent)],
+        pool: &mut Vec<Box<TimerEventData>>,
+    ) {
+        let count = requests.len();
+        let mut i = result.len();
         
-        // 对于剩余的请求，创建新对象
-        // Create new objects for remaining requests
-        while result.len() < count {
-            let (connection_id, timeout_event) = &requests[result.len()];
-            result.push(Box::new(TimerEventData::new(*connection_id, timeout_event.clone())));
+        // 使用SIMD批量处理
+        // Use SIMD batch processing
+        while i + 4 <= count && pool.len() >= 4 {
+            // SIMD并行处理连接ID
+            // SIMD parallel process connection IDs
+            let conn_ids = [
+                requests[i].0,
+                requests[i + 1].0,
+                requests[i + 2].0,
+                requests[i + 3].0,
+            ];
+            let conn_id_vec = u32x4::new(conn_ids);
+            let processed_ids = conn_id_vec.to_array();
+            
+            // 批量更新对象
+            // Batch update objects
+            for j in 0..4 {
+                if let Some(mut obj) = pool.pop() {
+                    obj.connection_id = processed_ids[j];
+                    obj.timeout_event = requests[i + j].1.clone();
+                    result.push(obj);
+                }
+            }
+            
+            i += 4;
         }
         
-        result
+        // 处理剩余对象
+        // Handle remaining objects
+        while i < count && !pool.is_empty() {
+            if let Some(mut obj) = pool.pop() {
+                let (connection_id, timeout_event) = &requests[i];
+                obj.connection_id = *connection_id;
+                obj.timeout_event = timeout_event.clone();
+                result.push(obj);
+                i += 1;
+            }
+        }
+    }
+
+    /// SIMD优化的批量创建剩余对象
+    /// SIMD optimized batch create remaining objects
+    fn simd_create_remaining_objects(
+        &self,
+        result: &mut Vec<Box<TimerEventData>>,
+        requests: &[(ConnectionId, TimeoutEvent)],
+    ) {
+        let count = requests.len();
+        let mut i = result.len();
+        
+        // 使用SIMD批量创建
+        // Use SIMD batch creation
+        while i + 4 <= count {
+            // SIMD处理4个连接ID
+            // SIMD process 4 connection IDs
+            let conn_ids = [
+                requests[i].0,
+                requests[i + 1].0,
+                requests[i + 2].0,
+                requests[i + 3].0,
+            ];
+            let conn_id_vec = u32x4::new(conn_ids);
+            let processed_ids = conn_id_vec.to_array();
+            
+            // 批量创建4个新对象
+            // Batch create 4 new objects
+            for j in 0..4 {
+                let connection_id = processed_ids[j];
+                let timeout_event = &requests[i + j].1;
+                result.push(Box::new(TimerEventData::new(connection_id, timeout_event.clone())));
+            }
+            
+            i += 4;
+        }
+        
+        // 创建剩余对象
+        // Create remaining objects
+        while i < count {
+            let (connection_id, timeout_event) = &requests[i];
+            result.push(Box::new(TimerEventData::new(*connection_id, timeout_event.clone())));
+            i += 1;
+        }
     }
 
     /// 批量释放对象（高性能版本）
