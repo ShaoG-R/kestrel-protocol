@@ -55,7 +55,7 @@ impl<T: Transport> Endpoint<T> {
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer
         if let Err(e) = timing.register_idle_timeout(&config).await {
-            return Err(crate::error::Error::TimerError(e));
+            return Err(crate::error::Error::TimerError(e.to_string()));
         }
 
         let endpoint = Self {
@@ -104,7 +104,7 @@ impl<T: Transport> Endpoint<T> {
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer
         if let Err(e) = timing.register_idle_timeout(&config).await {
-            return Err(crate::error::Error::TimerError(e));
+            return Err(crate::error::Error::TimerError(e.to_string()));
         }
 
         let endpoint = Self {

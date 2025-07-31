@@ -75,35 +75,35 @@ impl TimerManager {
         }
     }
 
-    /// 检查是否有到期的定时器事件
-    /// Check for expired timer events
+    /// 检查是否有到期的定时器事件（优化版本）
+    /// Check for expired timer events (optimized version)
     pub async fn check_timer_events(&mut self) -> Vec<TimeoutEvent> {
-        let mut events = Vec::new();
+        // 预分配容量，避免动态增长
+        // Pre-allocate capacity to avoid dynamic growth
+        let mut events = Vec::with_capacity(8);
 
         while let Ok(event_data) = self.timeout_rx.try_recv() {
-            let timeout_event = event_data.timeout_event.clone();
-            events.push(timeout_event.clone());
+            let timeout_event = event_data.timeout_event;
             // 从活跃定时器中移除这个事件类型
             // Remove this event type from active timers
             self.active_timers.remove(&timeout_event);
+            // 避免不必要的克隆，直接移动所有权
+            // Avoid unnecessary cloning, move ownership directly
+            events.push(timeout_event);
         }
 
         events
     }
 
-    /// 注册定时器到全局定时器任务
-    /// Register timer with global timer task
+    /// 注册定时器到全局定时器任务（优化版本）
+    /// Register timer with global timer task (optimized version)
     pub async fn register_timer(
         &mut self,
         timeout_event: TimeoutEvent,
         delay: Duration,
-    ) -> Result<(), String> {
-        // 如果已经有这个类型的定时器，先取消它
-        // If there's already a timer of this type, cancel it first
-        if let Some(old_handle) = self.active_timers.remove(&timeout_event) {
-            let _ = old_handle.cancel().await;
-        }
-
+    ) -> Result<(), &'static str> {
+        // 高效的定时器替换：先注册新的，成功后再取消旧的
+        // Efficient timer replacement: register new first, cancel old after success
         let registration = TimerRegistration::new(
             self.connection_id,
             delay,
@@ -112,11 +112,19 @@ impl TimerManager {
         );
 
         match self.timer_handle.register_timer(registration).await {
-            Ok(handle) => {
-                self.active_timers.insert(timeout_event, handle);
+            Ok(new_handle) => {
+                // 如果之前有同类型定时器，取消它（异步进行，不阻塞）
+                // If there was a previous timer of same type, cancel it (async, non-blocking)
+                if let Some(old_handle) = self.active_timers.insert(timeout_event, new_handle) {
+                    // 使用 tokio::spawn 异步取消，避免阻塞当前操作
+                    // Use tokio::spawn for async cancellation to avoid blocking current operation
+                    tokio::spawn(async move {
+                        let _ = old_handle.cancel().await;
+                    });
+                }
                 Ok(())
             }
-            Err(err) => Err(format!("Failed to register timer: {err:?}")),
+            Err(_) => Err("Failed to register timer"),
         }
     }
 
@@ -143,31 +151,30 @@ impl TimerManager {
 
     /// 注册空闲超时定时器
     /// Register idle timeout timer
-    pub async fn register_idle_timeout(&mut self, config: &Config) -> Result<(), String> {
+    pub async fn register_idle_timeout(&mut self, config: &Config) -> Result<(), &'static str> {
         self.register_timer(TimeoutEvent::IdleTimeout, config.connection.idle_timeout)
             .await
     }
 
     /// 注册路径验证超时定时器
     /// Register path validation timeout timer
-    pub async fn register_path_validation_timeout(&mut self, delay: Duration) -> Result<(), String> {
+    pub async fn register_path_validation_timeout(&mut self, delay: Duration) -> Result<(), &'static str> {
         self.register_timer(TimeoutEvent::PathValidationTimeout, delay)
             .await
     }
 
     /// 注册连接超时定时器
     /// Register connection timeout timer
-    pub async fn register_connection_timeout(&mut self, delay: Duration) -> Result<(), String> {
+    pub async fn register_connection_timeout(&mut self, delay: Duration) -> Result<(), &'static str> {
         self.register_timer(TimeoutEvent::ConnectionTimeout, delay)
             .await
     }
 
-    /// 重置空闲超时定时器（在收到数据包时调用）
-    /// Reset idle timeout timer (called when receiving packets)
-    pub async fn reset_idle_timeout(&mut self, config: &Config) -> Result<(), String> {
-        // 取消现有的空闲超时定时器
-        self.cancel_timer(&TimeoutEvent::IdleTimeout).await;
-        // 注册新的空闲超时定时器
+    /// 重置空闲超时定时器（在收到数据包时调用）- 优化版本
+    /// Reset idle timeout timer (called when receiving packets) - optimized version
+    pub async fn reset_idle_timeout(&mut self, config: &Config) -> Result<(), &'static str> {
+        // 直接注册新定时器，自动替换旧定时器（更高效）
+        // Directly register new timer, automatically replace old timer (more efficient)
         self.register_idle_timeout(config).await
     }
 }
@@ -236,7 +243,7 @@ impl TimingManager {
         &mut self,
         timeout_event: TimeoutEvent,
         delay: Duration,
-    ) -> Result<(), String> {
+    ) -> Result<(), &'static str> {
         self.timer_manager.register_timer(timeout_event, delay).await
     }
 
@@ -254,25 +261,25 @@ impl TimingManager {
 
     /// 注册空闲超时定时器
     /// Register idle timeout timer
-    pub async fn register_idle_timeout(&mut self, config: &Config) -> Result<(), String> {
+    pub async fn register_idle_timeout(&mut self, config: &Config) -> Result<(), &'static str> {
         self.timer_manager.register_idle_timeout(config).await
     }
 
     /// 注册路径验证超时定时器
     /// Register path validation timeout timer
-    pub async fn register_path_validation_timeout(&mut self, delay: Duration) -> Result<(), String> {
+    pub async fn register_path_validation_timeout(&mut self, delay: Duration) -> Result<(), &'static str> {
         self.timer_manager.register_path_validation_timeout(delay).await
     }
 
     /// 注册连接超时定时器
     /// Register connection timeout timer
-    pub async fn register_connection_timeout(&mut self, delay: Duration) -> Result<(), String> {
+    pub async fn register_connection_timeout(&mut self, delay: Duration) -> Result<(), &'static str> {
         self.timer_manager.register_connection_timeout(delay).await
     }
 
     /// 重置空闲超时定时器（在收到数据包时调用）
     /// Reset idle timeout timer (called when receiving packets)
-    pub async fn reset_idle_timeout(&mut self, config: &Config) -> Result<(), String> {
+    pub async fn reset_idle_timeout(&mut self, config: &Config) -> Result<(), &'static str> {
         self.timer_manager.reset_idle_timeout(config).await
     }
 
@@ -552,7 +559,7 @@ impl TimingManager {
 mod tests {
     use super::*;
     use tokio::time::{Duration, sleep};
-    use crate::timer::task::GlobalTimerTaskHandle;
+    use crate::timer::task::{GlobalTimerTaskHandle, start_global_timer_task};
 
     // 创建测试用的定时器句柄
     fn create_test_timer_handle() -> GlobalTimerTaskHandle {
@@ -1086,5 +1093,49 @@ mod tests {
         let event1 = TimeoutEvent::PathValidationTimeout;
         let event2 = event1.clone();
         assert_eq!(event1, event2);
+    }
+
+    #[tokio::test]
+    async fn test_caller_side_performance() {
+        let handle = start_global_timer_task();
+        let mut manager = TimerManager::new(1, handle.clone());
+        let config = Config::default();
+
+        // 性能测试：频繁的定时器重置操作
+        // Performance test: frequent timer reset operations
+        let start_time = tokio::time::Instant::now();
+        
+        for _ in 0..100 {
+            // 这个操作现在应该更高效，因为：
+            // 1. 减少了不必要的克隆
+            // 2. 异步取消不阻塞注册
+            // 3. 使用了对象池
+            // This operation should now be more efficient because:
+            // 1. Reduced unnecessary cloning
+            // 2. Async cancellation doesn't block registration  
+            // 3. Uses object pool
+            manager.reset_idle_timeout(&config).await.unwrap();
+        }
+        
+        let duration = start_time.elapsed();
+        println!("100次定时器重置耗时: {:?}", duration);
+        println!("平均每次重置: {:?}", duration / 100);
+
+        // 性能断言：100次重置应该在100ms内完成（debug模式下的宽松要求）
+        // Performance assertion: 100 resets should complete within 100ms (lenient for debug mode)
+        assert!(duration < Duration::from_millis(100), 
+            "调用端性能不达标: {:?}", duration);
+
+        // 测试事件检查的性能
+        // Test event checking performance  
+        let start_time = tokio::time::Instant::now();
+        for _ in 0..1000 {
+            manager.check_timer_events().await;
+        }
+        let check_duration = start_time.elapsed();
+        println!("1000次事件检查耗时: {:?}", check_duration);
+        println!("平均每次检查: {:?}", check_duration / 1000);
+
+        handle.shutdown().await.unwrap();
     }
 }

@@ -21,6 +21,30 @@ use tokio::{
 };
 use tracing::{debug, error, info, trace, warn};
 
+/// 批量处理缓冲区，用于减少内存分配
+/// Batch processing buffers for reducing memory allocation
+struct BatchProcessingBuffers {
+    /// 连接到过期定时器ID的映射缓冲区
+    /// Buffer for connection to expired timer IDs mapping
+    expired_by_connection: HashMap<u32, Vec<u64>>,
+}
+
+impl BatchProcessingBuffers {
+    /// 创建新的批量处理缓冲区
+    /// Create new batch processing buffers
+    fn new() -> Self {
+        Self {
+            expired_by_connection: HashMap::with_capacity(64),
+        }
+    }
+
+    /// 清空所有缓冲区以供重用
+    /// Clear all buffers for reuse
+    fn clear(&mut self) {
+        self.expired_by_connection.clear();
+    }
+}
+
 /// 定时器注册请求
 /// Timer registration request
 #[derive(Debug)]
@@ -203,6 +227,9 @@ pub struct GlobalTimerTask {
     /// 统计信息
     /// Statistics
     stats: TimerTaskStats,
+    /// 预分配的容器，用于批量处理时减少内存分配
+    /// Pre-allocated containers for reducing memory allocation during batch processing
+    batch_processing_buffers: BatchProcessingBuffers,
 }
 
 impl GlobalTimerTask {
@@ -228,6 +255,7 @@ impl GlobalTimerTask {
                 cancelled_timers: 0,
                 wheel_stats,
             },
+            batch_processing_buffers: BatchProcessingBuffers::new(),
         };
 
         (task, command_tx)
@@ -345,18 +373,15 @@ impl GlobalTimerTask {
         let event_id = self.next_event_id;
         self.next_event_id += 1;
 
-        // 创建定时器事件数据
-        // Create timer event data
-        let event_data = TimerEventData::new(
-            registration.connection_id, 
-            registration.timeout_event.clone()
+        // 使用对象池高效创建定时器事件 - 内存优化
+        // Efficiently create timer event using object pool - memory optimization
+        let timeout_event_for_log = registration.timeout_event.clone();
+        let timer_event = TimerEvent::from_pool(
+            event_id,
+            registration.connection_id,
+            registration.timeout_event,
+            registration.callback_tx,
         );
-
-        let timeout_event_for_log = event_data.timeout_event.clone();
-
-        // 创建定时器事件
-        // Create timer event
-        let timer_event = TimerEvent::new(event_id, event_data, registration.callback_tx);
 
         // 添加到时间轮
         // Add to timing wheel
@@ -441,8 +466,8 @@ impl GlobalTimerTask {
         count
     }
 
-    /// 推进时间轮并处理到期的定时器
-    /// Advance timing wheel and process expired timers
+    /// 推进时间轮并处理到期的定时器（高性能版本）
+    /// Advance timing wheel and process expired timers (high-performance version)
     async fn advance_timing_wheel(&mut self) {
         let now = Instant::now();
         let expired_timers = self.timing_wheel.advance(now);
@@ -451,41 +476,42 @@ impl GlobalTimerTask {
             return;
         }
 
-        // 第一步：收集到期定时器的连接映射信息（在清理前）
-        // Step 1: Collect connection mapping info for expired timers (before cleanup)
-        let mut expired_by_connection: std::collections::HashMap<u32, Vec<u64>> = std::collections::HashMap::new();
+        // 清空并重用缓冲区，减少内存分配
+        // Clear and reuse buffers to reduce memory allocation
+        self.batch_processing_buffers.clear();
+
+        // 第一步：使用预分配缓冲区收集连接映射信息
+        // Step 1: Use pre-allocated buffers to collect connection mapping info
         for entry in &expired_timers {
             if let Some(&conn_id) = self.entry_to_connection.get(&entry.id) {
-                expired_by_connection.entry(conn_id).or_default().push(entry.id);
+                self.batch_processing_buffers.expired_by_connection
+                    .entry(conn_id)
+                    .or_insert_with(|| Vec::with_capacity(4))
+                    .push(entry.id);
             }
         }
 
-        // 第二步：清理反向映射关系
-        // Step 2: Clean up reverse mapping relationships
+        // 第二步：批量清理映射关系
+        // Step 2: Batch cleanup mapping relationships
         for entry in &expired_timers {
             self.entry_to_connection.remove(&entry.id);
         }
 
-        // 第三步：批量清理连接定时器映射，使用HashSet进行O(1)删除
-        // Step 3: Batch cleanup connection timer mappings using HashSet for O(1) deletion
-        for (conn_id, expired_ids) in expired_by_connection {
+        // 第三步：高效清理连接定时器映射
+        // Step 3: Efficiently cleanup connection timer mappings
+        for (conn_id, expired_ids) in self.batch_processing_buffers.expired_by_connection.drain() {
             if let Some(entry_ids) = self.connection_timers.get_mut(&conn_id) {
-                // 直接从HashSet中移除，O(1)操作
-                // Direct removal from HashSet, O(1) operation
                 for expired_id in expired_ids {
                     entry_ids.remove(&expired_id);
                 }
-                
-                // 如果该连接没有更多定时器，移除连接条目
-                // If connection has no more timers, remove connection entry
                 if entry_ids.is_empty() {
                     self.connection_timers.remove(&conn_id);
                 }
             }
         }
 
-        // 第四步：批量并发触发所有定时器 - 关键性能优化
-        // Step 4: Batch concurrent trigger all timers - key performance optimization
+        // 第四步：批量并发触发所有定时器
+        // Step 4: Batch concurrent trigger all timers
         let trigger_futures: Vec<_> = expired_timers
             .into_iter()
             .map(|entry| {
@@ -500,30 +526,23 @@ impl GlobalTimerTask {
             })
             .collect();
 
-        // 并发执行所有定时器触发，大幅提升性能
-        // Execute all timer triggers concurrently, significantly improve performance
+        // 并发执行所有定时器触发
+        // Execute all timer triggers concurrently
         let results = futures::future::join_all(trigger_futures).await;
         
         // 更新统计信息
         // Update statistics
-        self.stats.processed_timers += results.len() as u64;
+        let processed_count = results.len();
+        self.stats.processed_timers += processed_count as u64;
         
-        // 批量记录日志，减少单个trace调用开销
-        // Batch log recording, reduce individual trace call overhead
-        if results.len() > 1 {
-            debug!(
-                processed_count = results.len(),
-                "Batch processed expired timers"
-            );
+        // 高效日志记录
+        // Efficient logging
+        if processed_count > 1 {
+            debug!(processed_count, "Batch processed expired timers");
         }
         
         for (entry_id, connection_id, event_type) in results {
-            trace!(
-                entry_id,
-                connection_id,
-                event_type = ?event_type,
-                "Timer event processed"
-            );
+            trace!(entry_id, connection_id, event_type = ?event_type, "Timer event processed");
         }
     }
 
