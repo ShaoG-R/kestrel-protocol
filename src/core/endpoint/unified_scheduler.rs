@@ -15,7 +15,7 @@ use tokio::time::Instant;
 use tracing::{debug, trace};
 
 use crate::core::endpoint::timing::TimeoutEvent;
-use crate::core::reliability::TimeoutCheckResult;
+use crate::packet::frame::Frame;
 
 /// 超时源标识，用于区分不同层次的超时
 /// Timeout source identifier to distinguish timeouts from different layers
@@ -34,6 +34,24 @@ pub enum TimeoutSource {
 
 
 
+/// 超时检查结果 - 仅包含超时事件
+/// Timeout check result - only contains timeout events
+#[derive(Debug, Clone)]
+pub struct TimeoutCheckResult {
+    /// 发生的超时事件列表
+    /// List of timeout events that occurred
+    pub events: Vec<TimeoutEvent>,
+}
+
+/// 重传检查结果 - 仅包含重传帧
+/// Retransmission check result - only contains retransmission frames
+#[derive(Debug)]
+pub struct RetransmissionCheckResult {
+    /// 需要重传的帧
+    /// Frames that need retransmission
+    pub frames_to_retransmit: Vec<Frame>,
+}
+
 /// 统一超时层接口，各层需要实现此trait
 /// Unified timeout layer interface, each layer should implement this trait
 pub trait TimeoutLayer {
@@ -41,9 +59,9 @@ pub trait TimeoutLayer {
     /// Get the deadline for the next timeout
     fn next_deadline(&self) -> Option<Instant>;
     
-    /// 检查超时事件并返回结果
-    /// Check timeout events and return results
-    fn check_timeouts(&mut self, now: Instant) -> TimeoutCheckResult;
+    /// 检查超时事件并返回结果（职责分离：仅返回事件，不包含重传帧）
+    /// Check timeout events and return results (separated responsibility: only events, no retransmission frames)
+    fn check_timeout_events(&mut self, now: Instant) -> TimeoutCheckResult;
     
     /// 获取层名称（用于调试）
     /// Get layer name (for debugging)
@@ -54,6 +72,18 @@ pub trait TimeoutLayer {
     fn stats(&self) -> Option<String> {
         None
     }
+}
+
+/// 重传层接口，专门处理重传逻辑
+/// Retransmission layer interface, specifically handles retransmission logic
+pub trait RetransmissionLayer {
+    /// 检查重传超时并返回需要重传的帧
+    /// Check retransmission timeouts and return frames that need retransmission
+    fn check_retransmissions(&mut self, now: Instant, context: &crate::packet::frame::RetransmissionContext) -> RetransmissionCheckResult;
+    
+    /// 获取下一个重传超时的截止时间
+    /// Get the deadline for the next retransmission timeout
+    fn next_retransmission_deadline(&self) -> Option<Instant>;
 }
 
 /// 超时模式，用于预测性优化
@@ -228,19 +258,19 @@ impl UnifiedTimeoutScheduler {
         unified_deadline
     }
     
-    /// 执行统一的超时检查
-    /// Execute unified timeout check
-    pub fn check_unified_timeouts(&mut self, layers: &mut [&mut dyn TimeoutLayer]) -> Vec<TimeoutCheckResult> {
+    /// 执行统一的超时检查（重构版本 - 职责分离）
+    /// Execute unified timeout check (refactored version - separated responsibilities)
+    pub fn check_unified_timeout_events(&mut self, layers: &mut [&mut dyn TimeoutLayer]) -> Vec<TimeoutCheckResult> {
         let now = self.time_cache.now();
         let check_start = Instant::now();
         
         let mut results = Vec::with_capacity(layers.len());
         let mut detected_sources = Vec::new();
         
-        // 批量检查所有层的超时
-        // Batch check timeouts for all layers
+        // 批量检查所有层的超时事件
+        // Batch check timeout events for all layers
         for layer in layers.iter_mut() {
-            let layer_result = layer.check_timeouts(now);
+            let layer_result = layer.check_timeout_events(now);
             
             if !layer_result.events.is_empty() {
                 debug!(
@@ -456,13 +486,12 @@ mod tests {
             self.next_deadline
         }
         
-        fn check_timeouts(&mut self, _now: Instant) -> TimeoutCheckResult {
+        fn check_timeout_events(&mut self, _now: Instant) -> TimeoutCheckResult {
             self.check_count.fetch_add(1, Ordering::Relaxed);
             
-                    TimeoutCheckResult {
-            events: self.timeout_events.clone(),
-            frames_to_retransmit: Vec::new(),
-        }
+            TimeoutCheckResult {
+                events: self.timeout_events.clone(),
+            }
         }
         
         fn layer_name(&self) -> &'static str {
@@ -528,7 +557,7 @@ mod tests {
         
         let layers: &mut [&mut dyn TimeoutLayer] = &mut [&mut layer1, &mut layer2];
         
-        let results = scheduler.check_unified_timeouts(layers);
+        let results = scheduler.check_unified_timeout_events(layers);
         
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].events.len(), 1);

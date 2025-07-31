@@ -28,7 +28,7 @@ async fn test_global_timer_integration() {
     sleep(Duration::from_millis(150)).await;
     
     // 检查定时器事件
-    let events = timer_manager.check_timer_events().await;
+    let events = timer_manager.check_timer_events();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0], TimeoutEvent::IdleTimeout);
     
@@ -59,7 +59,7 @@ async fn test_timer_cancellation() {
     sleep(Duration::from_millis(250)).await;
     
     // 检查没有事件
-    let events = timer_manager.check_timer_events().await;
+    let events = timer_manager.check_timer_events();
     assert!(events.is_empty());
     
     let _ = timer_handle.shutdown().await;
@@ -89,7 +89,7 @@ async fn test_multiple_timer_types() {
     sleep(Duration::from_millis(200)).await;
     
     // 检查事件
-    let events = timer_manager.check_timer_events().await;
+    let events = timer_manager.check_timer_events();
     assert_eq!(events.len(), 2);
     assert!(events.contains(&TimeoutEvent::IdleTimeout));
     assert!(events.contains(&TimeoutEvent::PathValidationTimeout));
@@ -122,7 +122,7 @@ async fn test_timer_replacement() {
     sleep(Duration::from_millis(150)).await;
     
     // 应该只有一个事件（短时间的）
-    let events = timer_manager.check_timer_events().await;
+    let events = timer_manager.check_timer_events();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0], TimeoutEvent::IdleTimeout);
     

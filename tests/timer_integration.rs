@@ -34,7 +34,7 @@ async fn test_timer_system_with_real_connection() {
     sleep(Duration::from_millis(250)).await;
     
     // 检查定时器事件
-    let events = timing_manager.check_timer_events().await;
+    let events = timing_manager.check_timer_events();
     assert!(!events.is_empty(), "No timer events received");
     
     // 应该包含路径验证超时事件
@@ -66,7 +66,7 @@ async fn test_timer_reset_functionality() {
     sleep(Duration::from_millis(config.connection.idle_timeout.as_millis() as u64 / 2 + 50)).await;
     
     // 检查事件（应该没有超时事件）
-    let events = timing_manager.check_timer_events().await;
+    let events = timing_manager.check_timer_events();
     assert!(events.is_empty(), "Unexpected timeout events after reset: {:?}", events);
     
     let _ = timer_handle.shutdown().await;
@@ -123,7 +123,7 @@ async fn test_multiple_connections_timer_isolation() {
     
     // 检查每个连接都收到了自己的定时器事件
     for timing_manager in timing_managers.iter_mut() {
-        let events = timing_manager.check_timer_events().await;
+        let events = timing_manager.check_timer_events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0], TimeoutEvent::PathValidationTimeout);
     }

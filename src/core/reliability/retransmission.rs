@@ -324,6 +324,37 @@ impl RetransmissionManager {
         // Delegate to existing method
         self.next_retransmission_deadline(rto)
     }
+
+    /// 检查是否有重传超时
+    /// Check if there are retransmission timeouts
+    ///
+    /// 该方法检查是否有数据包需要重传，但不返回实际的帧数据。
+    /// 这用于分离超时检查和重传帧获取的职责。
+    ///
+    /// This method checks if there are packets that need retransmission, but doesn't
+    /// return the actual frame data. This is used to separate timeout checking from
+    /// frame retrieval responsibilities.
+    pub fn has_retransmission_timeout(&self, rto: Duration, now: Instant) -> bool {
+        // 检查SACK管理器是否有超时的数据包
+        // Check if SACK manager has timed out packets
+        let sack_deadline = self.sack_manager.next_rto_deadline(rto);
+        if let Some(deadline) = sack_deadline {
+            if now >= deadline {
+                return true;
+            }
+        }
+
+        // 检查简单重传管理器是否有超时的数据包
+        // Check if simple retransmission manager has timed out packets
+        let simple_deadline = self.simple_retx_manager.next_retransmission_deadline();
+        if let Some(deadline) = simple_deadline {
+            if now >= deadline {
+                return true;
+            }
+        }
+
+        false
+    }
 }
 
 #[cfg(test)]

@@ -12,8 +12,7 @@ use crate::timer::{
     event::{ConnectionId, TimerEventData},
     task::{GlobalTimerTaskHandle, TimerHandle, TimerRegistration},
 };
-use crate::core::endpoint::unified_scheduler::{TimeoutLayer, UnifiedTimeoutScheduler};
-use crate::core::reliability::TimeoutCheckResult;
+use crate::core::endpoint::unified_scheduler::{TimeoutLayer, TimeoutCheckResult, UnifiedTimeoutScheduler};
 use std::collections::HashMap;
 use tokio::{
     sync::mpsc,
@@ -79,7 +78,7 @@ impl TimerManager {
 
     /// 检查是否有到期的定时器事件（优化版本）
     /// Check for expired timer events (optimized version)
-    pub async fn check_timer_events(&mut self) -> Vec<TimeoutEvent> {
+    pub fn check_timer_events(&mut self) -> Vec<TimeoutEvent> {
         // 预分配容量，避免动态增长
         // Pre-allocate capacity to avoid dynamic growth
         let mut events = Vec::with_capacity(8);
@@ -241,8 +240,8 @@ impl TimingManager {
 
     /// 检查是否有到期的定时器事件
     /// Check for expired timer events
-    pub async fn check_timer_events(&mut self) -> Vec<TimeoutEvent> {
-        self.timer_manager.check_timer_events().await
+    pub fn check_timer_events(&mut self) -> Vec<TimeoutEvent> {
+        self.timer_manager.check_timer_events()
     }
 
     /// 注册定时器到全局定时器任务
@@ -567,10 +566,10 @@ impl TimingManager {
         self.unified_scheduler.calculate_unified_deadline(layers)
     }
 
-    /// 使用统一调度器检查所有层的超时
-    /// Check timeouts for all layers using unified scheduler
-    pub fn check_unified_timeouts(&mut self, layers: &mut [&mut dyn TimeoutLayer]) -> Vec<TimeoutCheckResult> {
-        self.unified_scheduler.check_unified_timeouts(layers)
+    /// 使用统一调度器检查所有层的超时事件
+    /// Check timeout events for all layers using unified scheduler
+    pub fn check_unified_timeout_events(&mut self, layers: &mut [&mut dyn TimeoutLayer]) -> Vec<TimeoutCheckResult> {
+        self.unified_scheduler.check_unified_timeout_events(layers)
     }
 
     /// 获取统一调度器的性能统计
@@ -612,18 +611,13 @@ impl TimeoutLayer for TimingManager {
         Some(self.last_recv_time + default_idle_timeout)
     }
     
-    fn check_timeouts(&mut self, _now: Instant) -> TimeoutCheckResult {
-        // 检查全局定时器事件
-        // Check global timer events
-        let events = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                self.timer_manager.check_timer_events().await
-            })
-        });
+    fn check_timeout_events(&mut self, _now: Instant) -> TimeoutCheckResult {
+        // 检查全局定时器事件（职责分离：仅返回事件，不包含重传帧）
+        // Check global timer events (separated responsibility: only events, no retransmission frames)
+        let events = self.check_timer_events();
         
         TimeoutCheckResult {
             events,
-            frames_to_retransmit: Vec::new(), // TimingManager 不处理重传帧
         }
     }
     
@@ -907,7 +901,7 @@ mod tests {
         sleep(Duration::from_millis(150)).await;
 
         // 检查定时器事件
-        let events = manager.check_timer_events().await;
+        let events = manager.check_timer_events();
         assert!(!events.is_empty());
         assert!(events.contains(&TimeoutEvent::PathValidationTimeout));
         
@@ -933,7 +927,7 @@ mod tests {
         sleep(Duration::from_millis(250)).await;
 
         // 检查没有事件
-        let events = manager.check_timer_events().await;
+        let events = manager.check_timer_events();
         assert!(events.is_empty());
         
         // 清理定时器任务
@@ -961,7 +955,7 @@ mod tests {
         sleep(Duration::from_millis(config.connection.idle_timeout.as_millis() as u64 / 2)).await;
 
         // 检查事件（应该没有超时事件）
-        let events = manager.check_timer_events().await;
+        let events = manager.check_timer_events();
         assert!(events.is_empty());
         
         // 清理定时器任务
@@ -1219,7 +1213,7 @@ mod tests {
         // Test event checking performance  
         let start_time = tokio::time::Instant::now();
         for _ in 0..1000 {
-            manager.check_timer_events().await;
+            manager.check_timer_events();
         }
         let check_duration = start_time.elapsed();
         println!("1000次事件检查耗时: {:?}", check_duration);
@@ -1242,12 +1236,11 @@ mod tests {
         for _ in 0..100 {
             // 创建一个临时的 TimingManager 作为层
             // Create a temporary TimingManager as a layer
-            let temp_manager = TimingManager::new(2, handle.clone());
-            let layers: Vec<&dyn TimeoutLayer> = vec![&temp_manager];
-            
-            // 使用统一调度器计算唤醒时间
-            // Use unified scheduler to calculate wakeup time
-            let _wakeup_time = timing_manager.calculate_unified_wakeup(&layers);
+                    // 使用统一调度器计算唤醒时间（直接测试）
+        // Use unified scheduler to calculate wakeup time (direct test)
+        let temp_manager = TimingManager::new(2, handle.clone());
+        let layers: Vec<&dyn TimeoutLayer> = vec![&temp_manager];
+        let _wakeup_time = timing_manager.calculate_unified_wakeup(&layers);
         }
         
         let duration = start_time.elapsed();
@@ -1272,8 +1265,8 @@ mod tests {
         let handle = start_global_timer_task();
         let mut timing_manager = TimingManager::new(1, handle.clone());
 
-        // 测试缓存效率
-        // Test cache efficiency
+        // 测试缓存效率（使用新的分离接口）
+        // Test cache efficiency (using new separated interfaces)
         let temp_manager = TimingManager::new(2, handle.clone());
         let layers: Vec<&dyn TimeoutLayer> = vec![&temp_manager];
         

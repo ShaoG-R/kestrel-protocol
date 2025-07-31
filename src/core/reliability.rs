@@ -30,17 +30,19 @@ use tokio::time::Instant;
 use tracing::{debug, trace};
 use congestion::CongestionControl;
 use crate::core::endpoint::timing::TimeoutEvent;
-use crate::core::endpoint::unified_scheduler::TimeoutLayer;
+use crate::core::endpoint::unified_scheduler::{TimeoutLayer, TimeoutCheckResult, RetransmissionLayer, RetransmissionCheckResult};
 
-/// 超时检查结果
-/// Timeout check result
+/// 可靠性层超时检查结果（遗留结构体，保持向后兼容）
+/// Reliability layer timeout check result (legacy struct, maintained for backward compatibility)
 ///
 /// 该结构体包含可靠性层超时检查的结果，包括发生的超时事件和需要重传的帧。
+/// 新代码应使用分离的 TimeoutCheckResult 和 RetransmissionCheckResult。
 ///
 /// This struct contains the result of reliability layer timeout checks,
 /// including timeout events that occurred and frames that need retransmission.
+/// New code should use separated TimeoutCheckResult and RetransmissionCheckResult.
 #[derive(Debug)]
-pub struct TimeoutCheckResult {
+pub struct LegacyTimeoutCheckResult {
     /// 发生的超时事件列表
     /// List of timeout events that occurred
     pub events: Vec<TimeoutEvent>,
@@ -538,7 +540,7 @@ impl ReliabilityLayer {
         &mut self, 
         now: Instant, 
         context: &crate::packet::frame::RetransmissionContext,
-    ) -> TimeoutCheckResult {
+    ) -> LegacyTimeoutCheckResult {
         let mut all_events = Vec::new();
         let mut all_frames_to_retransmit = Vec::new();
 
@@ -565,7 +567,7 @@ impl ReliabilityLayer {
             self.rto_estimator.backoff();
         }
 
-        TimeoutCheckResult {
+        LegacyTimeoutCheckResult {
             events: all_events,
             frames_to_retransmit: all_frames_to_retransmit,
         }
@@ -593,19 +595,21 @@ impl TimeoutLayer for ReliabilityLayer {
         self.next_reliability_timeout_deadline()
     }
     
-    fn check_timeouts(&mut self, now: Instant) -> TimeoutCheckResult {
-        // 创建重传上下文 - 使用默认值，实际使用时应传入正确的参数
-        // Create retransmission context - using default values, should pass correct params in actual use
-        let context = crate::packet::frame::RetransmissionContext::new(
-            now,
-            0, // peer_cid - 默认值
-            1, // local_cid - 默认值  
-            1, // timestamp - 默认值
-            0, // recv_window - 默认值
-            1024, // mtu - 默认值
-        );
-        
-        self.check_reliability_timeouts(now, &context)
+    fn check_timeout_events(&mut self, now: Instant) -> TimeoutCheckResult {
+        // 检查可靠性层超时事件（职责分离：仅返回事件）
+        // Check reliability layer timeout events (separated responsibility: only events)
+        let mut events = Vec::new();
+
+        // 检查是否有重传超时
+        // Check if there are retransmission timeouts
+        let rto = self.rto_estimator.rto();
+        if self.retransmission_manager.has_retransmission_timeout(rto, now) {
+            events.push(TimeoutEvent::RetransmissionTimeout);
+        }
+
+        TimeoutCheckResult {
+            events,
+        }
     }
     
     fn layer_name(&self) -> &'static str {
@@ -619,5 +623,38 @@ impl TimeoutLayer for ReliabilityLayer {
             self.retransmission_manager.total_in_flight_count(),
             self.rto_estimator.rto()
         ))
+    }
+}
+
+impl RetransmissionLayer for ReliabilityLayer {
+    fn check_retransmissions(&mut self, now: Instant, context: &crate::packet::frame::RetransmissionContext) -> RetransmissionCheckResult {
+        // 检查重传超时并返回需要重传的帧（职责分离：专门处理重传）
+        // Check retransmission timeouts and return frames that need retransmission (separated responsibility: specifically handles retransmission)
+        let rto = self.rto_estimator.rto();
+        let (_, frames_to_resend) = self.retransmission_manager.check_retransmission_timeouts(rto, now, context);
+
+        // 如果有重传超时，处理拥塞控制和RTO退避
+        // If there are retransmission timeouts, handle congestion control and RTO backoff
+        if !frames_to_resend.is_empty() {
+            let old_cwnd = self.congestion_control.congestion_window();
+            self.congestion_control.on_packet_loss(now);
+            let new_cwnd = self.congestion_control.congestion_window();
+            debug!(
+                old_cwnd,
+                new_cwnd,
+                count = frames_to_resend.len(),
+                "Congestion window reduced due to retransmissions"
+            );
+            self.rto_estimator.backoff();
+        }
+
+        RetransmissionCheckResult {
+            frames_to_retransmit: frames_to_resend,
+        }
+    }
+    
+    fn next_retransmission_deadline(&self) -> Option<Instant> {
+        let rto = self.rto_estimator.rto();
+        self.retransmission_manager.next_retransmission_timeout_deadline(rto)
     }
 } 

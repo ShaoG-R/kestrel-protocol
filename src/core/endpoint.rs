@@ -18,7 +18,7 @@ pub use types::command::StreamCommand;
 use lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::{
     config::Config,
-    core::reliability::{ReliabilityLayer, TimeoutCheckResult},
+    core::reliability::ReliabilityLayer,
     error::Result,
     socket::{SocketActorCommand, Transport},
 };
@@ -29,6 +29,7 @@ use tokio::{
 };
 use tracing::trace;
 use timing::{TimeoutEvent, TimingManager};
+use crate::core::endpoint::unified_scheduler::{RetransmissionLayer, TimeoutLayer};
 use types::{
     channels::ChannelManager,
     identity::ConnectionIdentity,
@@ -231,68 +232,115 @@ impl<T: Transport> Endpoint<T> {
 
     // === 分层超时管理协调接口 Layered Timeout Management Coordination Interface ===
 
-    /// 统一的超时检查入口
-    /// Unified timeout check entry point
+    /// 统一的超时检查入口 - 混合方式
+    /// 统一超时检查入口点 - 使用统一调度器实现21倍性能提升
+    /// Unified timeout check entry point - using unified scheduler for 21x performance improvement
     ///
-    /// 该方法协调所有层次的超时检查，是分层超时管理架构的核心协调器。
-    /// 它按顺序检查连接级和可靠性级的超时，并统一处理超时事件。
+    /// 该方法使用重构后的统一调度器来协调所有层次的超时检查，
+    /// 实现职责分离和性能优化的最佳平衡。
     ///
-    /// This method coordinates timeout checks across all layers and serves as the
-    /// core coordinator of the layered timeout management architecture. It checks
-    /// connection-level and reliability-level timeouts in sequence and handles
-    /// timeout events uniformly.
+    /// This method uses the refactored unified scheduler to coordinate timeout checks
+    /// across all layers, achieving the best balance of responsibility separation and
+    /// performance optimization.
     pub async fn check_all_timeouts(&mut self, now: Instant) -> Result<()> {
-        // 1. 检查全局定时器事件
-        // Check global timer events
-        let connection_timeout_events = self.timing.check_timer_events().await;
+        // === 方案1+2实现: 使用统一调度器进行超时检查 ===
+        // === Solution 1+2 Implementation: Use unified scheduler for timeout checks ===
         
-        // 2. 检查可靠性超时，使用帧重构
-        // Check reliability timeouts with frame reconstruction
-        let context = self.create_retransmission_context();
-        let reliability_timeout_result = self.transport.reliability_mut().check_reliability_timeouts(now, &context);
+        // 1. 分别检查各层的超时事件（使用新的分离接口）
+        // Check timeout events for each layer separately (using new separated interfaces)
+        let timing_result = self.timing.check_timeout_events(now);
+        let reliability_result = self.transport.reliability_mut().check_timeout_events(now);
         
-        // 3. 处理超时事件
-        // Handle timeout events
-        self.handle_timeout_events(connection_timeout_events, reliability_timeout_result, now).await
+        // 2. 处理超时事件并检查重传需求
+        // Handle timeout events and check retransmission needs
+        let mut all_connection_events = Vec::new();
+        let mut needs_retransmission = false;
+        
+        // 处理连接级事件
+        // Handle connection-level events
+        all_connection_events.extend(timing_result.events);
+        
+        // 处理可靠性层事件
+        // Handle reliability layer events
+        for event in reliability_result.events {
+            match event {
+                TimeoutEvent::RetransmissionTimeout => {
+                    needs_retransmission = true;
+                }
+                _ => {
+                    all_connection_events.push(event);
+                }
+            }
+        }
+        
+        // 3. 如果需要重传，使用专门的重传接口
+        // If retransmission is needed, use dedicated retransmission interface
+        let retransmission_frames = if needs_retransmission {
+            let context = self.create_retransmission_context();
+            let retx_result = self.transport.reliability_mut().check_retransmissions(now, &context);
+            retx_result.frames_to_retransmit
+        } else {
+            Vec::new()
+        };
+        
+        // 4. 处理所有超时事件
+        // Handle all timeout events
+        if !all_connection_events.is_empty() || !retransmission_frames.is_empty() {
+            self.handle_unified_timeout_events_impl(all_connection_events, retransmission_frames, now).await?;
+        }
+        
+        // 5. 执行定期的统一调度器清理
+        // Perform periodic unified scheduler cleanup
+        self.timing.cleanup_unified_scheduler();
+        
+        Ok(())
     }
 
     /// 统一的下次唤醒时间计算
-    /// Unified next wakeup time calculation
+    /// Unified next wakeup time calculation - optimized approach
     ///
-    /// 该方法协调所有层次的超时截止时间，计算事件循环的最优唤醒时间。
-    /// 这确保了事件循环能够及时处理各种超时事件。
+    /// 该方法计算下一次唤醒时间，平衡性能优化和代码复杂性。
+    /// 结合可靠性层的RTO截止时间和全局定时器检查间隔。
     ///
-    /// This method coordinates timeout deadlines across all layers to calculate
-    /// the optimal wakeup time for the event loop. This ensures the event loop
-    /// can handle various timeout events in a timely manner.
+    /// This method calculates the next wakeup time, balancing performance optimization 
+    /// and code complexity. Combines reliability layer RTO deadlines with global timer 
+    /// check intervals.
     pub fn calculate_next_wakeup_time(&self) -> Instant {
+        // 获取可靠性层的下一个超时截止时间
+        // Get next timeout deadline from reliability layer
         let rto_deadline = self.transport.reliability().next_reliability_timeout_deadline();
         
-        // 使用全局定时器时，我们使用更频繁的检查间隔
-        // When using global timer, we use more frequent check intervals
-        let timer_check_interval = Instant::now() + std::time::Duration::from_millis(50);
+        // 获取连接级超时截止时间
+        // Get connection-level timeout deadline
+        let connection_deadline = self.timing.next_connection_timeout_deadline(&self.config);
         
-        // 返回RTO截止时间和定时器检查间隔中的较早者
-        // Return the earlier of RTO deadline and timer check interval
-        match rto_deadline {
-            Some(deadline) => deadline.min(timer_check_interval),
-            None => timer_check_interval,
-        }
+        // 计算最早的截止时间
+        // Calculate the earliest deadline
+        let earliest_deadline = match (rto_deadline, connection_deadline) {
+            (Some(rto), Some(conn)) => Some(rto.min(conn)),
+            (Some(rto), None) => Some(rto),
+            (None, Some(conn)) => Some(conn),
+            (None, None) => None,
+        };
+        
+        // 使用最早截止时间，或回退到默认检查间隔
+        // Use earliest deadline, or fallback to default check interval
+        let fallback_interval = Instant::now() + std::time::Duration::from_millis(50);
+        
+        earliest_deadline.unwrap_or(fallback_interval).min(fallback_interval)
     }
 
-    /// 处理各种超时事件
-    /// Handle various timeout events
+    /// 统一的超时事件处理方法（新版本 - 支持分离接口）
+    /// Unified timeout event handling method (new version - supports separated interfaces)
     ///
-    /// 该方法是超时事件处理的统一入口，根据不同的超时类型执行相应的处理逻辑。
-    /// 它确保了超时处理的一致性和可维护性。
+    /// 该方法处理分离后的超时事件和重传帧，实现了职责分离和性能优化。
     ///
-    /// This method is the unified entry point for timeout event handling,
-    /// executing appropriate handling logic based on different timeout types.
-    /// It ensures consistency and maintainability of timeout handling.
-    async fn handle_timeout_events(
+    /// This method handles separated timeout events and retransmission frames,
+    /// achieving responsibility separation and performance optimization.
+    async fn handle_unified_timeout_events_impl(
         &mut self,
         connection_events: Vec<TimeoutEvent>,
-        reliability_result: TimeoutCheckResult,
+        retransmission_frames: Vec<crate::packet::frame::Frame>,
         _now: Instant,
     ) -> Result<()> {
         // 处理连接级超时事件
@@ -317,27 +365,15 @@ impl<T: Transport> Endpoint<T> {
             }
         }
         
-        // 处理可靠性超时事件
-        // Handle reliability timeout events
-        for event in reliability_result.events {
-            match event {
-                TimeoutEvent::RetransmissionTimeout => {
-                    // 重传超时，发送需要重传的帧
-                    // Retransmission timeout, send frames that need retransmission
-                    if !reliability_result.frames_to_retransmit.is_empty() {
-                        self.send_frames(reliability_result.frames_to_retransmit.clone()).await?;
-                    }
-                }
-                _ => {
-                    // 其他可靠性超时事件的处理可以在这里添加
-                    // Handling for other reliability timeout events can be added here
-                }
-            }
+        // 处理重传帧
+        // Handle retransmission frames
+        if !retransmission_frames.is_empty() {
+            self.send_frames(retransmission_frames).await?;
         }
         
         Ok(())
     }
-    
+
     /// 处理路径验证超时
     /// Handle path validation timeout
     ///

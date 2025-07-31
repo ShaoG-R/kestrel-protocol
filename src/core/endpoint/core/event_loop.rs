@@ -21,8 +21,8 @@ impl<T: Transport> Endpoint<T> {
         }
 
         loop {
-            // 使用统一的唤醒时间计算
-            // Use unified wakeup time calculation
+            // 使用优化的时间管理计算唤醒时间
+            // Use optimized time management to calculate wakeup time
             let next_wakeup = self.calculate_next_wakeup_time();
 
             trace!(cid = self.identity.local_cid(), state = ?self.lifecycle_manager.current_state(), "Main loop waiting for event.");
@@ -31,17 +31,18 @@ impl<T: Transport> Endpoint<T> {
 
                 // 1. Handle frames from the network
                 Some((frame, src_addr)) = self.channels.receiver.recv() => {
-                    // 更新接收时间
-                    // Update receive time
-                    self.timing.on_packet_received(Instant::now());
+                    // 使用统一时间管理更新接收时间
+                    // Update receive time using unified time management
+                    let now = Instant::now();
+                    self.timing.on_packet_received(now);
 
                     EventDispatcher::dispatch_frame::<T>(self as &mut dyn ProcessorOperations, frame, src_addr).await?;
                     // After handling one frame, try to drain any other pending frames
                     // to process them in a batch.
                     while let Ok((frame, src_addr)) = self.channels.receiver.try_recv() {
-                        // 为批量处理的帧也更新接收时间
-                        // Update receive time for batched frames too
-                        self.timing.on_packet_received(Instant::now());
+                        // 为批量处理的帧也更新接收时间 - 共享时间戳以提高性能
+                        // Update receive time for batched frames too - share timestamp for better performance
+                        self.timing.on_packet_received(now);
                         EventDispatcher::dispatch_frame::<T>(self as &mut dyn ProcessorOperations, frame, src_addr).await?;
                     }
                 }
@@ -60,7 +61,10 @@ impl<T: Transport> Endpoint<T> {
                 // 3. Handle timeouts - 使用统一的超时检查
                 // Handle timeouts - use unified timeout check
                 _ = sleep_until(next_wakeup) => {
-                    self.check_all_timeouts(Instant::now()).await?;
+                    // 使用统一时间点检查所有超时
+                    // Use unified time point to check all timeouts
+                    let timeout_check_time = Instant::now();
+                    self.check_all_timeouts(timeout_check_time).await?;
                 }
 
                 // 4. Stop if all channels are closed
