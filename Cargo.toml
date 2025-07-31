@@ -17,6 +17,7 @@ tracing = "0.1.41"
 wide = "0.7"
 rayon = "1.10.0"
 num_cpus = "1.16"
+crossbeam-queue = "0.3.12"
 
 [dev-dependencies]
 tracing-subscriber  = { version = "0.3.19", features = ["env-filter"] }
