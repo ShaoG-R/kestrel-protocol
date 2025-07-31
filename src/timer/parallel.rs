@@ -1243,6 +1243,7 @@ mod tests {
         println!("  平均处理时间: {} 纳秒", stats.avg_processing_time_ns);
     }
 
+    
     #[tokio::test]
     async fn test_comprehensive_optimization_benchmark() {
         println!("\n🏆 综合优化效果基准测试");
@@ -1252,12 +1253,18 @@ mod tests {
 
         let mut optimized_system = HybridParallelTimerSystem::new();
         
-        // 测试场景：不同批量大小下的性能对比
+        // 测试场景：不同批量大小下的性能对比 (已扩展至 8192)
         let benchmark_cases = vec![
-            (16, "超小批量"),
-            (64, "小批量"),
-            (256, "中批量"),
-            (1024, "大批量"),
+            (16, "超小批量 (16)"),
+            (32, "超小批量 (32)"),
+            (64, "小批量 (64)"),
+            (128, "小批量 (128)"),
+            (256, "中批量 (256)"),
+            (512, "中批量 (512)"),
+            (1024, "大批量 (1024)"),
+            (2048, "大批量 (2048)"),
+            (4096, "超大批量 (4096)"),
+            (8192, "超大批量 (8192)"),
         ];
 
         for (batch_size, scenario) in benchmark_cases {
@@ -1287,6 +1294,7 @@ mod tests {
                     durations.push(iteration_start.elapsed());
                     memory_allocations.push(result.detailed_stats.memory_allocations);
                     
+                    // 如果没有SIMD操作，我们假设它使用了直通模式
                     if result.detailed_stats.simd_operations == 0 {
                         bypass_mode_used += 1;
                     }
