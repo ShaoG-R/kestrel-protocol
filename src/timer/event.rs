@@ -185,7 +185,7 @@ pub mod zero_copy {
         round_robin_index: AtomicUsize,
         /// 批量处理阈值
         /// Batch processing threshold
-        batch_threshold: usize,
+        _batch_threshold: usize,
     }
     
     impl ZeroCopyBatchDispatcher {
@@ -198,7 +198,7 @@ pub mod zero_copy {
             Self {
                 event_slots,
                 round_robin_index: AtomicUsize::new(0),
-                batch_threshold: 32, // 默认批量处理阈值
+                _batch_threshold: 32, // 默认批量处理阈值
             }
         }
         

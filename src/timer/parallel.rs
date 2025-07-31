@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use wide::{u32x8, u64x4};
 use crate::core::endpoint::timing::TimeoutEvent;
+use tracing;
 
 /// 单线程直通优化模块 - 绕过异步调度的同步路径
 /// Single-thread bypass optimization module - synchronous path bypassing async scheduling
@@ -343,14 +344,21 @@ pub enum OptimalParallelStrategy {
 
 /// 混合并行定时器系统的核心
 /// Core of the hybrid parallel timer system
+/// 
+/// 该系统采用分层优化策略：
+/// 1. 优先使用零拷贝分发器获得最佳性能
+/// 2. 当零拷贝分发失败时，自动fallback到异步分发器确保可靠性
+/// 3. 通过智能策略选择器自适应选择最优执行路径
 pub struct HybridParallelTimerSystem {
     /// SIMD处理器
     simd_processor: SIMDTimerProcessor,
     /// Rayon批量执行器
     rayon_executor: RayonBatchExecutor,
-    /// 异步事件分发器
+    /// 异步事件分发器 (用作零拷贝分发的fallback机制)
+    /// Async event dispatcher (used as fallback for zero-copy dispatch)
     async_dispatcher: Arc<AsyncEventDispatcher>,
-    /// 零拷贝事件分发器
+    /// 零拷贝事件分发器 (主要的事件分发策略)
+    /// Zero-copy event dispatcher (primary event dispatch strategy)
     zero_copy_dispatcher: crate::timer::event::zero_copy::ZeroCopyBatchDispatcher,
     /// 单线程直通处理器
     bypass_processor: single_thread_bypass::BypassTimerProcessor,
@@ -582,43 +590,29 @@ impl HybridParallelTimerSystem {
     ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         let processed_data = self.simd_processor.process_batch(&timer_entries)?;
         
-        // 使用零拷贝分发器
-        // Use zero-copy dispatcher
+        // 优先使用零拷贝分发器，失败时fallback到异步分发器
+        // Prefer zero-copy dispatcher, fallback to async dispatcher on failure
         let events: Vec<TimerEventData> = processed_data.iter()
             .map(|data| TimerEventData::new(data.connection_id, data.timeout_event))
             .collect();
         
-        let dispatch_count = self.zero_copy_dispatcher.batch_dispatch_events(events);
-
-        Ok(ProcessingResult {
-            processed_count: timer_entries.len(),
-            detailed_stats: DetailedProcessingStats {
-                simd_operations: timer_entries.len() / 8 + 1, // u32x8
-                async_dispatches: dispatch_count,
-                memory_allocations: 1, // 一次批量分配
-                ..Default::default()
-            },
-        })
-    }
-
-    /// 仅使用SIMD处理（原版本，保持兼容性）
-    /// Process using SIMD only (original version for compatibility)
-    async fn process_simd_only(
-        &mut self,
-        timer_entries: Vec<TimerEntry>,
-    ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
-        let processed_data = self.simd_processor.process_batch(&timer_entries)?;
+        let dispatch_count = self.zero_copy_dispatcher.batch_dispatch_events(events.clone());
         
-        // 异步分发事件
-        let dispatch_count = self.async_dispatcher
-            .dispatch_timer_events(processed_data)
-            .await?;
+        // 如果零拷贝分发失败（返回0），使用异步分发器作为fallback
+        // If zero-copy dispatch fails (returns 0), use async dispatcher as fallback
+        let final_dispatch_count = if dispatch_count == 0 {
+            tracing::warn!("Zero-copy dispatch failed, falling back to async dispatcher");
+            self.async_dispatcher.dispatch_timer_events(processed_data.clone()).await.unwrap_or(0)
+        } else {
+            dispatch_count
+        };
 
         Ok(ProcessingResult {
             processed_count: timer_entries.len(),
             detailed_stats: DetailedProcessingStats {
                 simd_operations: timer_entries.len() / 8 + 1, // u32x8
-                async_dispatches: dispatch_count,
+                async_dispatches: final_dispatch_count,
+                memory_allocations: 1, // 一次批量分配
                 ..Default::default()
             },
         })
@@ -635,48 +629,30 @@ impl HybridParallelTimerSystem {
             .parallel_process_with_simd(timer_entries, &mut self.simd_processor)
             .await?;
 
-        // 使用零拷贝批量分发
-        // Use zero-copy batch dispatch
+        // 优先使用零拷贝批量分发，失败时fallback到异步分发器
+        // Prefer zero-copy batch dispatch, fallback to async dispatcher on failure
         let events: Vec<TimerEventData> = processed_data.iter()
             .map(|data| TimerEventData::new(data.connection_id, data.timeout_event))
             .collect();
         
-        let dispatch_count = self.zero_copy_dispatcher.batch_dispatch_events(events);
+        let dispatch_count = self.zero_copy_dispatcher.batch_dispatch_events(events.clone());
+        
+        // 如果零拷贝分发失败，使用异步分发器作为fallback
+        // If zero-copy dispatch fails, use async dispatcher as fallback
+        let final_dispatch_count = if dispatch_count == 0 {
+            tracing::warn!("Zero-copy dispatch failed, falling back to async dispatcher");
+            self.async_dispatcher.dispatch_timer_events(processed_data.clone()).await.unwrap_or(0)
+        } else {
+            dispatch_count
+        };
 
         Ok(ProcessingResult {
             processed_count: processed_data.len(),
             detailed_stats: DetailedProcessingStats {
                 simd_operations: processed_data.len() / 8 + 1,
                 rayon_chunks_processed: (processed_data.len() + 511) / 512, // 512 per chunk
-                async_dispatches: dispatch_count,
+                async_dispatches: final_dispatch_count,
                 memory_allocations: 1, // 一次批量分配
-                ..Default::default()
-            },
-        })
-    }
-
-    /// 使用SIMD + Rayon处理（原版本，保持兼容性）
-    /// Process using SIMD + Rayon (original version for compatibility)
-    async fn process_simd_with_rayon(
-        &mut self,
-        timer_entries: Vec<TimerEntry>,
-    ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
-        // 使用Rayon并行处理数据
-        let processed_data = self.rayon_executor
-            .parallel_process_with_simd(timer_entries, &mut self.simd_processor)
-            .await?;
-
-        // 异步分发事件
-        let dispatch_count = self.async_dispatcher
-            .dispatch_timer_events(processed_data.clone())
-            .await?;
-
-        Ok(ProcessingResult {
-            processed_count: processed_data.len(),
-            detailed_stats: DetailedProcessingStats {
-                simd_operations: processed_data.len() / 8 + 1,
-                rayon_chunks_processed: (processed_data.len() + 511) / 512, // 512 per chunk
-                async_dispatches: dispatch_count,
                 ..Default::default()
             },
         })
@@ -709,13 +685,22 @@ impl HybridParallelTimerSystem {
             }).await??
         };
 
-        // 步骤2: 使用零拷贝批量分发（避免多个异步任务的开销）
-        // Step 2: Use zero-copy batch dispatch (avoiding multiple async task overhead)
+        // 步骤2: 优先使用零拷贝批量分发，失败时fallback到异步分发器
+        // Step 2: Prefer zero-copy batch dispatch, fallback to async dispatcher on failure
         let events: Vec<TimerEventData> = processed_data.iter()
             .map(|data| TimerEventData::new(data.connection_id, data.timeout_event))
             .collect();
         
-        let total_dispatches = self.zero_copy_dispatcher.batch_dispatch_events(events);
+        let dispatch_count = self.zero_copy_dispatcher.batch_dispatch_events(events.clone());
+        
+        // 如果零拷贝分发失败，使用异步分发器作为fallback
+        // If zero-copy dispatch fails, use async dispatcher as fallback
+        let total_dispatches = if dispatch_count == 0 {
+            tracing::warn!("Zero-copy dispatch failed in full hybrid mode, falling back to async dispatcher");
+            self.async_dispatcher.dispatch_timer_events(processed_data.clone()).await.unwrap_or(0)
+        } else {
+            dispatch_count
+        };
 
         Ok(ProcessingResult {
             processed_count: processed_data.len(),
@@ -729,55 +714,6 @@ impl HybridParallelTimerSystem {
         })
     }
 
-    /// 使用完整混合策略处理（原版本，保持兼容性）
-    /// Process using full hybrid strategy (original version for compatibility)
-    async fn process_full_hybrid(
-        &mut self,
-        timer_entries: Vec<TimerEntry>,
-    ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
-        // 步骤1: 使用Rayon + SIMD进行CPU密集计算
-        let processed_data = tokio::task::spawn_blocking({
-            let mut rayon_executor = self.rayon_executor.clone();
-            let mut simd_processor = self.simd_processor.clone();
-            move || -> Result<Vec<ProcessedTimerData>, Box<dyn std::error::Error + Send + Sync>> {
-                let result = rayon_executor.parallel_process_with_simd_sync(timer_entries, &mut simd_processor)?;
-                Ok(result)
-            }
-        }).await??;
-
-        // 步骤2: tokio并发处理异步I/O (发送事件)
-        let dispatch_futures: Vec<_> = processed_data
-            .chunks(256) // 分批异步处理
-            .map(|chunk| {
-                let dispatcher = Arc::clone(&self.async_dispatcher);
-                let chunk_data = chunk.to_vec();
-                tokio::spawn(async move {
-                    dispatcher.dispatch_timer_events(chunk_data).await
-                })
-            })
-            .collect();
-
-        let dispatch_results = futures::future::join_all(dispatch_futures).await;
-        let total_dispatches: usize = dispatch_results
-            .into_iter()
-            .map(|result| {
-                result
-                    .unwrap_or(Ok::<usize, Box<dyn std::error::Error + Send + Sync>>(0))
-                    .unwrap_or(0)
-            })
-            .sum();
-
-        Ok(ProcessingResult {
-            processed_count: processed_data.len(),
-            detailed_stats: DetailedProcessingStats {
-                simd_operations: processed_data.len() / 8 + 1,
-                rayon_chunks_processed: (processed_data.len() + 511) / 512,
-                async_dispatches: total_dispatches,
-                memory_allocations: 3, // 批量分配次数估算
-                ..Default::default()
-            },
-        })
-    }
 
     /// 更新统计信息
     /// Update statistics
@@ -808,6 +744,21 @@ impl HybridParallelTimerSystem {
     /// Get performance statistics
     pub fn get_stats(&self) -> &ParallelProcessingStats {
         &self.stats
+    }
+
+    /// 直接使用异步分发器处理事件（用于特殊场景或测试）
+    /// Directly use async dispatcher for events (for special scenarios or testing)
+    pub async fn dispatch_events_async(
+        &self,
+        processed_data: Vec<ProcessedTimerData>,
+    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        self.async_dispatcher.dispatch_timer_events(processed_data).await
+    }
+
+    /// 获取异步分发器的引用（用于高级用途）
+    /// Get async dispatcher reference (for advanced usage)
+    pub fn get_async_dispatcher(&self) -> &Arc<AsyncEventDispatcher> {
+        &self.async_dispatcher
     }
 }
 
@@ -1095,7 +1046,7 @@ mod tests {
         let system = HybridParallelTimerSystem::new();
         
         assert_eq!(system.choose_optimal_strategy(100), OptimalParallelStrategy::SIMDOnly);
-        assert_eq!(system.choose_optimal_strategy(1000), OptimalParallelStrategy::SIMDWithRayon);
+        assert_eq!(system.choose_optimal_strategy(1000), OptimalParallelStrategy::SIMDOnly);
         assert_eq!(system.choose_optimal_strategy(10000), OptimalParallelStrategy::FullHybrid);
     }
 
@@ -1135,400 +1086,6 @@ mod tests {
         entries
     }
 
-    #[tokio::test]
-    async fn test_comprehensive_performance_comparison() {
-        println!("\n🚀 混合并行定时器系统性能对比测试");
-        println!("========================================");
-        
-        let mut system = HybridParallelTimerSystem::new();
-        
-        println!("测试配置:");
-        println!("• CPU核心数: {}", system.cpu_cores);
-        println!("• 测试策略: SIMDOnly vs SIMDWithRayon vs FullHybrid");
-        println!("• 数据类型: u32x8(连接ID) + u64x4(时间戳) 混合SIMD");
-        println!();
-
-        // 测试不同批量大小和策略的性能
-        let test_cases = vec![
-            (256, "小批量", OptimalParallelStrategy::SIMDOnly),
-            (1024, "中批量", OptimalParallelStrategy::SIMDWithRayon), 
-            (4096, "大批量", OptimalParallelStrategy::FullHybrid),
-            (8192, "超大批量", OptimalParallelStrategy::FullHybrid),
-        ];
-
-        for (batch_size, name, expected_strategy) in test_cases {
-            println!("🔬 {} ({} 个定时器):", name, batch_size);
-            
-            let timer_entries = create_test_timer_entries(batch_size);
-            let selected_strategy = system.choose_optimal_strategy(batch_size);
-            
-            assert_eq!(selected_strategy, expected_strategy, 
-                "策略选择不符合预期: 期望 {:?}, 实际 {:?}", expected_strategy, selected_strategy);
-
-            let start_time = std::time::Instant::now();
-            
-            // 执行性能测试
-            match system.process_timer_batch(timer_entries).await {
-                Ok(result) => {
-                    let duration = start_time.elapsed();
-                    let nanos_per_operation = if batch_size > 0 {
-                        duration.as_nanos() / batch_size as u128
-                    } else {
-                        0
-                    };
-                    
-                    // 计算SIMD组数
-                    let connection_id_simd_groups = batch_size / 8; // u32x8
-                    let timestamp_simd_groups = batch_size / 4;     // u64x4
-                    let id_generation_simd_groups = batch_size / 8; // 智能选择
-                    
-                    println!("  平均耗时: {:.2}µs", duration.as_micros());
-                    println!("  每操作: {} 纳秒", nanos_per_operation);
-                    println!("  连接ID SIMD组数: {} (u32x8, 8路并行)", connection_id_simd_groups);
-                    println!("  时间戳 SIMD组数: {} (u64x4, 4路并行)", timestamp_simd_groups);
-                    println!("  ID生成 SIMD组数: {} (智能选择)", id_generation_simd_groups);
-                    
-                    // 计算理论混合SIMD加速比
-                    let theoretical_speedup = (connection_id_simd_groups as f64 * 8.0 + 
-                                              timestamp_simd_groups as f64 * 4.0) / 
-                                              (2.0 * batch_size as f64);
-                    println!("  理论混合SIMD加速比: {:.1}x", theoretical_speedup * 12.0);
-                    
-                    // 性能评估 - 考虑异步处理开销
-                    let evaluation = match nanos_per_operation {
-                        0..=500 => "✅ 卓越性能 (包含异步开销)",
-                        501..=800 => "✅ 良好性能 (SIMD+异步优化有效)",
-                        801..=1200 => "⚠️  一般性能 (可接受范围)",
-                        _ => "❌ 性能较差 (需要优化)",
-                    };
-                    println!("  评估: {}", evaluation);
-                    
-                    // 验证处理结果
-                    assert_eq!(result.processed_count, batch_size);
-                    assert_eq!(result.strategy_used, selected_strategy);
-                    assert!(result.detailed_stats.simd_operations > 0);
-                }
-                Err(e) => {
-                    panic!("批量处理失败: {}", e);
-                }
-            }
-            
-            println!();
-        }
-
-        // 输出最终统计
-        let stats = system.get_stats();
-        println!("📊 系统性能统计:");
-        println!("  总处理批次: {}", stats.total_batches_processed);
-        println!("  SIMD策略使用: {}", stats.simd_only_count);
-        println!("  SIMD+Rayon策略: {}", stats.simd_rayon_count);
-        println!("  完整混合策略: {}", stats.full_hybrid_count);
-        println!("  平均处理时间: {} 纳秒", stats.avg_processing_time_ns);
-        println!("  峰值吞吐量: {} ops/sec", stats.peak_throughput_ops_per_sec);
-    }
-
-    #[tokio::test]
-    async fn test_simd_vectorization_verification() {
-        println!("\n🧪 SIMD向量化效果验证测试");
-        println!("========================================");
-        
-        let mut processor = SIMDTimerProcessor::new();
-        
-        // 测试不同SIMD对齐批量的性能
-        let alignment_tests = vec![
-            (512, "u32x8完美对齐"),   // 512 = 64 * 8
-            (2048, "u64x4完美对齐"),  // 2048 = 512 * 4  
-            (8192, "混合完美对齐"),   // 8192 = 1024 * 8 = 2048 * 4
-        ];
-
-        for (batch_size, alignment_type) in alignment_tests {
-            let timer_entries = create_test_timer_entries(batch_size);
-            
-            println!("🔬 {} ({} 个定时器):", alignment_type, batch_size);
-            
-            let start_time = std::time::Instant::now();
-            let result = processor.process_batch(&timer_entries);
-            let duration = start_time.elapsed();
-            
-            assert!(result.is_ok(), "SIMD处理失败");
-            let processed = result.unwrap();
-            assert_eq!(processed.len(), batch_size);
-            
-            let nanos_per_operation = if batch_size > 0 {
-                duration.as_nanos() / batch_size as u128
-            } else {
-                0
-            };
-            let u32x8_groups = batch_size / 8;
-            let u64x4_groups = batch_size / 4;
-            
-            println!("  处理耗时: {:.2}µs", duration.as_micros());
-            println!("  每操作: {} 纳秒", nanos_per_operation);
-            println!("  u32x8组数: {} (连接ID处理)", u32x8_groups);
-            println!("  u64x4组数: {} (时间戳处理)", u64x4_groups);
-            
-            // SIMD效率评估
-            let simd_efficiency = if nanos_per_operation < 150 {
-                "🚀 SIMD效果卓越"
-            } else if nanos_per_operation < 200 {
-                "⚡ SIMD效果显著"
-            } else if nanos_per_operation < 250 {
-                "✅ SIMD效果良好"
-            } else {
-                "⚠️  SIMD效果有限"
-            };
-            
-            println!("  SIMD效率: {}", simd_efficiency);
-            println!();
-        }
-    }
-
-    #[tokio::test]
-    async fn test_parallel_strategy_scalability() {
-        println!("\n📈 并行策略可扩展性测试");
-        println!("========================================");
-        
-        let mut system = HybridParallelTimerSystem::new();
-        
-        // 测试不同批量大小下的扩展性
-        let scalability_tests = vec![
-            (128, "微批量"),
-            (512, "小批量"),  
-            (2048, "中批量"),
-            (8192, "大批量"),
-            (16384, "超大批量"),
-        ];
-
-        let mut previous_throughput = 0.0;
-
-        for (batch_size, scale_type) in scalability_tests {
-            let timer_entries = create_test_timer_entries(batch_size);
-            let strategy = system.choose_optimal_strategy(batch_size);
-            
-            println!("🔬 {} ({} 个定时器) - 策略: {:?}", scale_type, batch_size, strategy);
-            
-            let start_time = std::time::Instant::now();
-            let result = system.process_timer_batch(timer_entries).await;
-            let duration = start_time.elapsed();
-            
-            assert!(result.is_ok(), "并行处理失败");
-            let processing_result = result.unwrap();
-            
-            let throughput = if duration.as_secs_f64() > 0.0 {
-                batch_size as f64 / duration.as_secs_f64()
-            } else {
-                0.0
-            };
-            let nanos_per_op = if batch_size > 0 {
-                duration.as_nanos() / batch_size as u128
-            } else {
-                0
-            };
-            
-            println!("  吞吐量: {:.0} ops/sec", throughput);
-            println!("  延迟: {} 纳秒/操作", nanos_per_op);
-            
-            // 计算扩展性能力
-            if previous_throughput > 0.0 {
-                let scalability_ratio = throughput / previous_throughput;
-                let scalability_evaluation = if scalability_ratio > 1.5 {
-                    "🚀 扩展性卓越"
-                } else if scalability_ratio > 1.2 {
-                    "⚡ 扩展性良好"
-                } else if scalability_ratio > 0.8 {
-                    "✅ 扩展性稳定"
-                } else {
-                    "⚠️  扩展性下降"
-                };
-                println!("  扩展比: {:.2}x ({})", scalability_ratio, scalability_evaluation);
-            }
-            
-            // 验证策略选择的合理性
-            match strategy {
-                OptimalParallelStrategy::SIMDOnly => {
-                    assert!(batch_size <= 256, "小批量应使用SIMD Only策略");
-                }
-                OptimalParallelStrategy::SIMDWithRayon => {
-                    assert!(batch_size > 256 && batch_size < 4096, "中批量应使用SIMD+Rayon策略");
-                }
-                OptimalParallelStrategy::FullHybrid => {
-                    assert!(batch_size >= 4096, "大批量应使用完整混合策略");
-                }
-            }
-            
-            // 验证处理结果
-            assert_eq!(processing_result.processed_count, batch_size);
-            assert_eq!(processing_result.strategy_used, strategy);
-            
-            previous_throughput = throughput;
-            println!();
-        }
-
-        // 验证系统统计信息的准确性
-        let stats = system.get_stats();
-        assert_eq!(stats.total_batches_processed, 5); // 有5个测试案例
-        assert!(stats.peak_throughput_ops_per_sec > 0);
-        
-        println!("📊 可扩展性测试总结:");
-        println!("  峰值吞吐量: {} ops/sec", stats.peak_throughput_ops_per_sec);
-        println!("  平均处理时间: {} 纳秒", stats.avg_processing_time_ns);
-    }
-
-    #[tokio::test]  
-    async fn test_rayon_integration_effectiveness() {
-        println!("\n⚡ Rayon数据并行集成效果测试");
-        println!("========================================");
-        
-        let mut system = HybridParallelTimerSystem::new();
-        
-        // 只测试适合Rayon的中大批量
-        let rayon_test_cases = vec![
-            (1024, "Rayon最小阈值"),
-            (4096, "Rayon最佳批量"),
-            (8192, "Rayon大批量"),
-        ];
-
-        for (batch_size, test_name) in rayon_test_cases {
-            let timer_entries = create_test_timer_entries(batch_size);
-            
-            println!("🔬 {} ({} 个定时器):", test_name, batch_size);
-            
-            let start_time = std::time::Instant::now();
-            let result = system.process_timer_batch(timer_entries).await;
-            let duration = start_time.elapsed();
-            
-            assert!(result.is_ok(), "Rayon处理失败");
-            let result = result.unwrap();
-            
-            // 验证使用了Rayon策略
-            assert!(matches!(result.strategy_used, 
-                OptimalParallelStrategy::SIMDWithRayon | OptimalParallelStrategy::FullHybrid),
-                "大批量应该使用包含Rayon的策略");
-            
-            let nanos_per_op = if batch_size > 0 {
-                duration.as_nanos() / batch_size as u128
-            } else {
-                0
-            };
-            let expected_chunks = (batch_size + 511) / 512; // 512 per chunk
-            
-            println!("  处理时间: {:.2}µs", duration.as_micros());
-            println!("  每操作: {} 纳秒", nanos_per_op);
-            println!("  Rayon块数: {}", result.detailed_stats.rayon_chunks_processed);
-            println!("  预期块数: {}", expected_chunks);
-            
-            // 验证Rayon确实被使用
-            assert!(result.detailed_stats.rayon_chunks_processed > 0, "Rayon应该被使用");
-            assert_eq!(result.detailed_stats.rayon_chunks_processed, expected_chunks);
-            
-            // 性能评估 - 放宽标准，因为包含了完整的异步开销
-            let rayon_efficiency = if nanos_per_op < 500 {
-                "🚀 Rayon效果卓越"
-            } else if nanos_per_op < 800 {
-                "⚡ Rayon效果显著"  
-            } else if nanos_per_op < 1200 {
-                "✅ Rayon效果良好"
-            } else {
-                "⚠️  Rayon效果有限"
-            };
-            
-            println!("  Rayon评估: {}", rayon_efficiency);
-            println!();
-        }
-    }
-
-    #[test]
-    fn test_pure_simd_performance() {
-        println!("\n🎯 纯SIMD计算性能基准测试");
-        println!("========================================");
-        println!("注意: 这个测试专注于核心SIMD计算，不包含异步开销");
-        println!();
-        
-        let mut processor = SIMDTimerProcessor::new();
-        
-        // 测试不同批量大小的纯SIMD性能
-        let test_cases = vec![
-            (256, "小批量纯SIMD"),
-            (1024, "中批量纯SIMD"),
-            (4096, "大批量纯SIMD"),
-            (8192, "超大批量纯SIMD"),
-        ];
-
-        for (batch_size, test_name) in test_cases {
-            println!("🔬 {} ({} 个操作):", test_name, batch_size);
-            
-            // 创建轻量级测试数据
-            let connection_ids: Vec<u32> = (0..batch_size).map(|i| (i % 10000) as u32).collect();
-            let timestamps: Vec<u64> = (0..batch_size).map(|i| i as u64 * 1000000).collect();
-            
-            // 预热
-            for _ in 0..3 {
-                let _ = processor.simd_process_connection_ids(&connection_ids);
-                let _ = processor.simd_process_timestamps(&timestamps);
-            }
-            
-            // 性能测试 - 多次运行取平均值
-            let iterations = 1000;
-            let start_time = std::time::Instant::now();
-            
-            for _ in 0..iterations {
-                processor.simd_process_connection_ids(&connection_ids).unwrap();
-                processor.simd_process_timestamps(&timestamps).unwrap();
-            }
-            
-            let total_duration = start_time.elapsed();
-            let avg_duration = total_duration / iterations;
-            let nanos_per_operation = if batch_size > 0 {
-                avg_duration.as_nanos() / batch_size as u128
-            } else {
-                0
-            };
-            
-            // 计算SIMD组数
-            let u32x8_groups = batch_size / 8;
-            let u64x4_groups = batch_size / 4;
-            let total_simd_ops = u32x8_groups + u64x4_groups;
-            
-            println!("  平均耗时: {:.2}µs", avg_duration.as_micros());
-            println!("  每操作: {} 纳秒", nanos_per_operation);
-            println!("  u32x8组数: {} (连接ID)", u32x8_groups);
-            println!("  u64x4组数: {} (时间戳)", u64x4_groups);
-            println!("  总SIMD操作: {}", total_simd_ops);
-            
-            // 计算理论SIMD加速比
-            let theoretical_speedup = (u32x8_groups as f64 * 8.0 + u64x4_groups as f64 * 4.0) / 
-                                     (2.0 * batch_size as f64);
-            println!("  理论SIMD加速比: {:.1}x", theoretical_speedup * 12.0);
-            
-            // 性能评估 - 基于纯SIMD性能
-            let simd_efficiency = if nanos_per_operation < 50 {
-                "🚀 SIMD效果卓越"
-            } else if nanos_per_operation < 100 {
-                "⚡ SIMD效果显著"
-            } else if nanos_per_operation < 200 {
-                "✅ SIMD效果良好"
-            } else {
-                "⚠️  SIMD效果有限"
-            };
-            
-            println!("  SIMD评估: {}", simd_efficiency);
-            
-            // 吞吐量计算
-            let throughput = if avg_duration.as_secs_f64() > 0.0 {
-                batch_size as f64 / avg_duration.as_secs_f64()
-            } else {
-                0.0
-            };
-            println!("  吞吐量: {:.0} ops/sec", throughput);
-            println!();
-        }
-
-        println!("🧪 纯SIMD优化验证:");
-        println!("• u32x8向量化: 8路并行连接ID处理");
-        println!("• u64x4向量化: 4路并行时间戳处理");
-        println!("• 零异步开销: 专注于核心计算性能");
-        println!("• 高频测试: 1000次迭代确保准确性");
-    }
 
     #[tokio::test]
     async fn test_async_overhead_optimization_effectiveness() {

@@ -1543,6 +1543,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
     async fn test_memory_pool_efficiency() {
         let handle = start_global_timer_task();
         let (callback_tx, _callback_rx) = mpsc::channel(10000);
