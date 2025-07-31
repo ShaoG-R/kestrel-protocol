@@ -13,9 +13,8 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::{debug, trace, warn};
-use wide::u64x4;
+use wide::{u64x4, u32x8};
 use crate::timer::event::ConnectionId;
-
 /// 定时器条目ID，用于在时间轮中唯一标识定时器条目
 /// Timer entry ID, used to uniquely identify timer entries in the timing wheel
 pub type TimerEntryId = u64;
@@ -639,19 +638,38 @@ impl TimingWheel {
         let slot_duration_nanos = self.slot_duration.as_nanos() as u64;
         let slot_mask = self.slot_mask as u32;
         
-        // 步骤1：SIMD向量化ID生成
-        // Step 1: SIMD vectorized ID generation
+        // 步骤1：混合SIMD向量化ID生成 (u32x8 + u64x4)
+        // Step 1: Hybrid SIMD vectorized ID generation (u32x8 + u64x4)
         let mut id = start_id;
         let mut i = 0;
         
-        // 使用SIMD处理4个一组的ID生成
-        // Process IDs in groups of 4 using SIMD
-        while i + 4 <= len {
-            let id_vec = u64x4::new([id, id + 1, id + 2, id + 3]);
-            let id_array = id_vec.to_array();
-            entry_ids.extend_from_slice(&id_array);
-            id += 4;
-            i += 4;
+        // 如果ID范围在u32内，使用u32x8获得8路并行
+        // If ID range is within u32, use u32x8 for 8-way parallelism
+        if start_id <= u32::MAX as u64 && (start_id + len as u64) <= u32::MAX as u64 {
+            // 使用u32x8处理8个一组的ID生成
+            // Process IDs in groups of 8 using u32x8
+            while i + 8 <= len {
+                let id_vec = u32x8::new([
+                    id as u32, (id + 1) as u32, (id + 2) as u32, (id + 3) as u32,
+                    (id + 4) as u32, (id + 5) as u32, (id + 6) as u32, (id + 7) as u32
+                ]);
+                let id_array = id_vec.to_array();
+                for &id_u32 in &id_array {
+                    entry_ids.push(id_u32 as u64);
+                }
+                id += 8;
+                i += 8;
+            }
+        } else {
+            // ID范围较大时使用传统的u64x4
+            // Use traditional u64x4 for large ID ranges
+            while i + 4 <= len {
+                let id_vec = u64x4::new([id, id + 1, id + 2, id + 3]);
+                let id_array = id_vec.to_array();
+                entry_ids.extend_from_slice(&id_array);
+                id += 4;
+                i += 4;
+            }
         }
         
         // 处理剩余的ID
@@ -827,8 +845,8 @@ impl TimingWheel {
         result
     }
 
-    /// SIMD优化的槽位分布分析
-    /// SIMD optimized slot distribution analysis
+    /// SIMD优化的槽位分布分析 (u32x8增强版)
+    /// SIMD optimized slot distribution analysis (u32x8 enhanced version)
     fn simd_analyze_slot_distribution(&self, slot_indices: &[usize]) -> Vec<(usize, usize)> {
         let len = slot_indices.len();
         if len == 0 {
@@ -840,11 +858,46 @@ impl TimingWheel {
         let mut slot_counts = vec![0u32; self.slot_count];
         let mut i = 0;
         
-        // 使用SIMD批量计数槽位分布
-        // Use SIMD to batch count slot distribution
+        // 使用u32x8进行8路并行槽位分布计数
+        // Use u32x8 for 8-way parallel slot distribution counting
+        while i + 8 <= len {
+            // 加载8个槽位索引到u32x8向量
+            // Load 8 slot indices into u32x8 vector
+            let indices_vec = u32x8::new([
+                slot_indices[i] as u32,
+                slot_indices[i + 1] as u32,
+                slot_indices[i + 2] as u32,
+                slot_indices[i + 3] as u32,
+                slot_indices[i + 4] as u32,
+                slot_indices[i + 5] as u32,
+                slot_indices[i + 6] as u32,
+                slot_indices[i + 7] as u32,
+            ]);
+            
+            // 验证槽位索引有效性的SIMD向量
+            // SIMD vector for validating slot index validity
+            let max_slot_vec = u32x8::splat(self.slot_count as u32);
+            let valid_mask = indices_vec.cmp_lt(max_slot_vec);
+            
+            // 提取索引并计数（只处理有效的索引）
+            // Extract indices and count (only process valid indices)
+            let indices_array = indices_vec.to_array();
+            let valid_array = valid_mask.to_array();
+            
+            for j in 0..8 {
+                if valid_array[j] != 0 {  // 有效索引
+                    slot_counts[indices_array[j] as usize] += 1;
+                }
+            }
+            
+            i += 8;
+        }
+        
+        // 处理剩余的4个槽位索引（如果有）
+        // Process remaining 4 slot indices (if any)
         while i + 4 <= len {
-            // 加载4个槽位索引
-            // Load 4 slot indices
+            // 使用u32x4处理剩余的4个索引
+            // Use u32x4 for remaining 4 indices
             let indices = [
                 slot_indices[i] as u32,
                 slot_indices[i + 1] as u32,

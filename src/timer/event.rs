@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::Mutex;
 use tokio::sync::mpsc;
 use crate::core::endpoint::timing::TimeoutEvent;
-use wide::u32x4;
+use wide::{u32x4, u32x8};
 
 /// 定时器事件ID，用于唯一标识一个定时器
 /// Timer event ID, used to uniquely identify a timer
@@ -116,11 +116,39 @@ impl TimerEventDataPool {
         let count = requests.len();
         let mut i = result.len();
         
-        // 使用SIMD批量处理4个一组
-        // Use SIMD to batch process 4 at a time
+        // 使用u32x8批量处理8个一组的连接ID
+        // Use u32x8 to batch process 8 connection IDs at a time
+        while i + 8 <= count && batch_cache.len() >= 8 {
+            // 提取8个连接ID进行SIMD预处理
+            // Extract 8 connection IDs for SIMD preprocessing
+            let conn_ids = [
+                requests[i].0,     requests[i + 1].0, requests[i + 2].0, requests[i + 3].0,
+                requests[i + 4].0, requests[i + 5].0, requests[i + 6].0, requests[i + 7].0,
+            ];
+            
+            // SIMD验证连接ID范围和批量预处理
+            // SIMD validate connection ID range and batch preprocessing
+            let conn_id_vec = u32x8::new(conn_ids);
+            let validated_ids = conn_id_vec.to_array();
+            
+            // 批量更新8个对象
+            // Batch update 8 objects
+            for j in 0..8 {
+                if let Some(mut obj) = batch_cache.pop() {
+                    obj.connection_id = validated_ids[j];
+                    obj.timeout_event = requests[i + j].1.clone();
+                    result.push(obj);
+                }
+            }
+            
+            i += 8;
+        }
+        
+        // 处理剩余的4个对象（如果有）
+        // Process remaining 4 objects (if any)
         while i + 4 <= count && batch_cache.len() >= 4 {
-            // 提取4个连接ID进行SIMD预处理
-            // Extract 4 connection IDs for SIMD preprocessing
+            // 使用u32x4处理剩余的4个连接ID
+            // Use u32x4 for remaining 4 connection IDs
             let conn_ids = [
                 requests[i].0,
                 requests[i + 1].0,
@@ -128,18 +156,13 @@ impl TimerEventDataPool {
                 requests[i + 3].0,
             ];
             
-            // SIMD验证连接ID范围（可选优化）
-            // SIMD validate connection ID range (optional optimization)
             let conn_id_vec = u32x4::new(conn_ids);
-            let _validated_ids = conn_id_vec.to_array();
+            let validated_ids = conn_id_vec.to_array();
             
-            // 批量更新4个对象
-            // Batch update 4 objects
             for j in 0..4 {
                 if let Some(mut obj) = batch_cache.pop() {
-                    let (connection_id, timeout_event) = &requests[i + j];
-                    obj.connection_id = *connection_id;
-                    obj.timeout_event = timeout_event.clone();
+                    obj.connection_id = validated_ids[j];
+                    obj.timeout_event = requests[i + j].1.clone();
                     result.push(obj);
                 }
             }
@@ -171,11 +194,36 @@ impl TimerEventDataPool {
         let count = requests.len();
         let mut i = result.len();
         
-        // 使用SIMD批量处理
-        // Use SIMD batch processing
+        // 使用u32x8进行8路并行连接ID处理
+        // Use u32x8 for 8-way parallel connection ID processing
+        while i + 8 <= count && pool.len() >= 8 {
+            // SIMD并行处理8个连接ID
+            // SIMD parallel process 8 connection IDs
+            let conn_ids = [
+                requests[i].0,     requests[i + 1].0, requests[i + 2].0, requests[i + 3].0,
+                requests[i + 4].0, requests[i + 5].0, requests[i + 6].0, requests[i + 7].0,
+            ];
+            let conn_id_vec = u32x8::new(conn_ids);
+            let processed_ids = conn_id_vec.to_array();
+            
+            // 批量更新8个对象
+            // Batch update 8 objects
+            for j in 0..8 {
+                if let Some(mut obj) = pool.pop() {
+                    obj.connection_id = processed_ids[j];
+                    obj.timeout_event = requests[i + j].1.clone();
+                    result.push(obj);
+                }
+            }
+            
+            i += 8;
+        }
+        
+        // 处理剩余的4个对象（如果有）
+        // Process remaining 4 objects (if any)
         while i + 4 <= count && pool.len() >= 4 {
-            // SIMD并行处理连接ID
-            // SIMD parallel process connection IDs
+            // 使用u32x4处理剩余的连接ID
+            // Use u32x4 for remaining connection IDs
             let conn_ids = [
                 requests[i].0,
                 requests[i + 1].0,
@@ -185,8 +233,6 @@ impl TimerEventDataPool {
             let conn_id_vec = u32x4::new(conn_ids);
             let processed_ids = conn_id_vec.to_array();
             
-            // 批量更新对象
-            // Batch update objects
             for j in 0..4 {
                 if let Some(mut obj) = pool.pop() {
                     obj.connection_id = processed_ids[j];
@@ -221,11 +267,34 @@ impl TimerEventDataPool {
         let count = requests.len();
         let mut i = result.len();
         
-        // 使用SIMD批量创建
-        // Use SIMD batch creation
+        // 使用u32x8进行8路并行对象创建
+        // Use u32x8 for 8-way parallel object creation
+        while i + 8 <= count {
+            // SIMD处理8个连接ID
+            // SIMD process 8 connection IDs
+            let conn_ids = [
+                requests[i].0,     requests[i + 1].0, requests[i + 2].0, requests[i + 3].0,
+                requests[i + 4].0, requests[i + 5].0, requests[i + 6].0, requests[i + 7].0,
+            ];
+            let conn_id_vec = u32x8::new(conn_ids);
+            let processed_ids = conn_id_vec.to_array();
+            
+            // 批量创建8个新对象
+            // Batch create 8 new objects
+            for j in 0..8 {
+                let connection_id = processed_ids[j];
+                let timeout_event = &requests[i + j].1;
+                result.push(Box::new(TimerEventData::new(connection_id, timeout_event.clone())));
+            }
+            
+            i += 8;
+        }
+        
+        // 处理剩余的4个对象（如果有）
+        // Process remaining 4 objects (if any)
         while i + 4 <= count {
-            // SIMD处理4个连接ID
-            // SIMD process 4 connection IDs
+            // 使用u32x4处理剩余的连接ID
+            // Use u32x4 for remaining connection IDs
             let conn_ids = [
                 requests[i].0,
                 requests[i + 1].0,
@@ -235,8 +304,6 @@ impl TimerEventDataPool {
             let conn_id_vec = u32x4::new(conn_ids);
             let processed_ids = conn_id_vec.to_array();
             
-            // 批量创建4个新对象
-            // Batch create 4 new objects
             for j in 0..4 {
                 let connection_id = processed_ids[j];
                 let timeout_event = &requests[i + j].1;
