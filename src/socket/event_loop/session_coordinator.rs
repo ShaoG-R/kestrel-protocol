@@ -8,6 +8,7 @@
 //! frame routing management, and connection lifecycle management. It handles new connection creation,
 //! handshake negotiation, 0-RTT data processing, and connection ID generation with conflict detection.
 
+use crate::socket::event_loop::routing::FrameRouter;
 use crate::socket::{
     command::SocketActorCommand,
     event_loop::ConnectionMeta,
@@ -15,10 +16,7 @@ use crate::socket::{
 };
 use crate::{
     config::Config,
-    core::{
-        endpoint::Endpoint,
-        stream::Stream,
-    },
+    core::{endpoint::Endpoint, stream::Stream},
     error::{Error, Result},
     packet::frame::Frame,
     timer::task::GlobalTimerTaskHandle,
@@ -26,15 +24,10 @@ use crate::{
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
-use crate::socket::event_loop::routing::FrameRouter;
 
 /// 服务器端点创建结果类型别名
 /// Type alias for server endpoint creation result
-type ServerEndpointBundle<T> = (
-    Endpoint<T>,
-    mpsc::Sender<(Frame, SocketAddr)>,
-    Stream,
-);
+type ServerEndpointBundle<T> = (Endpoint<T>, mpsc::Sender<(Frame, SocketAddr)>, Stream);
 
 /// Socket会话协调器 - 统一协调各层交互的中央控制器
 /// Socket Session Coordinator - Central controller that coordinates inter-layer interactions
@@ -93,12 +86,6 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         }
     }
 
-    /// 获取全局定时器任务句柄的引用
-    /// Gets a reference to the global timer task handle
-    pub(crate) fn timer_handle(&self) -> &GlobalTimerTaskHandle {
-        &self.timer_handle
-    }
-
     /// 获取传输管理器的引用
     /// Gets a reference to the transport manager
     pub(crate) fn transport_manager(&self) -> &TransportManager<T> {
@@ -135,7 +122,10 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
                 debug!(cid = candidate_cid, "Generated unique connection ID");
                 return candidate_cid;
             }
-            debug!(cid = candidate_cid, "Connection ID collision detected, retrying");
+            debug!(
+                cid = candidate_cid,
+                "Connection ID collision detected, retrying"
+            );
         }
     }
 
@@ -228,7 +218,8 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
             transport_tx,
             self.command_tx.clone(),
             self.timer_handle.clone(),
-        ).await?;
+        )
+        .await?;
 
         let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
 
@@ -250,13 +241,15 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         remote_addr: SocketAddr,
         tx_to_endpoint: mpsc::Sender<(Frame, SocketAddr)>,
     ) {
-        self.frame_router.register_connection(
-            local_cid,
-            remote_addr,
-            ConnectionMeta {
-                sender: tx_to_endpoint,
-            },
-        ).await;
+        self.frame_router
+            .register_connection(
+                local_cid,
+                remote_addr,
+                ConnectionMeta {
+                    sender: tx_to_endpoint,
+                },
+            )
+            .await;
 
         debug!(
             cid = local_cid,
@@ -356,13 +349,15 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
 
         // 创建服务器端连接端点
         // Create server-side connection endpoint
-        let (mut endpoint, tx_to_endpoint, stream) = 
-            self.create_server_endpoint(local_cid, peer_cid, remote_addr).await?;
+        let (mut endpoint, tx_to_endpoint, stream) = self
+            .create_server_endpoint(local_cid, peer_cid, remote_addr)
+            .await?;
 
         // 处理0-RTT数据帧（如果有的话）
         // Handle 0-RTT data frames (if any)
         if !frames.is_empty() {
-            self.handle_zero_rtt_frames(frames, &tx_to_endpoint, remote_addr).await;
+            self.handle_zero_rtt_frames(frames, &tx_to_endpoint, remote_addr)
+                .await;
         }
 
         // 生成端点任务，在独立的异步任务中运行
@@ -399,11 +394,13 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
 
         // 注册连接到帧路由器
         // Register connection to frame router
-        self.register_connection_to_router(local_cid, remote_addr, tx_to_endpoint).await;
+        self.register_connection_to_router(local_cid, remote_addr, tx_to_endpoint)
+            .await;
 
         // 将新连接发送给用户应用
         // Send new connection to user application
-        self.send_connection_to_user(stream, remote_addr, local_cid).await?;
+        self.send_connection_to_user(stream, remote_addr, local_cid)
+            .await?;
 
         Ok(())
     }
@@ -437,7 +434,8 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
             self.command_tx.clone(),
             initial_data,
             self.timer_handle.clone(),
-        ).await?;
+        )
+        .await?;
 
         // 生成端点任务
         // Spawn endpoint task
@@ -470,7 +468,8 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
 
         // 注册连接到帧路由器
         // Register connection to frame router
-        self.register_connection_to_router(local_cid, remote_addr, tx_to_endpoint).await;
+        self.register_connection_to_router(local_cid, remote_addr, tx_to_endpoint)
+            .await;
 
         let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
         Ok(stream)

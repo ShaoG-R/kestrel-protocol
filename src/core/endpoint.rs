@@ -336,7 +336,7 @@ impl<T: Transport> Endpoint<T> {
         
         Ok(())
     }
-
+    
     /// 处理路径验证超时
     /// Handle path validation timeout
     ///

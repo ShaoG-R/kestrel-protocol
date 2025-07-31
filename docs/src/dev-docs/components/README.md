@@ -18,6 +18,7 @@ graph TD
         L4["可靠传输协议层<br>(reliability/)"]
         L5["UDP I/O层<br>(transport/)"]
         L6["数据序列化层<br>(packet/)"]
+        L7["全局定时器系统<br>(timer/)"]
     end
     
     B["操作系统<br>UDP套接字"]
@@ -27,17 +28,19 @@ graph TD
     L2 -- "管理" --> L3
     L2 -- "路由帧至" --> L3
     L3 -- "使用" --> L4
+    L3 -- "使用" --> L7
     L3 -- "提交FrameBatch至" --> L2
     L2 -- "发送FrameBatch" --> L5
     L4 -- "使用" --> L6
     L5 -- "收发UDP数据报" --> B
     L5 -- "调用L6解析帧" --> L6
     L6 -- "定义线路格式" --> B
+    L7 -- "提供定时器服务" --> L3
 
     style A fill:#333,color:#fff
     style B fill:#333,color:#fff
     classDef layer fill:#333,color:#fff,stroke:#fff,stroke-width:1px;
-    class L1,L2,L3,L4,L5,L6 layer;
+    class L1,L2,L3,L4,L5,L6,L7 layer;
 ```
 
 ---
@@ -80,6 +83,15 @@ graph TD
     - **长短头分离**: `LongHeader`用于连接管理，`ShortHeader`用于数据传输，优化头部开销。
     - **安全的编解码**: 提供`Frame::encode`和`Frame::decode`作为唯一的序列化/反序列化入口，内部自动处理大小端、长度计算等细节，保证了协议实现的健壮性。
 
+### 7. 全局定时器系统 (`Timer`)
+- **文档**: [**全局定时器系统 (`timer`)**](./timer.md)
+- **核心职责**: 协议栈的"全局时钟"，提供高性能、可扩展的定时器管理服务。
+- **实现**: `timer`模块采用时间轮（Timing Wheel）算法实现O(1)时间复杂度的定时器操作，通过全局唯一的定时器任务为整个协议栈提供统一的超时管理。该模块包含：
+    - **时间轮算法**: 高效的O(1)定时器添加、取消和到期检查操作。
+    - **全局任务管理**: 单一的全局定时器任务管理所有连接的定时器需求。
+    - **连接隔离**: 虽然使用全局任务，但每个连接的定时器在逻辑上完全隔离。
+    - **精确控制**: 毫秒级精度的定时器，满足协议对精确超时控制的需求。
+
 ## 核心数据流（端到端）
 
 理解数据如何在这些层次间流动，是掌握整个协议栈的关键。
@@ -88,23 +100,36 @@ graph TD
 1.  **`Stream`层**: 用户调用 `stream.write()`。
 2.  **`Endpoint`层**: `Stream`将数据封装为`StreamCommand`发送给`Endpoint`任务。`Endpoint`将数据存入`ReliabilityLayer`的`SendBuffer`。
 3.  **`Reliability`层**: `Packetizer`根据拥塞和流量窗口的许可，从`SendBuffer`中拉取数据，创建`PUSH`帧。
-4.  **`Endpoint`层**: `Endpoint`收集`ReliabilityLayer`生成的`PUSH`帧和`ACK`帧，聚合成一个`FrameBatch`。
-5.  **`Socket`层**: `Endpoint`将`FrameBatch`提交给`Socket`任务。
-6.  **`Transport`层**: `Socket`将`FrameBatch`转发给`transport_sender_task`进行批量发送。
-7.  **`Packet`层**: 在`transport_sender_task`内部，每个`Frame`通过`Frame::encode`被序列化成字节流。
-8.  **网络**: `Transport`层通过`UdpSocket`将最终的字节流作为UDP数据报发送出去。
+4.  **`Timer`层**: 发送的帧被添加到重传管理器，同时可能触发重传定时器的注册。
+5.  **`Endpoint`层**: `Endpoint`收集`ReliabilityLayer`生成的`PUSH`帧和`ACK`帧，聚合成一个`FrameBatch`。
+6.  **`Socket`层**: `Endpoint`将`FrameBatch`提交给`Socket`任务。
+7.  **`Transport`层**: `Socket`将`FrameBatch`转发给`transport_sender_task`进行批量发送。
+8.  **`Packet`层**: 在`transport_sender_task`内部，每个`Frame`通过`Frame::encode`被序列化成字节流。
+9.  **网络**: `Transport`层通过`UdpSocket`将最终的字节流作为UDP数据报发送出去。
 
 #### **数据接收路径 (网络 -> 用户)**
 1.  **`Transport`层**: `UdpSocket`收到UDP数据报。
 2.  **`Packet`层**: `Transport`层的接收任务调用`Frame::decode`，将字节流反序列化成一个或多个`Frame`。
 3.  **`Socket`层**: `Transport`层将解码后的`ReceivedDatagram`发送给`SocketEventLoop`。`FrameRouter`根据帧头部的连接ID，将`Frame`路由到正确的`Endpoint`任务。
-4.  **`Endpoint`层**: `Endpoint`任务收到`Frame`。
-5.  **`Reliability`层**:
+4.  **`Endpoint`层**: `Endpoint`任务收到`Frame`，同时更新接收时间戳。
+5.  **`Timer`层**: 接收到数据包时，可能触发空闲超时定时器的重置。
+6.  **`Reliability`层**:
     - 如果是`PUSH`帧，数据被送入`ReceiveBuffer`进行去重和排序。
     - 如果是`ACK`帧，`SackManager`会更新在途包列表、计算RTT，并通知`Vegas`模块调整拥塞窗口。
-6.  **`Endpoint`层**: `Endpoint`调用`ReliabilityLayer`的`reassemble`方法，从`ReceiveBuffer`中提取出连续有序的字节流。
-7.  **`Stream`层**: `Endpoint`将重组好的字节流通过通道发送给`Stream`。
-8.  **用户**: 用户的`stream.read()`调用完成，获得数据。
+7.  **`Endpoint`层**: `Endpoint`调用`ReliabilityLayer`的`reassemble`方法，从`ReceiveBuffer`中提取出连续有序的字节流。
+8.  **`Stream`层**: `Endpoint`将重组好的字节流通过通道发送给`Stream`。
+9.  **用户**: 用户的`stream.read()`调用完成，获得数据。
+
+#### **定时器事件处理路径 (Timer -> Endpoint)**
+1.  **`Timer`层**: 全局定时器任务检测到定时器到期，生成`TimerEventData`。
+2.  **`Endpoint`层**: `TimingManager`接收到定时器事件，通过`check_timer_events()`返回超时事件列表。
+3.  **`Endpoint`层**: `Endpoint`在事件循环中调用`check_all_timeouts()`，统一处理连接级和可靠性级的超时。
+4.  **处理分支**:
+    - **空闲超时**: 强制关闭连接，返回`ConnectionTimeout`错误。
+    - **路径验证超时**: 回到`Established`状态，通知调用者验证失败。
+    - **重传超时**: 重传丢失的数据包，调整拥塞窗口。
 
 ## 总结
-本协议栈通过这种高度模块化、职责明确的分层架构，成功地将一个复杂的可靠传输协议分解为一系列易于理解、开发和维护的组件。每一层都专注于解决特定的问题，同时通过现代化的异步编程范式（Actor模型、无锁化、批量处理）实现了高性能和高可靠性的统一，为构建健壮的网络应用提供了坚实的基础。
+本协议栈通过这种高度模块化、职责明确的分层架构，成功地将一个复杂的可靠传输协议分解为一系列易于理解、开发和维护的组件。每一层都专注于解决特定的问题，同时通过现代化的异步编程范式（Actor模型、无锁化、批量处理、全局定时器）实现了高性能和高可靠性的统一。
+
+特别是全局定时器系统的引入，不仅提供了高效的O(1)定时器操作，还通过统一的时间管理避免了每个连接维护独立定时器的开销，大大提升了系统的整体性能和可扩展性。这种设计为构建健壮的网络应用提供了坚实的基础。

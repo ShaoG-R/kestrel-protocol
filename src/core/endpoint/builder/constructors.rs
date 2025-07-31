@@ -50,8 +50,7 @@ impl<T: Transport> Endpoint<T> {
         );
         lifecycle_manager.initialize(local_cid, remote_addr)?;
 
-        let mut timing = TimingManager::new();
-        timing.initialize_global_timer(local_cid, timer_handle);
+        let mut timing = TimingManager::new(local_cid, timer_handle);
         
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer
@@ -100,8 +99,7 @@ impl<T: Transport> Endpoint<T> {
         );
         lifecycle_manager.initialize(local_cid, remote_addr)?;
 
-        let mut timing = TimingManager::new();
-        timing.initialize_global_timer(local_cid, timer_handle);
+        let mut timing = TimingManager::new(local_cid, timer_handle);
         
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer

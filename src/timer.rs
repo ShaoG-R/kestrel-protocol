@@ -12,6 +12,9 @@ pub mod event;
 pub mod task;
 pub mod wheel;
 
+#[cfg(test)]
+mod tests;
+
 pub use event::{TimerEvent, TimerEventData};
 pub use task::{GlobalTimerTask, TimerRegistration, TimerHandle};
 pub use wheel::{TimingWheel, TimerEntry, TimerEntryId};
