@@ -262,6 +262,54 @@ impl ReliabilityLayer {
         frames
     }
 
+    /// Packetize stream data for 0-RTT scenario with intelligent packet splitting.
+    /// This ensures SYN-ACK is always in the first packet, with PUSH frames
+    /// distributed across packets respecting MTU limits.
+    ///
+    /// 为0-RTT场景打包流数据，采用智能分包策略。
+    /// 确保SYN-ACK始终在第一个包中，PUSH帧按MTU限制智能分布到各个包中。
+    pub fn packetize_zero_rtt_stream_data(
+        &mut self,
+        peer_cid: u32,
+        peer_recv_window: u32,
+        now: Instant,
+        start_time: Instant,
+        syn_ack_frame: Frame,
+        max_packet_size: usize,
+    ) -> Vec<Vec<Frame>> {
+        let (recv_next_sequence, local_window_size) = {
+            let info = self.get_ack_info();
+            (info.1, info.2)
+        };
+        let context = PacketizerContext {
+            peer_cid,
+            timestamp: now.duration_since(start_time).as_millis() as u32,
+            congestion_window: self.congestion_control.congestion_window(),
+            in_flight_count: self.retransmission_manager.sack_in_flight_count(),
+            peer_recv_window,
+            max_payload_size: self.config.connection.max_payload_size,
+            ack_info: (recv_next_sequence, local_window_size),
+        };
+
+        let packet_groups = packetizer::packetize_zero_rtt(
+            &context,
+            &mut self.send_buffer,
+            &mut self.sequence_number_counter,
+            syn_ack_frame,
+            max_packet_size,
+        );
+
+        // Track all frames in the retransmission manager
+        // 在重传管理器中跟踪所有帧
+        for packet in &packet_groups {
+            for frame in packet {
+                self.retransmission_manager.add_in_flight_packet(frame.clone(), now);
+            }
+        }
+
+        packet_groups
+    }
+
     /// Determines if more packets can be sent based on the congestion and flow control windows.
     ///
     /// Only SACK-managed packets count towards congestion control.

@@ -227,7 +227,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
     /// This method registers the newly established connection to the frame router
     /// so that subsequent frames can be correctly routed to the corresponding
     /// connection endpoint.
-    fn register_connection_to_router(
+    async fn register_connection_to_router(
         &mut self,
         local_cid: u32,
         remote_addr: SocketAddr,
@@ -239,7 +239,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
             ConnectionMeta {
                 sender: tx_to_endpoint,
             },
-        );
+        ).await;
 
         debug!(
             cid = local_cid,
@@ -382,7 +382,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
 
         // 注册连接到帧路由器
         // Register connection to frame router
-        self.register_connection_to_router(local_cid, remote_addr, tx_to_endpoint);
+        self.register_connection_to_router(local_cid, remote_addr, tx_to_endpoint).await;
 
         // 将新连接发送给用户应用
         // Send new connection to user application
@@ -454,7 +454,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
 
         // 注册连接到帧路由器
         // Register connection to frame router
-        self.register_connection_to_router(local_cid, remote_addr, tx_to_endpoint);
+        self.register_connection_to_router(local_cid, remote_addr, tx_to_endpoint).await;
 
         let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
         Ok(stream)

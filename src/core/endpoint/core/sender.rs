@@ -63,6 +63,20 @@ where
         Ok(())
     }
 
+    /// Sends multiple packets as separate UDP datagrams.
+    /// Each inner Vec<Frame> represents one packet.
+    ///
+    /// 将多个包作为独立的UDP数据报发送。
+    /// 每个内部Vec<Frame>代表一个包。
+    async fn send_multiple_packets(&mut self, packets: Vec<Vec<Frame>>) -> Result<()> {
+        for packet_frames in packets {
+            if !packet_frames.is_empty() {
+                (self.sender)(packet_frames).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Sends any buffered frames as a single packet.
     ///
     /// 将所有缓冲的帧作为一个单独的包发送。
@@ -215,6 +229,29 @@ impl<T: Transport> Endpoint<T> {
             PacketBuilder::new(self.config.connection.max_packet_size, sender);
         packet_builder.add_frames(frames).await?;
         packet_builder.flush().await
+    }
+
+    /// Sends 0-RTT packets with intelligent splitting. Each inner Vec<Frame> is sent as a separate packet.
+    /// This preserves the intelligent packet splitting done by the packetizer.
+    ///
+    /// 发送采用智能分包的0-RTT数据包。每个内部Vec<Frame>作为独立的包发送。
+    /// 这保持了分包器所做的智能分包策略。
+    pub(in crate::core::endpoint) async fn send_zero_rtt_packets(&self, packet_groups: Vec<Vec<Frame>>) -> Result<()> {
+        if packet_groups.is_empty() {
+            return Ok(());
+        }
+        
+        tracing::debug!(
+            cid = self.identity.local_cid(),
+            packet_count = packet_groups.len(),
+            "Sending 0-RTT packets with intelligent splitting"
+        );
+        
+        let sender = |p: Vec<Frame>| self.send_raw_frames(p);
+        let mut packet_builder =
+            PacketBuilder::new(self.config.connection.max_packet_size, sender);
+        
+        packet_builder.send_multiple_packets(packet_groups).await
     }
 
     pub(in crate::core::endpoint) async fn send_frame_to(&self, frame: Frame, remote_addr: SocketAddr) -> Result<()> {

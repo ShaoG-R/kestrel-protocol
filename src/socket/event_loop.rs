@@ -90,10 +90,15 @@ impl<T: BindableTransport> SocketEventLoop<T> {
                         }
                     }
                 }
-                // 3. Handle periodic cleanup of draining CIDs.
-                // 3. 处理 draining CIDs 的定期清理。
+                // 3. Handle periodic cleanup of draining CIDs and expired early frames.
+                // 3. 处理 draining CIDs 和超时早到帧的定期清理。
                 _ = cleanup_interval.tick() => {
                     self.session_coordinator.frame_router_mut().cleanup_draining_pool();
+                    // Clean up early arrival frames older than 5 seconds
+                    // 清理超过5秒的早到帧
+                    self.session_coordinator.frame_router_mut().cleanup_expired_frames(
+                        std::time::Duration::from_secs(5)
+                    );
                 }
                 else => break,
             }

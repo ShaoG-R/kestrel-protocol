@@ -72,6 +72,81 @@ pub(crate) fn packetize(
     frames
 }
 
+/// Creates frames for 0-RTT scenario with intelligent packet splitting.
+/// This ensures SYN-ACK is always in the first packet, with PUSH frames
+/// distributed across packets respecting MTU limits.
+///
+/// 为0-RTT场景创建帧，采用智能分包策略。
+/// 确保SYN-ACK始终在第一个包中，PUSH帧按MTU限制智能分布到各个包中。
+pub(crate) fn packetize_zero_rtt(
+    context: &PacketizerContext,
+    send_buffer: &mut SendBuffer,
+    sequence_number_counter: &mut u32,
+    syn_ack_frame: Frame,
+    max_packet_size: usize,
+) -> Vec<Vec<Frame>> {
+    // First, generate all PUSH frames using the standard packetizer
+    let push_frames = packetize(context, send_buffer, sequence_number_counter, None);
+    
+    if push_frames.is_empty() {
+        // Only SYN-ACK, no PUSH frames
+        return vec![vec![syn_ack_frame]];
+    }
+
+    // Calculate SYN-ACK frame size
+    let syn_ack_size = syn_ack_frame.encoded_size();
+    
+    // Ensure SYN-ACK can fit in a packet (should always be true)
+    assert!(syn_ack_size <= max_packet_size, "SYN-ACK frame exceeds maximum packet size");
+    
+    let mut result_packets = Vec::new();
+    let mut current_packet = vec![syn_ack_frame];
+    let mut current_size = syn_ack_size;
+    
+    // Try to fit as many PUSH frames as possible in the first packet
+    let mut frames_iter = push_frames.into_iter();
+    
+    // Fill the first packet (with SYN-ACK)
+    while let Some(push_frame) = frames_iter.next() {
+        let frame_size = push_frame.encoded_size();
+        
+        if current_size + frame_size <= max_packet_size {
+            current_packet.push(push_frame);
+            current_size += frame_size;
+        } else {
+            // Current frame doesn't fit, finish first packet and start second
+            result_packets.push(current_packet);
+            
+            // Start a new packet with the current frame
+            current_packet = vec![push_frame];
+            current_size = frame_size;
+            break;
+        }
+    }
+    
+    // Handle remaining frames
+    for push_frame in frames_iter {
+        let frame_size = push_frame.encoded_size();
+        
+        if current_size + frame_size <= max_packet_size {
+            current_packet.push(push_frame);
+            current_size += frame_size;
+        } else {
+            // Current packet is full, start a new one
+            result_packets.push(current_packet);
+            current_packet = vec![push_frame];
+            current_size = frame_size;
+        }
+    }
+    
+    // Don't forget the last packet
+    if !current_packet.is_empty() {
+        result_packets.push(current_packet);
+    }
+    
+    result_packets
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +299,140 @@ mod tests {
         } else {
             panic!("Expected a PUSH frame");
         }
+    }
+
+    #[test]
+    fn test_packetize_zero_rtt_syn_ack_only() {
+        let mut send_buffer = SendBuffer::new(1024); // Empty buffer
+        let context = PacketizerContext {
+            peer_cid: 1,
+            timestamp: 123,
+            congestion_window: 10,
+            in_flight_count: 0,
+            peer_recv_window: 10,
+            max_payload_size: 100,
+            ack_info: (0, 1024),
+        };
+        let mut seq_counter = 0;
+        let syn_ack_frame = Frame::new_syn_ack(1, 2, 1);
+        
+        let packets = packetize_zero_rtt(&context, &mut send_buffer, &mut seq_counter, syn_ack_frame.clone(), 1500);
+        
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].len(), 1);
+        assert_eq!(packets[0][0], syn_ack_frame);
+        assert_eq!(seq_counter, 0);
+    }
+
+    #[test]
+    fn test_packetize_zero_rtt_syn_ack_with_data_single_packet() {
+        let mut send_buffer = SendBuffer::new(1024);
+        send_buffer.write_to_stream(Bytes::from_static(b"hello")); // 5 bytes, fits in one PUSH frame
+
+        let context = PacketizerContext {
+            peer_cid: 1,
+            timestamp: 123,
+            congestion_window: 10,
+            in_flight_count: 0,
+            peer_recv_window: 10,
+            max_payload_size: 100,
+            ack_info: (0, 1024),
+        };
+
+        let mut seq_counter = 0;
+        let syn_ack_frame = Frame::new_syn_ack(1, 2, 1);
+        
+        let packets = packetize_zero_rtt(&context, &mut send_buffer, &mut seq_counter, syn_ack_frame.clone(), 1500);
+        
+        // Should fit in one packet: SYN-ACK + PUSH
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].len(), 2);
+        assert_eq!(packets[0][0], syn_ack_frame);
+        if let Frame::Push { header, payload } = &packets[0][1] {
+            assert_eq!(header.sequence_number, 0);
+            assert_eq!(payload.as_ref(), b"hello");
+        } else {
+            panic!("Expected a PUSH frame");
+        }
+        assert_eq!(seq_counter, 1);
+    }
+
+    #[test]
+    fn test_packetize_zero_rtt_syn_ack_with_data_multiple_packets() {
+        let mut send_buffer = SendBuffer::new(1024);
+        // Add enough data to require multiple packets
+        send_buffer.write_to_stream(Bytes::from_static(b"this is a long message that will be split across multiple frames and packets"));
+
+        let context = PacketizerContext {
+            peer_cid: 1,
+            timestamp: 123,
+            congestion_window: 10,
+            in_flight_count: 0,
+            peer_recv_window: 10,
+            max_payload_size: 10, // Small payload to force multiple frames
+            ack_info: (0, 1024),
+        };
+
+        let mut seq_counter = 0;
+        let syn_ack_frame = Frame::new_syn_ack(1, 2, 1);
+        let syn_ack_size = syn_ack_frame.encoded_size();
+        
+        // Set packet size to allow SYN-ACK + only a few PUSH frames per packet
+        let max_packet_size = syn_ack_size + 2 * (21 + 10); // SYN-ACK + ~2 PUSH frames max
+        
+        let packets = packetize_zero_rtt(&context, &mut send_buffer, &mut seq_counter, syn_ack_frame.clone(), max_packet_size);
+        
+        // Should have multiple packets
+        assert!(packets.len() > 1);
+        
+        // First packet should start with SYN-ACK
+        assert!(!packets[0].is_empty());
+        assert_eq!(packets[0][0], syn_ack_frame);
+        
+        // First packet should have SYN-ACK + some PUSH frames
+        assert!(packets[0].len() > 1);
+        
+        // Verify all PUSH frames have correct sequence numbers
+        let mut expected_seq = 0;
+        for packet in &packets {
+            for frame in packet {
+                if let Frame::Push { header, .. } = frame {
+                    assert_eq!(header.sequence_number, expected_seq);
+                    expected_seq += 1;
+                }
+            }
+        }
+        
+        // Verify all data was consumed
+        assert!(send_buffer.is_stream_buffer_empty());
+    }
+
+    #[test]
+    fn test_packetize_zero_rtt_respects_congestion_window() {
+        let mut send_buffer = SendBuffer::new(1024);
+        send_buffer.write_to_stream(Bytes::from_static(b"hello world this is a test"));
+
+        let context = PacketizerContext {
+            peer_cid: 1,
+            timestamp: 123,
+            congestion_window: 2, // Very limited congestion window
+            in_flight_count: 0,
+            peer_recv_window: 10,
+            max_payload_size: 5,
+            ack_info: (0, 1024),
+        };
+
+        let mut seq_counter = 0;
+        let syn_ack_frame = Frame::new_syn_ack(1, 2, 1);
+        
+        let packets = packetize_zero_rtt(&context, &mut send_buffer, &mut seq_counter, syn_ack_frame.clone(), 1500);
+        
+        // Should only create packets limited by congestion window (2 PUSH frames max)
+        let total_push_frames: usize = packets.iter().map(|p| p.len() - if p[0] == syn_ack_frame { 1 } else { 0 }).sum();
+        assert_eq!(total_push_frames, 2);
+        assert_eq!(seq_counter, 2);
+        
+        // Some data should remain in the buffer
+        assert!(!send_buffer.is_stream_buffer_empty());
     }
 } 

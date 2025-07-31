@@ -425,23 +425,20 @@ impl<T: Transport> Endpoint<T> {
                     let syn_ack_frame =
                         create_syn_ack_frame(&self.config, self.identity.peer_cid(), self.identity.local_cid());
 
-                    // 3. Packetize the stream data into PUSH frames. This will correctly
-                    //    assign sequence numbers starting from 0.
+                    // 3. Use intelligent 0-RTT packet splitting to ensure SYN-ACK is in the first packet
                     let now = Instant::now();
                     let peer_recv_window = self.transport.peer_recv_window();
-                    let frames_to_send = self.transport.reliability_mut().packetize_stream_data(
+                    let packet_groups = self.transport.reliability_mut().packetize_zero_rtt_stream_data(
                         self.identity.peer_cid(),
                         peer_recv_window,
                         now,
                         self.timing.start_time(),
-                        Some(syn_ack_frame),
+                        syn_ack_frame,
+                        self.config.connection.max_packet_size,
                     );
 
-                    // 4. Prepend the SYN-ACK frame to coalesce it with the PUSH frames.
-                    // frames_to_send.insert(0, syn_ack_frame);
-
-                    // 5. Send them all in one go.
-                    self.send_frames(frames_to_send).await?;
+                    // 4. Send each packet group separately to maintain the intelligent splitting
+                    self.send_zero_rtt_packets(packet_groups).await?;
                 } else {
                     self.transport.reliability_mut().write_to_stream(data);
                 }
