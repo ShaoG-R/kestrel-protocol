@@ -79,7 +79,7 @@ impl<T: Transport> EndpointOperations for Endpoint<T> {
     // ========== 可靠性层操作 (Reliability Layer Operations) ==========
     
     fn reliability(&self) -> &ReliabilityLayer {
-        &self.transport.reliability()
+        self.transport.reliability()
     }
     
     fn reliability_mut(&mut self) -> &mut ReliabilityLayer {
@@ -115,7 +115,7 @@ impl<T: Transport> EndpointOperations for Endpoint<T> {
     // ========== 通信管道操作 (Communication Channel Operations) ==========
     
     fn command_tx(&self) -> &mpsc::Sender<SocketActorCommand> {
-        &self.channels.command_tx()
+        self.channels.command_tx()
     }
 
     // ========== 时间管理 (Time Management) ==========
@@ -154,16 +154,12 @@ impl<T: Transport> ProcessorOperations for Endpoint<T> {
             .into_iter()
             .map(|(start, end)| SackRange { start, end })
             .collect();
-        let peer_recv_window = self.transport.peer_recv_window() as u16;
+        let context = self.create_retransmission_context();
         let frames_to_retx = self.transport.reliability_mut().handle_ack(
             recv_next_seq,
             sack_ranges_converted,
             now,
-            self.timing.start_time(),
-            self.identity.peer_cid(),
-            self.config.protocol_version,
-            self.identity.local_cid(),
-            peer_recv_window,
+            &context,
         );
         Ok(frames_to_retx)
     }
@@ -257,7 +253,7 @@ mod tests {
             sender_tx,
             command_tx,
             None, // 无初始数据
-        );
+        ).unwrap();
             
         endpoint
     }

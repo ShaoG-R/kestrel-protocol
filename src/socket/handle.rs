@@ -140,7 +140,7 @@ impl<T: BindableTransport> TransportReliableUdpSocket<T> {
     ///
     /// 建立一个到指定远程地址的新的可靠连接。
     pub async fn connect(&self, remote_addr: SocketAddr) -> Result<Stream> {
-        self.connect_with_config(remote_addr, Config::default(), None)
+        self.connect_with_config(remote_addr, Box::new(Config::default()), None)
             .await
     }
 
@@ -150,7 +150,7 @@ impl<T: BindableTransport> TransportReliableUdpSocket<T> {
     pub async fn connect_with_config(
         &self,
         remote_addr: SocketAddr,
-        config: Config,
+        config: Box<Config>,
         initial_data: Option<InitialData>,
     ) -> Result<Stream> {
         let (response_tx, response_rx) = oneshot::channel();

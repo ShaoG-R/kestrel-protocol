@@ -7,6 +7,70 @@ use crate::packet::sack::{self, SackRange};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::time::Duration;
 
+/// Frame type enum for retransmission reconstruction
+/// 用于重传重构的帧类型枚举
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameType {
+    Push,
+    Syn,
+    SynAck,
+    Fin,
+    PathChallenge,
+    PathResponse,
+}
+
+/// Context information needed for frame reconstruction during retransmission
+/// 重传期间帧重构所需的上下文信息
+#[derive(Debug, Clone)]
+pub struct RetransmissionContext {
+    /// Start time of the connection for timestamp calculation
+    /// 连接的开始时间，用于时间戳计算
+    pub start_time: tokio::time::Instant,
+    /// Current peer connection ID
+    /// 当前对端连接ID
+    pub current_peer_cid: u32,
+    /// Protocol version
+    /// 协议版本
+    pub protocol_version: u8,
+    /// Local connection ID
+    /// 本地连接ID
+    pub local_cid: u32,
+    /// Next expected receive sequence number
+    /// 下一个期望接收的序列号
+    pub recv_next_sequence: u32,
+    /// Receive window size
+    /// 接收窗口大小
+    pub recv_window_size: u16,
+}
+
+impl RetransmissionContext {
+    /// Creates a new retransmission context
+    /// 创建新的重传上下文
+    pub fn new(
+        start_time: tokio::time::Instant,
+        current_peer_cid: u32,
+        protocol_version: u8,
+        local_cid: u32,
+        recv_next_sequence: u32,
+        recv_window_size: u16,
+    ) -> Self {
+        Self {
+            start_time,
+            current_peer_cid,
+            protocol_version,
+            local_cid,
+            recv_next_sequence,
+            recv_window_size,
+        }
+    }
+
+    /// Calculates the current timestamp based on the start time
+    /// 基于开始时间计算当前时间戳
+    pub fn current_timestamp(&self, now: tokio::time::Instant) -> u32 {
+        now.duration_since(self.start_time).as_millis() as u32
+    }
+}
+
 /// Defines the retransmission strategy for different frame types.
 /// 定义不同帧类型的重传策略。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -553,5 +617,20 @@ impl Frame {
             _ => 0,
         };
         command_size + header_size + payload_size
+    }
+
+    /// Returns the frame type for retransmission purposes
+    /// 返回用于重传目的的帧类型
+    pub fn frame_type(&self) -> Option<FrameType> {
+        match self {
+            Frame::Push { .. } => Some(FrameType::Push),
+            Frame::Syn { .. } => Some(FrameType::Syn),
+            Frame::SynAck { .. } => Some(FrameType::SynAck),
+            Frame::Fin { .. } => Some(FrameType::Fin),
+            Frame::PathChallenge { .. } => Some(FrameType::PathChallenge),
+            Frame::PathResponse { .. } => Some(FrameType::PathResponse),
+            // ACK and PING frames should not be stored for retransmission
+            _ => None,
+        }
     }
 } 

@@ -71,7 +71,7 @@ impl std::fmt::Display for ProcessorErrorContext {
         )?;
         
         if let Some(ref info) = self.additional_info {
-            write!(f, ", Info: {}", info)?;
+            write!(f, ", Info: {info}")?;
         }
         
         Ok(())
@@ -105,11 +105,9 @@ pub enum Error {
 
     /// 帧类型不匹配错误
     /// Frame type mismatch error
-    #[error("Frame type mismatch: expected {expected}, got {actual}")]
+    #[error("{err}")]
     FrameTypeMismatch {
-        expected: String,
-        actual: String,
-        context: ProcessorErrorContext,
+        err: Box<FrameTypeMismatchError>
     },
 
 
@@ -179,5 +177,30 @@ impl From<Error> for std::io::Error {
             Error::NotConnected => ErrorKind::NotConnected.into(),
             Error::InitialDataTooLarge => ErrorKind::InvalidInput.into(),
         }
+    }
+}
+
+#[derive(Debug, Error)]
+pub struct FrameTypeMismatchError {
+    pub expected: String,
+    pub actual: String,
+    pub context: ProcessorErrorContext,
+}
+impl FrameTypeMismatchError {
+    pub fn new(expected: String, actual: String, context: ProcessorErrorContext) -> Self {
+        Self {
+            expected,
+            actual,
+            context,
+        }
+    }
+}
+impl std::fmt::Display for FrameTypeMismatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Frame type mismatch: expected {}, got {}, {}",
+            self.expected, self.actual, self.context
+        )
     }
 }

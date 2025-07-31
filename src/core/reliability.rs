@@ -136,24 +136,11 @@ impl ReliabilityLayer {
         recv_next_seq: u32,
         sack_ranges: Vec<SackRange>,
         now: Instant,
-        start_time: Instant,
-        current_peer_cid: u32,
-        protocol_version: u8,
-        local_cid: u32,
-        recv_window_size: u16,
+        context: &crate::packet::frame::RetransmissionContext,
     ) -> Vec<Frame> {
         // Use the unified retransmission manager for ACK processing.
         // 使用统一的重传管理器进行ACK处理。
-        let result = self.retransmission_manager.process_ack(
-            recv_next_seq,
-            &sack_ranges,
-            now,
-            start_time,
-            current_peer_cid,
-            protocol_version,
-            local_cid,
-            recv_window_size,
-        );
+        let result = self.retransmission_manager.process_ack(recv_next_seq, &sack_ranges, now, context);
 
         // Update RTT and congestion control with real samples from SACK-managed packets.
         // Simple retransmission packets don't contribute to RTT estimation or congestion control.
@@ -198,27 +185,10 @@ impl ReliabilityLayer {
     pub fn check_for_retransmissions(
         &mut self, 
         now: Instant, 
-        start_time: Instant,
-        current_peer_cid: u32,
-        protocol_version: u8,
-        local_cid: u32,
+        context: &crate::packet::frame::RetransmissionContext,
     ) -> Vec<Frame> {
         let rto = self.rto_estimator.rto();
-        let (recv_next_sequence, recv_window_size) = {
-            let info = self.get_ack_info();
-            (info.1, info.2)
-        };
-        
-        let frames_to_resend = self.retransmission_manager.check_for_retransmissions(
-            rto, 
-            now, 
-            start_time,
-            current_peer_cid,
-            protocol_version,
-            local_cid,
-            recv_next_sequence,
-            recv_window_size
-        );
+        let frames_to_resend = self.retransmission_manager.check_for_retransmissions(rto, now, context);
 
         // If packets timed out, notify congestion control and back off the RTO timer.
         // 如果数据包超时，通知拥塞控制并退避RTO计时器。
@@ -566,10 +536,7 @@ impl ReliabilityLayer {
     pub fn check_reliability_timeouts(
         &mut self, 
         now: Instant, 
-        start_time: Instant,
-        current_peer_cid: u32,
-        protocol_version: u8,
-        local_cid: u32,
+        context: &crate::packet::frame::RetransmissionContext,
     ) -> TimeoutCheckResult {
         let mut all_events = Vec::new();
         let mut all_frames_to_retransmit = Vec::new();
@@ -577,21 +544,7 @@ impl ReliabilityLayer {
         // 使用分层超时管理接口检查重传超时，使用帧重构
         // Use layered timeout management interface to check retransmission timeout with frame reconstruction
         let rto = self.rto_estimator.rto();
-        let (recv_next_sequence, recv_window_size) = {
-            let info = self.get_ack_info();
-            (info.1, info.2)
-        };
-        
-        let (retx_events, frames_to_resend) = self.retransmission_manager.check_retransmission_timeouts(
-            rto, 
-            now, 
-            start_time,
-            current_peer_cid,
-            protocol_version,
-            local_cid,
-            recv_next_sequence,
-            recv_window_size
-        );
+        let (retx_events, frames_to_resend) = self.retransmission_manager.check_retransmission_timeouts(rto, now, context);
         
         all_events.extend(retx_events);
         all_frames_to_retransmit.extend(frames_to_resend);

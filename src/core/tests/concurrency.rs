@@ -166,7 +166,7 @@ async fn test_core_multiple_clients_concurrently() {
             rx_from_demux,
             sender_task_tx.clone(),
             server_command_tx,
-        );
+        ).unwrap();
         server_handles.push((rx_from_server_user, tx_to_server_user.clone()));
 
         spawn_endpoint(
@@ -190,7 +190,7 @@ async fn test_core_multiple_clients_concurrently() {
                 sender_task_tx,
                 client_command_tx,
                 None,
-            );
+            ).unwrap();
             endpoint.set_peer_cid(server_cid);
             spawn_endpoint(
                 endpoint,

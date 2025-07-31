@@ -100,9 +100,11 @@ impl ConnectionProcessor {
                     now,
                 );
                 Err(crate::error::Error::FrameTypeMismatch {
-                    expected: "connection management frame (SYN, SYN-ACK, or FIN)".to_string(),
-                    actual: format!("{:?}", std::mem::discriminant(&frame)),
-                    context: error_context,
+                    err: crate::error::FrameTypeMismatchError::new(
+                        "connection management frame (SYN, SYN-ACK, or FIN)".to_string(),
+                        format!("{:?}", std::mem::discriminant(&frame)),
+                        error_context,
+                    ).into(),
                 })
             }
         }

@@ -23,7 +23,7 @@ pub enum SocketActorCommand {
     /// 来自公共API的命令，用于建立一个新连接。
     Connect {
         remote_addr: SocketAddr,
-        config: Config,
+        config: Box<Config>,
         initial_data: Option<bytes::Bytes>,
         response_tx: oneshot::Sender<Result<Stream>>,
     },

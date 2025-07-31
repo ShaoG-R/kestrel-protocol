@@ -107,7 +107,7 @@ pub(crate) fn packetize_zero_rtt(
     let mut frames_iter = push_frames.into_iter();
     
     // Fill the first packet (with SYN-ACK)
-    while let Some(push_frame) = frames_iter.next() {
+    for push_frame in frames_iter.by_ref() {
         let frame_size = push_frame.encoded_size();
         
         if current_size + frame_size <= max_packet_size {

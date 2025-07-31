@@ -80,7 +80,15 @@ impl<T: BindableTransport> SocketEventLoop<T> {
                         // Check if the first frame indicates a new connection attempt.
                         // 检查第一帧是否表示新的连接尝试。
                         if let Frame::Syn { .. } = &datagram.frames[0] {
-                            self.session_coordinator.handle_new_connection(datagram.frames, datagram.remote_addr).await;
+                            if let Err(e) = self.session_coordinator.handle_new_connection(datagram.frames, datagram.remote_addr).await {
+                                // Log error but continue running the event loop
+                                // 记录错误但继续运行事件循环
+                                tracing::warn!(
+                                    addr = %datagram.remote_addr,
+                                    error = %e,
+                                    "Failed to handle new connection"
+                                );
+                            }
                         } else {
                             // Otherwise, dispatch frames individually to existing connections.
                             // 否则，将帧单独分派到现有连接。
@@ -117,7 +125,7 @@ impl<T: BindableTransport> SocketEventLoop<T> {
                 response_tx,
             } => {
                 let result = self.session_coordinator
-                    .create_client_connection(remote_addr, config, initial_data)
+                    .create_client_connection(remote_addr, *config, initial_data)
                     .await;
                 let _ = response_tx.send(result);
             }

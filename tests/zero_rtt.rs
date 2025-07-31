@@ -52,7 +52,7 @@ async fn test_basic_zero_rtt_connection() {
     info!("[Client] 使用0-RTT数据连接到服务器...");
     
     let client_stream = client
-        .connect_with_config(server_addr, config, Some(initial_data))
+        .connect_with_config(server_addr, Box::new(config), Some(initial_data))
         .await
         .unwrap();
     info!("[Client] 0-RTT连接建立完成");
@@ -132,7 +132,7 @@ async fn test_zero_rtt_packet_coalescing() {
     
     info!("[Client] 发送大量0-RTT数据 ({} bytes)...", large_initial_data.len());
     let client_stream = client
-        .connect_with_config(server_addr, config, Some(initial_data))
+        .connect_with_config(server_addr, Box::new(config), Some(initial_data))
         .await
         .unwrap();
 
@@ -222,7 +222,7 @@ async fn test_early_arrival_frame_caching() {
         let config = Config::default();
         let initial_data = InitialData::new(b"Client 1 data", &config).unwrap();
         let stream = client1
-            .connect_with_config(server_addr, config, Some(initial_data))
+            .connect_with_config(server_addr, Box::new(config), Some(initial_data))
             .await
             .unwrap();
             
@@ -248,7 +248,7 @@ async fn test_early_arrival_frame_caching() {
         let config = Config::default();
         let initial_data = InitialData::new(b"Client 2 data", &config).unwrap();
         let stream = client2
-            .connect_with_config(server_addr, config, Some(initial_data))
+            .connect_with_config(server_addr, Box::new(config), Some(initial_data))
             .await
             .unwrap();
             
@@ -337,7 +337,7 @@ async fn test_concurrent_zero_rtt_connections() {
             let initial_data = InitialData::new(initial_msg.as_bytes(), &config).unwrap();
             
             let stream = client
-                .connect_with_config(server_addr, config, Some(initial_data))
+                .connect_with_config(server_addr, Box::new(config), Some(initial_data))
                 .await
                 .unwrap();
 
@@ -405,7 +405,7 @@ async fn test_zero_rtt_data_integrity() {
     info!("[Client] 发送 {} bytes 的结构化0-RTT数据", test_data.len());
     
     let client_stream = client
-        .connect_with_config(server_addr, config, Some(initial_data))
+        .connect_with_config(server_addr, Box::new(config), Some(initial_data))
         .await
         .unwrap();
 
@@ -511,7 +511,7 @@ async fn test_mixed_zero_rtt_and_regular_connections() {
             let initial_data = InitialData::new(msg.as_bytes(), &config).unwrap();
             
             let stream = client
-                .connect_with_config(server_addr, config, Some(initial_data))
+                .connect_with_config(server_addr, Box::new(config), Some(initial_data))
                 .await
                 .unwrap();
 
@@ -624,7 +624,7 @@ async fn test_zero_rtt_performance_stress() {
             let initial_data = InitialData::new(&test_data, &config).unwrap();
             
             let stream = client
-                .connect_with_config(server_addr, config, Some(initial_data))
+                .connect_with_config(server_addr, Box::new(config), Some(initial_data))
                 .await
                 .unwrap();
 

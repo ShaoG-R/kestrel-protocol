@@ -6,6 +6,7 @@ use crate::{
     config::Config,
     core::reliability::ReliabilityLayer,
     socket::SocketActorCommand,
+    error::Result,
 };
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -30,7 +31,7 @@ impl<T: Transport> Endpoint<T> {
         sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
         initial_data: Option<Bytes>,
-    ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>) {
+    ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
 
@@ -45,7 +46,7 @@ impl<T: Transport> Endpoint<T> {
             ConnectionState::Connecting,
             config.clone(),
         );
-        lifecycle_manager.initialize(local_cid, remote_addr).unwrap();
+        lifecycle_manager.initialize(local_cid, remote_addr)?;
 
         let endpoint = Self {
             identity: ConnectionIdentity::new(local_cid, 0, remote_addr),
@@ -62,7 +63,7 @@ impl<T: Transport> Endpoint<T> {
             ),
         };
 
-        (endpoint, tx_to_endpoint, rx_from_endpoint)
+        Ok((endpoint, tx_to_endpoint, rx_from_endpoint))
     }
 
     /// Creates a new `Endpoint` for the server-side.
@@ -74,7 +75,7 @@ impl<T: Transport> Endpoint<T> {
         receiver: mpsc::Receiver<(crate::packet::frame::Frame, SocketAddr)>,
         sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
-    ) -> (Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>) {
+    ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
 
@@ -85,7 +86,7 @@ impl<T: Transport> Endpoint<T> {
             ConnectionState::SynReceived,
             config.clone(),
         );
-        lifecycle_manager.initialize(local_cid, remote_addr).unwrap();
+        lifecycle_manager.initialize(local_cid, remote_addr)?;
 
         let endpoint = Self {
             identity: ConnectionIdentity::new(local_cid, peer_cid, remote_addr),
@@ -102,6 +103,6 @@ impl<T: Transport> Endpoint<T> {
             ),
         };
 
-        (endpoint, tx_to_endpoint, rx_from_endpoint)
+        Ok((endpoint, tx_to_endpoint, rx_from_endpoint))
     }
 } 

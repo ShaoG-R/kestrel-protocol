@@ -11,7 +11,8 @@ pub mod rtt;
 mod sack_manager;
 mod simple_retx_manager;
 
-use self::{sack_manager::{SackManager, FrameType}, simple_retx_manager::SimpleRetransmissionManager};
+use self::{sack_manager::SackManager, simple_retx_manager::SimpleRetransmissionManager};
+use crate::packet::frame::{FrameType, RetransmissionContext};
 
 use crate::{
     config::Config,
@@ -109,24 +110,11 @@ impl RetransmissionManager {
         recv_next_seq: u32,
         sack_ranges: &[SackRange],
         now: Instant,
-        start_time: Instant,
-        current_peer_cid: u32,
-        protocol_version: u8,
-        local_cid: u32,
-        recv_window_size: u16,
+        context: &RetransmissionContext,
     ) -> RetransmissionProcessResult {
         // Process SACK-managed packets
         // 处理SACK管理的数据包
-        let sack_result = self.sack_manager.process_ack(
-            recv_next_seq,
-            sack_ranges,
-            now,
-            start_time,
-            current_peer_cid,
-            protocol_version,
-            local_cid,
-            recv_window_size,
-        );
+        let sack_result = self.sack_manager.process_ack(recv_next_seq, sack_ranges, now, context);
 
         // Process simple retransmission packets
         // 处理简单重传数据包
@@ -166,46 +154,24 @@ impl RetransmissionManager {
         &mut self, 
         rto: Duration, 
         now: Instant, 
-        start_time: Instant,
-        current_peer_cid: u32,
-        protocol_version: u8,
-        local_cid: u32,
-        recv_next_sequence: u32,
-        recv_window_size: u16
+        context: &RetransmissionContext,
     ) -> Vec<Frame> {
         let mut frames_to_retx = Vec::new();
 
         // Check SACK-based retransmissions with frame reconstruction
         // 检查基于SACK的重传并重构帧
-        let sack_retx = self.sack_manager.check_for_rto(
-            rto, 
-            now, 
-            start_time,
-            current_peer_cid,
-            protocol_version,
-            local_cid,
-            recv_next_sequence,
-            recv_window_size
-        );
+        let sack_retx = self.sack_manager.check_for_rto(rto, now, context);
         frames_to_retx.extend(sack_retx);
 
         // Check simple retransmissions with frame reconstruction
         // 检查简单重传并使用帧重构
-        let simple_retx = self.simple_retx_manager.check_for_retransmissions(
-            now, 
-            start_time,
-            current_peer_cid,
-            protocol_version,
-            local_cid,
-            recv_next_sequence,
-            recv_window_size
-        );
+        let simple_retx = self.simple_retx_manager.check_for_retransmissions(now, context);
         frames_to_retx.extend(simple_retx);
 
         if !frames_to_retx.is_empty() {
             debug!(
                 retx_count = frames_to_retx.len(),
-                current_peer_cid = current_peer_cid,
+                current_peer_cid = context.current_peer_cid,
                 "Retransmissions triggered by unified manager with frame reconstruction"
             );
         }
@@ -315,41 +281,19 @@ impl RetransmissionManager {
         &mut self,
         rto: Duration,
         now: Instant,
-        start_time: Instant,
-        current_peer_cid: u32,
-        protocol_version: u8,
-        local_cid: u32,
-        recv_next_sequence: u32,
-        recv_window_size: u16,
+        context: &RetransmissionContext,
     ) -> (Vec<TimeoutEvent>, Vec<Frame>) {
         let mut events = Vec::new();
         let mut frames_to_retx = Vec::new();
 
         // 检查SACK-based重传并重构帧
         // Check SACK-based retransmissions with frame reconstruction
-        let sack_retx = self.sack_manager.check_for_rto(
-            rto, 
-            now, 
-            start_time,
-            current_peer_cid,
-            protocol_version,
-            local_cid,
-            recv_next_sequence,
-            recv_window_size
-        );
+        let sack_retx = self.sack_manager.check_for_rto(rto, now, context);
         frames_to_retx.extend(sack_retx);
 
         // 检查简单重传并使用帧重构
         // Check simple retransmissions with frame reconstruction
-        let simple_retx = self.simple_retx_manager.check_for_retransmissions(
-            now, 
-            start_time,
-            current_peer_cid,
-            protocol_version,
-            local_cid,
-            recv_next_sequence,
-            recv_window_size
-        );
+        let simple_retx = self.simple_retx_manager.check_for_retransmissions(now, context);
         frames_to_retx.extend(simple_retx);
 
         // 如果有需要重传的帧，添加重传超时事件
@@ -358,7 +302,7 @@ impl RetransmissionManager {
             events.push(TimeoutEvent::RetransmissionTimeout);
             debug!(
                 retx_count = frames_to_retx.len(),
-                current_peer_cid = current_peer_cid,
+                current_peer_cid = context.current_peer_cid,
                 "Retransmission timeout detected by unified manager with frame reconstruction"
             );
         }
@@ -390,32 +334,14 @@ mod tests {
     
     // Helper function for testing retransmissions
     fn test_check_retransmissions(manager: &mut RetransmissionManager, rto: Duration, now: Instant, peer_cid: u32) -> Vec<Frame> {
-        let start_time = Instant::now(); // Use current time as start_time for tests
-        manager.check_for_retransmissions(
-            rto,
-            now,
-            start_time,
-            peer_cid,
-            1, // protocol_version
-            1, // local_cid
-            0, // recv_next_sequence
-            1024, // recv_window_size
-        )
+        let context = RetransmissionContext::new(now, peer_cid, 1, 1, 0, 1024);
+        manager.check_for_retransmissions(rto, now, &context)
     }
     
     // Helper function for testing timeout events
     fn test_check_retransmission_timeouts(manager: &mut RetransmissionManager, rto: Duration, now: Instant, peer_cid: u32) -> (Vec<TimeoutEvent>, Vec<Frame>) {
-        let start_time = Instant::now(); // Use current time as start_time for tests
-        manager.check_retransmission_timeouts(
-            rto,
-            now,
-            start_time,
-            peer_cid,
-            1, // protocol_version
-            1, // local_cid
-            0, // recv_next_sequence
-            1024, // recv_window_size
-        )
+        let context = RetransmissionContext::new(now, peer_cid, 1, 1, 0, 1024);
+        manager.check_retransmission_timeouts(rto, now, &context)
     }
 
     fn create_test_config() -> Config {
@@ -478,8 +404,8 @@ mod tests {
         manager.add_in_flight_packet(create_regular_push_frame(10), now);
 
         // Process ACK that acknowledges both
-        let start_time = now;
-        let result = manager.process_ack(11, &[], now, start_time, 12345, 1, 1, 1024);
+        let context = RetransmissionContext::new(now, 12345, 1, 1, 1024, 1024);
+        let result = manager.process_ack(11, &[], now, &context);
 
         // Should acknowledge both frames
         assert!(result.newly_acked_sequences.contains(&0)); // Handshake frame

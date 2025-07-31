@@ -27,6 +27,14 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use crate::socket::event_loop::routing::FrameRouter;
 
+/// 服务器端点创建结果类型别名
+/// Type alias for server endpoint creation result
+type ServerEndpointBundle<T> = (
+    Endpoint<T>,
+    mpsc::Sender<(Frame, SocketAddr)>,
+    Stream,
+);
+
 /// Socket会话协调器 - 统一协调各层交互的中央控制器
 /// Socket Session Coordinator - Central controller that coordinates inter-layer interactions
 ///
@@ -195,11 +203,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         local_cid: u32,
         peer_cid: u32,
         remote_addr: SocketAddr,
-    ) -> (
-        Endpoint<T>,
-        mpsc::Sender<(Frame, SocketAddr)>,
-        Stream,
-    ) {
+    ) -> Result<ServerEndpointBundle<T>> {
         let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
         let transport_tx = self.transport_manager.send_tx();
 
@@ -211,11 +215,11 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
             rx_from_socket,
             transport_tx,
             self.command_tx.clone(),
-        );
+        )?;
 
         let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
 
-        (endpoint, tx_to_endpoint, stream)
+        Ok((endpoint, tx_to_endpoint, stream))
     }
 
     /// 注册新连接到帧路由器
@@ -307,12 +311,12 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         &mut self,
         mut frames: Vec<Frame>,
         remote_addr: SocketAddr,
-    ) {
+    ) -> Result<()> {
         // 验证帧列表不为空，且第一帧为SYN
         // Validate frame list is not empty and first frame is SYN
         if frames.is_empty() {
             warn!(addr = %remote_addr, "Received empty frame list for new connection");
-            return;
+            return Ok(());
         }
 
         let first_frame = frames.remove(0);
@@ -321,13 +325,13 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
                 addr = %remote_addr,
                 "handle_new_connection called with a non-SYN frame as the first frame"
             );
-            return;
+            return Ok(());
         };
 
         // 验证协议版本兼容性
         // Validate protocol version compatibility
         if !self.validate_protocol_version(header.protocol_version, remote_addr) {
-            return;
+            return Ok(());
         }
 
         info!(addr = %remote_addr, "Accepting new connection attempt");
@@ -340,7 +344,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         // 创建服务器端连接端点
         // Create server-side connection endpoint
         let (mut endpoint, tx_to_endpoint, stream) = 
-            self.create_server_endpoint(local_cid, peer_cid, remote_addr);
+            self.create_server_endpoint(local_cid, peer_cid, remote_addr)?;
 
         // 处理0-RTT数据帧（如果有的话）
         // Handle 0-RTT data frames (if any)
@@ -386,11 +390,9 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
 
         // 将新连接发送给用户应用
         // Send new connection to user application
-        if let Err(_) = self.send_connection_to_user(stream, remote_addr, local_cid).await {
-            // 错误已在方法内部处理和记录
-            // Error has been handled and logged within the method
-            return;
-        }
+        self.send_connection_to_user(stream, remote_addr, local_cid).await?;
+
+        Ok(())
     }
 
     /// 创建客户端连接
@@ -421,7 +423,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
             transport_tx,
             self.command_tx.clone(),
             initial_data,
-        );
+        )?;
 
         // 生成端点任务
         // Spawn endpoint task

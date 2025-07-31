@@ -9,11 +9,11 @@
 //! 此模块处理不需要基于SACK的完整可靠性复杂性的帧的简单超时重传。
 //! 这包括控制帧（SYN、SYN-ACK、FIN）和握手数据帧。
 
-use crate::packet::frame::{Frame, ReliabilityMode};
+use crate::packet::frame::{Frame, ReliabilityMode, FrameType, RetransmissionContext};
 use std::collections::BTreeMap;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, trace};
-use super::sack_manager::{RetransmissionFrameInfo, FrameType};
+use super::sack_manager::RetransmissionFrameInfo;
 
 /// Represents a packet managed by simple retransmission with frame reconstruction.
 /// 表示由简单重传管理的数据包，支持帧重构。
@@ -65,22 +65,23 @@ impl SimpleRetransmissionManager {
                 retry_interval,
             } = reliability_mode
             {
-                let packet = SimpleInFlightPacket {
-                    frame_info: RetransmissionFrameInfo::from_frame(&frame),
-                    last_sent_at: now,
-                    retry_count: 0,
-                    max_retries,
-                    retry_interval,
-                };
-
-                trace!(
-                    seq,
-                    max_retries,
-                    retry_interval_ms = retry_interval.as_millis(),
-                    "Added packet to simple retransmission tracking"
-                );
-
-                self.in_flight_simple.insert(seq, packet);
+                // Only add frames that support retransmission
+                if let Some(frame_info) = RetransmissionFrameInfo::from_frame(&frame) {
+                    let packet = SimpleInFlightPacket {
+                        frame_info,
+                        last_sent_at: now,
+                        retry_count: 0,
+                        max_retries,
+                        retry_interval,
+                    };
+                    self.in_flight_simple.insert(seq, packet);
+                    trace!(
+                        seq,
+                        max_retries,
+                        retry_interval_ms = retry_interval.as_millis(),
+                        "Added packet to simple retransmission tracking"
+                    );
+                }
             }
         }
     }
@@ -133,30 +134,17 @@ impl SimpleRetransmissionManager {
     pub fn check_for_retransmissions(
         &mut self, 
         now: Instant, 
-        start_time: Instant,
-        current_peer_cid: u32,
-        protocol_version: u8,
-        local_cid: u32,
-        recv_next_sequence: u32,
-        recv_window_size: u16
+        context: &RetransmissionContext,
     ) -> Vec<Frame> {
         let mut frames_to_retx = Vec::new();
         let mut expired_sequences = Vec::new();
-        let current_timestamp = now.duration_since(start_time).as_millis() as u32;
 
         for (&seq, packet) in self.in_flight_simple.iter_mut() {
             if now.duration_since(packet.last_sent_at) >= packet.retry_interval {
                 if packet.retry_count < packet.max_retries {
                     // Reconstruct frame with fresh header information
                     // 使用新鲜的header信息重构帧
-                    let reconstructed_frame = packet.frame_info.reconstruct_frame(
-                        current_peer_cid,
-                        protocol_version,
-                        local_cid,
-                        recv_next_sequence,
-                        recv_window_size,
-                        current_timestamp,
-                    );
+                    let reconstructed_frame = packet.frame_info.reconstruct_frame(context, now);
                     frames_to_retx.push(reconstructed_frame);
                     packet.last_sent_at = now;
                     packet.retry_count += 1;
@@ -166,7 +154,7 @@ impl SimpleRetransmissionManager {
                         retry_count = packet.retry_count,
                         max_retries = packet.max_retries,
                         frame_type = ?packet.frame_info.frame_type,
-                        updated_cid = current_peer_cid,
+                        updated_cid = context.current_peer_cid,
                         "Simple retransmission triggered with frame reconstruction"
                     );
                 } else {
@@ -234,16 +222,8 @@ mod tests {
     
     // Helper function for testing simple retransmissions
     fn test_check_retransmissions(manager: &mut SimpleRetransmissionManager, now: Instant, peer_cid: u32) -> Vec<Frame> {
-        let start_time = Instant::now(); // Use current time as start_time for tests
-        manager.check_for_retransmissions(
-            now,
-            start_time,
-            peer_cid,
-            1, // protocol_version
-            1, // local_cid
-            0, // recv_next_sequence
-            1024, // recv_window_size
-        )
+        let context = RetransmissionContext::new(now, peer_cid, 1, 1, 0, 1024);
+        manager.check_for_retransmissions(now, &context)
     }
 
     fn create_test_fin_frame(seq: u32) -> Frame {

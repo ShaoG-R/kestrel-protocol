@@ -199,6 +199,12 @@ impl<P> ProcessorAdapter<P> {
     }
 }
 
+impl<P> Default for ProcessorAdapter<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl<P, T> DynamicFrameProcessor<T> for ProcessorAdapter<P>
 where
@@ -363,9 +369,11 @@ impl StaticFrameProcessorRegistry {
                     now,
                 );
                 Err(crate::error::Error::FrameTypeMismatch {
-                    expected: "supported frame type".to_string(),
-                    actual: format!("{:?}", std::mem::discriminant(&frame)),
-                    context: error_context,
+                    err: crate::error::FrameTypeMismatchError::new(
+                        "supported frame type".to_string(),
+                        format!("{:?}", std::mem::discriminant(&frame)),
+                        error_context,
+                    ).into(),
                 })
             }
         }

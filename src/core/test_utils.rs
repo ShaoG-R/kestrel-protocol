@@ -233,7 +233,7 @@ pub fn setup_client_server_with_filter(
             sender_task_tx.clone(),
             command_tx.clone(),
             initial_data,
-        );
+        ).unwrap();
         endpoint.set_peer_cid(peer_cid);
 
         spawn_endpoint(
@@ -265,7 +265,7 @@ pub fn setup_client_server_with_filter(
             rx_from_socket,
             sender_task_tx.clone(),
             command_tx,
-        );
+        ).unwrap();
 
         spawn_endpoint(
             endpoint,
@@ -361,7 +361,7 @@ pub fn setup_server_harness() -> ServerTestHarness {
         rx_from_socket,
         sender_task_tx,
         command_tx,
-    );
+    ).unwrap();
 
     // Unlike other test setups, we only spawn the main endpoint task.
     // The test itself will drive the network channels.

@@ -32,8 +32,8 @@ pub(crate) struct FrameRouter {
     /// Early arrival frame cache: Cache key -> Pending frames list
     /// - 对于CID非0的帧：使用CID作为key
     /// - 对于CID为0的帧（0-RTT场景）：使用远程地址的哈希作为key
-    /// For CID non-zero frames: use CID as key
-    /// For CID zero frames (0-RTT scenarios): use remote address hash as key
+    /// - For CID non-zero frames: use CID as key
+    /// - For CID zero frames (0-RTT scenarios): use remote address hash as key
     pending_frames: HashMap<u64, Vec<PendingFrame>>,
 }
 
@@ -338,7 +338,7 @@ impl FrameRouter {
         
         self.pending_frames
             .entry(cache_key)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(pending_frame);
         
         debug!(
@@ -400,7 +400,7 @@ impl FrameRouter {
                             // Put back frames with mismatched addresses
                             self.pending_frames
                                 .entry(cache_key)
-                                .or_insert_with(Vec::new)
+                                .or_default()
                                 .push(pending_frame);
                         }
                     }

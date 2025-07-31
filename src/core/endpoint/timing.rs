@@ -256,14 +256,12 @@ impl TimingManager {
     /// This method calculates the remaining time until the next possible timeout,
     /// used to optimize the event loop's wait time.
     pub fn time_until_next_timeout(&self, config: &Config) -> Duration {
-        let idle_remaining = config
-            .connection
-            .idle_timeout
-            .saturating_sub(self.time_since_last_recv());
-
         // 返回最小的剩余时间
         // Return the minimum remaining time
-        idle_remaining
+        config
+            .connection
+            .idle_timeout
+            .saturating_sub(self.time_since_last_recv())
     }
 
     /// 检查是否应该触发超时处理

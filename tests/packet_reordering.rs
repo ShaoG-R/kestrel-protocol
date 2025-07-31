@@ -74,7 +74,7 @@ async fn test_basic_early_frame_caching() {
         
         let config = Config::default();
         let initial_data = InitialData::new(b"Early frame test data", &config).unwrap();
-        client.connect_with_config(server_addr, config, Some(initial_data)).await
+        client.connect_with_config(server_addr, Box::new(config), Some(initial_data)).await
     });
 
     // 服务器端处理
@@ -187,7 +187,7 @@ async fn test_multi_client_early_frames() {
                 let initial_data = InitialData::new(test_data.as_bytes(), &config).unwrap();
                 
                 let stream = client
-                    .connect_with_config(server_addr, config, Some(initial_data))
+                    .connect_with_config(server_addr, Box::new(config), Some(initial_data))
                     .await
                     .unwrap();
 
@@ -267,7 +267,7 @@ async fn test_early_frame_timeout_cleanup() {
         // 尝试连接但故意让它超时
         let connect_result = tokio::time::timeout(
             Duration::from_millis(500), // 增加超时时间
-            zombie_client.connect_with_config(zombie_server_addr, config, Some(initial_data))
+            zombie_client.connect_with_config(zombie_server_addr, Box::new(config), Some(initial_data))
         ).await;
         
         match connect_result {
@@ -308,7 +308,7 @@ async fn test_early_frame_timeout_cleanup() {
         let initial_data = InitialData::new(b"Normal data", &config).unwrap();
         
         let stream = normal_client
-            .connect_with_config(normal_server_addr, config, Some(initial_data))
+            .connect_with_config(normal_server_addr, Box::new(config), Some(initial_data))
             .await
             .unwrap();
 
@@ -406,7 +406,7 @@ async fn test_high_frequency_packet_reordering() {
             let initial_data = InitialData::new(&test_data, &config).unwrap();
             
             let stream = client
-                .connect_with_config(server_addr, config, Some(initial_data))
+                .connect_with_config(server_addr, Box::new(config), Some(initial_data))
                 .await
                 .unwrap();
 
@@ -505,7 +505,7 @@ async fn test_early_frame_memory_management() {
                 let initial_data = InitialData::new(data.as_bytes(), &config).unwrap();
                 
                 let stream = client
-                    .connect_with_config(server_addr, config, Some(initial_data))
+                    .connect_with_config(server_addr, Box::new(config), Some(initial_data))
                     .await
                     .unwrap();
 
@@ -598,7 +598,7 @@ async fn test_extreme_reordering_data_integrity() {
     let config = Config::default();
     let initial_data = InitialData::new(&complex_data, &config).unwrap();
     let stream = client
-        .connect_with_config(server_addr, config, Some(initial_data))
+        .connect_with_config(server_addr, Box::new(config), Some(initial_data))
         .await
         .unwrap();
 

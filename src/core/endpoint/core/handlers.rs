@@ -385,15 +385,12 @@ impl<T: Transport> Endpoint<T> {
         self.transport.set_peer_recv_window(header.recv_window_size as u32);
         let sack_ranges = decode_sack_ranges(payload);
         let now = Instant::now();
+        let context = self.create_retransmission_context();
         let frames_to_retx = self.transport.reliability_mut().handle_ack(
             header.recv_next_sequence,
             sack_ranges,
             now,
-            self.timing.start_time(),
-            self.identity.peer_cid(),
-            self.config.protocol_version,
-            self.identity.local_cid(),
-            header.recv_window_size,
+            &context,
         );
         if !frames_to_retx.is_empty() {
             self.send_frames(frames_to_retx).await?;

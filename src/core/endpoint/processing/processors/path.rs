@@ -104,9 +104,11 @@ impl PathProcessor {
                     now,
                 );
                 Err(crate::error::Error::FrameTypeMismatch {
-                    expected: "path validation frame (PathChallenge or PathResponse)".to_string(),
-                    actual: format!("{:?}", std::mem::discriminant(&frame)),
-                    context: error_context,
+                    err: crate::error::FrameTypeMismatchError::new(
+                        "path validation frame (PathChallenge or PathResponse)".to_string(),
+                        format!("{:?}", std::mem::discriminant(&frame)),
+                        error_context,
+                    ).into(),
                 })
             }
         }
@@ -168,7 +170,7 @@ impl PathProcessor {
                     cid = context.local_cid,
                     "Ignoring PathChallenge in Closed state"
                 );
-                return Ok(());
+                Ok(())
             }
             _ => {
                 // 在所有其他状态下处理路径质询

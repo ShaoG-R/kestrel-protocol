@@ -14,7 +14,7 @@
 //! - SACK编解码协调
 //! - 基于SACK的重传逻辑
 
-use crate::packet::{frame::Frame, sack::SackRange};
+use crate::packet::{frame::{Frame, FrameType, RetransmissionContext}, sack::SackRange};
 use bytes::Bytes;
 use std::collections::BTreeMap;
 use tokio::time::{Duration, Instant};
@@ -49,111 +49,88 @@ pub struct RetransmissionFrameInfo {
     pub additional_data: Option<u64>,
 }
 
-/// Frame type enum for retransmission reconstruction
-/// 用于重传重构的帧类型枚举
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FrameType {
-    Push,
-    Syn,
-    SynAck,
-    Fin,
-    PathChallenge,
-    PathResponse,
-}
+
 
 impl RetransmissionFrameInfo {
     /// Creates retransmission info from a frame, extracting only essential information
     /// 从帧创建重传信息，只提取必要信息
-    pub fn from_frame(frame: &Frame) -> Self {
-        let (frame_type, payload, additional_data, sequence_number) = match frame {
+    pub fn from_frame(frame: &Frame) -> Option<Self> {
+        let frame_type = frame.frame_type()?; // Return None if frame type is not retransmittable
+        let (payload, additional_data, sequence_number) = match frame {
             Frame::Push { header, payload } => (
-                FrameType::Push,
                 payload.clone(),
                 None,
                 header.sequence_number,
             ),
             Frame::Syn { .. } => (
-                FrameType::Syn,
                 Bytes::new(),
                 None,
                 0, // SYN frames don't have sequence numbers in our design
             ),
             Frame::SynAck { .. } => (
-                FrameType::SynAck,
                 Bytes::new(),
                 None,
                 0, // SYN-ACK frames don't have sequence numbers in our design
             ),
             Frame::Fin { header } => (
-                FrameType::Fin,
                 Bytes::new(),
                 None,
                 header.sequence_number,
             ),
             Frame::PathChallenge { header, challenge_data } => (
-                FrameType::PathChallenge,
                 Bytes::new(),
                 Some(*challenge_data),
                 header.sequence_number,
             ),
             Frame::PathResponse { header, challenge_data } => (
-                FrameType::PathResponse,
                 Bytes::new(),
                 Some(*challenge_data),
                 header.sequence_number,
             ),
             // ACK and PING frames should not be stored for retransmission
-            _ => panic!("Unsupported frame type for retransmission storage"),
+            _ => return None,
         };
-
-        Self {
+        Some(Self {
             frame_type,
             sequence_number,
             payload,
             additional_data,
-        }
+        })
     }
 
     /// Reconstructs a complete frame with fresh header information
     /// 使用新鲜的header信息重构完整帧
-    pub fn reconstruct_frame(
-        &self,
-        current_peer_cid: u32,
-        protocol_version: u8,
-        local_cid: u32,
-        recv_next_sequence: u32,
-        recv_window_size: u16,
-        current_timestamp: u32,
-    ) -> Frame {
+    pub fn reconstruct_frame(&self, context: &RetransmissionContext, now: Instant) -> Frame {
+        let current_timestamp = context.current_timestamp(now);
         match self.frame_type {
             FrameType::Push => {
                 Frame::new_push(
-                    current_peer_cid,
+                    context.current_peer_cid,
                     self.sequence_number,
-                    recv_next_sequence,
-                    recv_window_size,
+                    context.recv_next_sequence,
+                    context.recv_window_size,
                     current_timestamp,
                     self.payload.clone(),
                 )
             }
             FrameType::Syn => {
-                Frame::new_syn(protocol_version, local_cid, current_peer_cid)
+                Frame::new_syn(context.protocol_version, context.local_cid, context.current_peer_cid)
             }
             FrameType::SynAck => {
-                Frame::new_syn_ack(protocol_version, local_cid, current_peer_cid)
+                Frame::new_syn_ack(context.protocol_version, context.local_cid, context.current_peer_cid)
             }
             FrameType::Fin => {
                 Frame::new_fin(
-                    current_peer_cid,
+                    context.current_peer_cid,
                     self.sequence_number,
                     current_timestamp,
-                    recv_next_sequence,
-                    recv_window_size,
+                    context.recv_next_sequence,
+                    context.recv_window_size,
                 )
             }
             FrameType::PathChallenge => {
                 Frame::new_path_challenge(
-                    current_peer_cid,
+                    context.current_peer_cid,
                     self.sequence_number,
                     current_timestamp,
                     self.additional_data.unwrap_or(0),
@@ -161,7 +138,7 @@ impl RetransmissionFrameInfo {
             }
             FrameType::PathResponse => {
                 Frame::new_path_response(
-                    current_peer_cid,
+                    context.current_peer_cid,
                     self.sequence_number,
                     current_timestamp,
                     self.additional_data.unwrap_or(0),
@@ -206,12 +183,15 @@ impl SackManager {
     /// Adds a packet to the in-flight tracking
     pub fn add_in_flight_packet(&mut self, frame: Frame, now: Instant) {
         if let Some(seq) = frame.sequence_number() {
-            let packet = SackInFlightPacket {
-                last_sent_at: now,
-                frame_info: RetransmissionFrameInfo::from_frame(&frame),
-                fast_retx_count: 0,
-            };
-            self.in_flight_packets.insert(seq, packet);
+            // Only add frames that support retransmission
+            if let Some(frame_info) = RetransmissionFrameInfo::from_frame(&frame) {
+                let packet = SackInFlightPacket {
+                    last_sent_at: now,
+                    frame_info,
+                    fast_retx_count: 0,
+                };
+                self.in_flight_packets.insert(seq, packet);
+            }
         }
     }
 
@@ -248,35 +228,22 @@ impl SackManager {
         &mut self, 
         rto: Duration, 
         now: Instant, 
-        start_time: Instant,
-        current_peer_cid: u32,
-        protocol_version: u8,
-        local_cid: u32,
-        recv_next_sequence: u32,
-        recv_window_size: u16
+        context: &RetransmissionContext,
     ) -> Vec<Frame> {
         let mut frames_to_resend = Vec::new();
-        let current_timestamp = now.duration_since(start_time).as_millis() as u32;
         
         for packet in self.in_flight_packets.values_mut() {
             if now.duration_since(packet.last_sent_at) > rto {
                 debug!(
                     seq = packet.frame_info.sequence_number,
                     frame_type = ?packet.frame_info.frame_type,
-                    updated_cid = current_peer_cid,
+                    updated_cid = context.current_peer_cid,
                     "RTO retransmission triggered - reconstructing frame with fresh header"
                 );
                 
                 // Reconstruct frame with fresh header information
                 // 使用新鲜的header信息重构帧
-                let reconstructed_frame = packet.frame_info.reconstruct_frame(
-                    current_peer_cid,
-                    protocol_version,
-                    local_cid,
-                    recv_next_sequence,
-                    recv_window_size,
-                    current_timestamp,
-                );
+                let reconstructed_frame = packet.frame_info.reconstruct_frame(context, now);
                 
                 frames_to_resend.push(reconstructed_frame);
                 packet.last_sent_at = now;
@@ -305,11 +272,7 @@ impl SackManager {
         recv_next_seq: u32,
         sack_ranges: &[SackRange],
         now: Instant,
-        start_time: Instant,
-        current_peer_cid: u32,
-        protocol_version: u8,
-        local_cid: u32,
-        recv_window_size: u16,
+        context: &RetransmissionContext,
     ) -> SackProcessResult {
         let mut rtt_samples = Vec::new();
         let mut newly_acked_sequences = Vec::new();
@@ -345,16 +308,7 @@ impl SackManager {
         // Step 3: Check for fast retransmission with frame reconstruction
         // 检查快速重传并使用帧重构
         let frames_to_retransmit = if !sack_acked_sequences.is_empty() {
-            self.check_fast_retransmission(
-                &sack_acked_sequences,
-                now,
-                start_time,
-                current_peer_cid,
-                protocol_version,
-                local_cid,
-                recv_next_seq,
-                recv_window_size,
-            )
+            self.check_fast_retransmission(&sack_acked_sequences, now, context)
         } else {
             Vec::new()
         };
@@ -372,15 +326,9 @@ impl SackManager {
         &mut self,
         sack_acked_sequences: &[u32],
         now: Instant,
-        start_time: Instant,
-        current_peer_cid: u32,
-        protocol_version: u8,
-        local_cid: u32,
-        recv_next_sequence: u32,
-        recv_window_size: u16,
+        context: &RetransmissionContext,
     ) -> Vec<Frame> {
         let mut frames_to_retransmit = Vec::new();
-        let current_timestamp = now.duration_since(start_time).as_millis() as u32;
 
         // Find the highest sequence number that was SACKed in this ACK
         let highest_sacked = sack_acked_sequences.iter().max().copied();
@@ -420,14 +368,7 @@ impl SackManager {
                         
                         // Reconstruct frame with fresh header information
                         // 使用新鲜的header信息重构帧
-                        let reconstructed_frame = packet.frame_info.reconstruct_frame(
-                            current_peer_cid,
-                            protocol_version,
-                            local_cid,
-                            recv_next_sequence,
-                            recv_window_size,
-                            current_timestamp,
-                        );
+                        let reconstructed_frame = packet.frame_info.reconstruct_frame(context, now);
                         frames_to_retransmit.push(reconstructed_frame);
                         
                         packet.last_sent_at = now;
@@ -483,7 +424,7 @@ mod tests {
     fn test_process_ack_cumulative_only() {
         let mut manager = SackManager::new(3, 5);
         let now = Instant::now();
-        let start_time = now;
+        let context = RetransmissionContext::new(now, 12345, 1, 1, 1024, 1024);
 
         // Add packets 0, 1, 2 to in-flight
         for i in 0..3 {
@@ -491,7 +432,7 @@ mod tests {
         }
 
         // ACK up to sequence 2 (cumulative ACK for 0, 1)
-        let result = manager.process_ack(2, &[], now, start_time, 12345, 1, 1, 1024);
+        let result = manager.process_ack(2, &[], now, &context);
 
         assert_eq!(result.newly_acked_sequences, vec![0, 1]);
         assert_eq!(result.rtt_samples.len(), 2);
@@ -503,7 +444,7 @@ mod tests {
     fn test_process_ack_with_sack() {
         let mut manager = SackManager::new(3, 5);
         let now = Instant::now();
-        let start_time = now;
+        let context = RetransmissionContext::new(now, 12345, 1, 1, 1024, 1024);
 
         // Add packets 0, 1, 2, 3 to in-flight
         for i in 0..4 {
@@ -514,7 +455,7 @@ mod tests {
         let sack_ranges = vec![
             SackRange { start: 2, end: 3 },
         ];
-        let result = manager.process_ack(1, &sack_ranges, now, start_time, 12345, 1, 1, 1024);
+        let result = manager.process_ack(1, &sack_ranges, now, &context);
 
         assert_eq!(result.newly_acked_sequences, vec![0, 2, 3]);
         assert_eq!(result.rtt_samples.len(), 3);
@@ -526,7 +467,7 @@ mod tests {
     fn test_fast_retransmission() {
         let mut manager = SackManager::new(2, 5); // Lower threshold for testing
         let now = Instant::now();
-        let start_time = now;
+        let context = RetransmissionContext::new(now, 12345, 1, 1, 1024, 1024);
 
         // Add packets 0, 1, 2, 3 to in-flight
         for i in 0..4 {
@@ -534,12 +475,12 @@ mod tests {
         }
 
         // First SACK: ACK 0, SACK 2 (packet 1 missing)
-        let result1 = manager.process_ack(1, &[SackRange { start: 2, end: 2 }], now, start_time, 12345, 1, 1, 1024);
+        let result1 = manager.process_ack(1, &[SackRange { start: 2, end: 2 }], now, &context);
         assert!(result1.frames_to_retransmit.is_empty()); // fast_retx_count = 1, below threshold
         assert_eq!(manager.in_flight_packets.get(&1).unwrap().fast_retx_count, 1);
 
         // Second SACK: SACK 3 (packet 1 still missing)
-        let result2 = manager.process_ack(1, &[SackRange { start: 3, end: 3 }], now, start_time, 12345, 1, 1, 1024);
+        let result2 = manager.process_ack(1, &[SackRange { start: 3, end: 3 }], now, &context);
         assert_eq!(result2.frames_to_retransmit.len(), 1); // fast_retx_count = 2, meets threshold
         assert_eq!(result2.frames_to_retransmit[0].sequence_number().unwrap(), 1);
         assert_eq!(manager.in_flight_packets.get(&1).unwrap().fast_retx_count, 0); // Reset after retransmission
@@ -593,7 +534,7 @@ mod tests {
     fn test_fast_retransmission_frame_reconstruction() {
         let mut manager = SackManager::new(2, 5); // Lower threshold for testing
         let now = Instant::now();
-        let start_time = now;
+        let context = RetransmissionContext::new(now, 12345, 1, 1, 1024, 1024);
 
         // Add a PUSH packet to in-flight
         let original_frame = create_test_push_frame(1);
@@ -604,12 +545,12 @@ mod tests {
         manager.add_in_flight_packet(create_test_push_frame(2), now);
 
         // First SACK: ACK 1, SACK 2 (indicates packet 1 might be lost)
-        let result1 = manager.process_ack(1, &[SackRange { start: 2, end: 2 }], now, start_time, 12345, 1, 1, 1024);
+        let result1 = manager.process_ack(1, &[SackRange { start: 2, end: 2 }], now, &context);
         assert!(result1.frames_to_retransmit.is_empty()); // Below threshold
 
         // Second SACK: SACK another higher sequence to trigger fast retransmission
         manager.add_in_flight_packet(create_test_push_frame(3), now);
-        let result2 = manager.process_ack(1, &[SackRange { start: 3, end: 3 }], now, start_time, 12345, 1, 1, 1024);
+        let result2 = manager.process_ack(1, &[SackRange { start: 3, end: 3 }], now, &context);
         
         // Should trigger fast retransmission for packet 1
         assert_eq!(result2.frames_to_retransmit.len(), 1);
@@ -622,7 +563,7 @@ mod tests {
         match retx_frame {
             Frame::Push { header, payload } => {
                 assert_eq!(header.sequence_number, 1);
-                assert_eq!(header.recv_next_sequence, 1); // Should use the ACK info from process_ack
+                assert_eq!(header.recv_next_sequence, 1024); // Should use the ACK info from context
                 // The connection ID should be updated with the real peer CID
                 assert_eq!(header.connection_id, 12345); // Real peer CID from test parameters
                 // Verify payload is preserved

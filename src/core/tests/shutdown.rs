@@ -74,7 +74,7 @@ async fn test_shutdown_when_connecting() {
             sender_task_tx,                   // real tx
             tokio::sync::mpsc::channel(32).0, // dummy tx
             None,
-        );
+        ).unwrap();
 
     // Send a close command to the connecting client.
     tx_to_stream.send(StreamCommand::Close).await.unwrap();

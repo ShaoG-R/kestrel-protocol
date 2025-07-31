@@ -115,7 +115,7 @@ impl<T: Transport> Endpoint<T> {
             let fin_frame = create_fin_frame(
                 self.identity.peer_cid(),
                 self.transport.reliability_mut().next_sequence_number(),
-                &self.transport.reliability(),
+                self.transport.reliability(),
                 self.timing.start_time(),
             );
             self.transport.reliability_mut()

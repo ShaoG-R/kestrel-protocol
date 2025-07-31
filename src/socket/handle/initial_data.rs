@@ -50,7 +50,7 @@ impl InitialData {
         // Calculate the number of PUSH frames and their total header overhead.
         // 计算PUSH帧的数量及其总头部开销。
         let max_payload_per_push = config.connection.max_payload_size;
-        let num_push_frames = (data.len() + max_payload_per_push - 1) / max_payload_per_push;
+        let num_push_frames = data.len().div_ceil(max_payload_per_push);
         // Each PUSH frame has Command (1) + ShortHeader
         // 每个PUSH帧都有 命令 (1) + 短头
         let push_header_overhead = num_push_frames * (1 + ShortHeader::ENCODED_SIZE);

@@ -44,7 +44,7 @@ async fn test_basic_syn_ack_push_coalescing() {
     let config = Config::default();
     let initial_data = InitialData::new(b"Coalescing test data", &config).unwrap();
     let client_stream = client
-        .connect_with_config(server_addr, config, Some(initial_data))
+        .connect_with_config(server_addr, Box::new(config), Some(initial_data))
         .await
         .unwrap();
 
@@ -109,7 +109,7 @@ async fn test_large_packet_fragmentation() {
     
     info!("[Client] 发送大数据包 ({} bytes)", large_data.len());
     let client_stream = client
-        .connect_with_config(server_addr, config, Some(initial_data))
+        .connect_with_config(server_addr, Box::new(config), Some(initial_data))
         .await
         .unwrap();
 
@@ -174,7 +174,7 @@ async fn test_multiple_small_packet_coalescing() {
     info!("[Client] 发送多个小包粘连数据 ({} bytes)", combined_data.len());
     
     let client_stream = client
-        .connect_with_config(server_addr, config, Some(initial_data))
+        .connect_with_config(server_addr, Box::new(config), Some(initial_data))
         .await
         .unwrap();
 
@@ -253,7 +253,7 @@ async fn test_coalescing_boundary_conditions() {
     info!("[Client] 发送边界大小数据 ({} bytes)", boundary_data.len());
     
     let client_stream = client
-        .connect_with_config(server_addr, config, Some(initial_data))
+        .connect_with_config(server_addr, Box::new(config), Some(initial_data))
         .await
         .unwrap();
 
@@ -347,7 +347,7 @@ async fn test_concurrent_coalescing_performance() {
             let initial_data = InitialData::new(&test_data, &config).unwrap();
             
             let stream = client
-                .connect_with_config(server_addr, config, Some(initial_data))
+                .connect_with_config(server_addr, Box::new(config), Some(initial_data))
                 .await
                 .unwrap();
 
@@ -419,7 +419,7 @@ async fn test_variable_size_coalescing_strategy() {
         let config = Config::default();
         let initial_data = InitialData::new(&test_data, &config).unwrap();
         let client_stream = client
-            .connect_with_config(server_addr, config, Some(initial_data))
+            .connect_with_config(server_addr, Box::new(config), Some(initial_data))
             .await
             .unwrap();
 
@@ -520,7 +520,7 @@ async fn test_coalescing_error_recovery() {
         let config = Config::default();
         let initial_data = InitialData::new(data, &config).unwrap();
         
-        match client1.connect_with_config(server_addr, config, Some(initial_data)).await {
+        match client1.connect_with_config(server_addr, Box::new(config), Some(initial_data)).await {
             Ok(stream) => {
                 let (mut reader, mut writer) = tokio::io::split(stream);
                 
@@ -542,7 +542,7 @@ async fn test_coalescing_error_recovery() {
         let config = Config::default();
         let initial_data = InitialData::new(data, &config).unwrap();
         
-        match client2.connect_with_config(server_addr, config, Some(initial_data)).await {
+        match client2.connect_with_config(server_addr, Box::new(config), Some(initial_data)).await {
             Ok(stream) => {
                 let (reader, mut writer) = tokio::io::split(stream);
                 
@@ -565,7 +565,7 @@ async fn test_coalescing_error_recovery() {
         let config = Config::default();
         let initial_data = InitialData::new(data, &config).unwrap();
         
-        match client3.connect_with_config(server_addr, config, Some(initial_data)).await {
+        match client3.connect_with_config(server_addr, Box::new(config), Some(initial_data)).await {
             Ok(stream) => {
                 let (mut reader, mut writer) = tokio::io::split(stream);
                 

@@ -81,9 +81,11 @@ impl AckProcessor {
         let Frame::Ack { header, payload } = frame else {
             let error_context = Self::create_error_context(endpoint, src_addr, now);
             return Err(crate::error::Error::FrameTypeMismatch {
-                expected: "ACK frame".to_string(),
-                actual: format!("{:?}", std::mem::discriminant(&frame)),
-                context: error_context,
+                err: crate::error::FrameTypeMismatchError::new(
+                    "ACK frame".to_string(),
+                    format!("{:?}", std::mem::discriminant(&frame)),
+                    error_context,
+                ).into(),
             });
         };
 

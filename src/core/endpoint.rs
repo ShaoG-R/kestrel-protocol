@@ -98,6 +98,24 @@ impl<T: Transport> Endpoint<T> {
         &mut self.lifecycle_manager
     }
 
+    /// Creates a retransmission context with current endpoint state
+    /// 使用当前端点状态创建重传上下文
+    pub fn create_retransmission_context(&self) -> crate::packet::frame::RetransmissionContext {
+        let (recv_next_sequence, recv_window_size) = {
+            let info = self.transport.reliability().get_ack_info();
+            (info.1, info.2)
+        };
+
+        crate::packet::frame::RetransmissionContext::new(
+            self.timing.start_time(),
+            self.identity.peer_cid(),
+            self.config.protocol_version,
+            self.identity.local_cid(),
+            recv_next_sequence,
+            recv_window_size,
+        )
+    }
+
     /// 通过生命周期管理器进行状态转换（新方法）
     /// Perform state transition through lifecycle manager (new method)
     pub fn transition_state(&mut self, new_state: ConnectionState) -> crate::error::Result<()> {
@@ -195,7 +213,7 @@ impl<T: Transport> Endpoint<T> {
     /// 获取命令发送器
     /// Gets the command sender
     pub fn command_tx(&self) -> &mpsc::Sender<SocketActorCommand> {
-        &self.channels.command_tx()
+        self.channels.command_tx()
     }
 
     /// 获取可靠性层的可变引用
@@ -229,13 +247,8 @@ impl<T: Transport> Endpoint<T> {
         
         // 2. 检查可靠性超时，使用帧重构
         // Check reliability timeouts with frame reconstruction
-        let reliability_timeout_result = self.transport.reliability_mut().check_reliability_timeouts(
-            now,
-            self.timing.start_time(),
-            self.identity.peer_cid(),
-            self.config.protocol_version,
-            self.identity.local_cid(),
-        );
+        let context = self.create_retransmission_context();
+        let reliability_timeout_result = self.transport.reliability_mut().check_reliability_timeouts(now, &context);
         
         // 3. 处理超时事件
         // Handle timeout events

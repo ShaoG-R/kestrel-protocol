@@ -28,7 +28,7 @@ mod tests {
             sender_tx,
             command_tx,
             None,
-        );
+        ).unwrap();
 
         // 验证初始状态
         assert_eq!(endpoint.local_cid(), local_cid);
