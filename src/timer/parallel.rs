@@ -18,7 +18,7 @@
 use crate::timer::event::{TimerEventData, ConnectionId, zero_copy::{ZeroCopyEventDelivery}};
 use crate::timer::wheel::{TimerEntry, TimerEntryId};
 use rayon::prelude::*;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -414,8 +414,9 @@ pub struct RayonBatchExecutor {
 pub struct AsyncEventDispatcher {
     /// 事件发送通道池
     event_channels: Vec<mpsc::Sender<TimerEventData>>,
-    /// 负载均衡索引
-    round_robin_index: Mutex<usize>,
+    /// 负载均衡索引 (使用原子类型)
+    /// Load balancing index (using an atomic type)
+    round_robin_index: AtomicUsize,
 }
 
 /// 处理后的定时器数据
@@ -999,7 +1000,7 @@ impl AsyncEventDispatcher {
 
         Self {
             event_channels,
-            round_robin_index: Mutex::new(0),
+            round_robin_index: AtomicUsize::new(0),
         }
     }
 
@@ -1015,12 +1016,9 @@ impl AsyncEventDispatcher {
         let dispatch_futures: Vec<_> = processed_data
             .into_iter()
             .map(|data| {
-                let channel_index = {
-                    let mut index = self.round_robin_index.lock().unwrap();
-                    let current = *index;
-                    *index = (*index + 1) % self.event_channels.len();
-                    current
-                };
+                // 原子地增加索引并返回增加前的值，然后取模
+                let index = self.round_robin_index.fetch_add(1, Ordering::Relaxed);
+                let channel_index = index % self.event_channels.len();
 
                 let tx = self.event_channels[channel_index].clone();
                 
