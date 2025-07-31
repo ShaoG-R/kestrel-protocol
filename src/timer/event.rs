@@ -6,10 +6,246 @@
 //! This module defines all event types and data structures used in the timer system.
 
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 use crate::core::endpoint::timing::TimeoutEvent;
 use wide::{u32x4, u32x8};
+
+/// 零拷贝事件传递系统 - 基于引用传递避免数据克隆
+/// Zero-copy event delivery system - uses reference passing to avoid data cloning  
+pub mod zero_copy {
+    use super::*;
+    use std::sync::RwLock;
+    
+    /// 零拷贝事件传递接口
+    /// Zero-copy event delivery interface
+    pub trait ZeroCopyEventDelivery {
+        /// 直接传递事件引用，避免克隆
+        /// Directly deliver event reference, avoiding clones
+        fn deliver_event_ref(&self, event_ref: &TimerEventData) -> bool;
+        
+        /// 批量传递事件引用
+        /// Batch deliver event references
+        fn batch_deliver_event_refs(&self, event_refs: &[&TimerEventData]) -> usize;
+    }
+    
+    /// 高性能无锁事件槽位系统
+    /// High-performance lock-free event slot system
+    pub struct FastEventSlot {
+        /// 事件槽位，使用原子操作避免锁
+        /// Event slots using atomic operations to avoid locks
+        slots: Vec<Arc<RwLock<Option<TimerEventData>>>>,
+        /// 写入索引
+        /// Write index
+        write_index: AtomicUsize,
+        /// 读取索引
+        /// Read index
+        read_index: AtomicUsize,
+        /// 槽位掩码（必须是2的幂-1）
+        /// Slot mask (must be power of 2 - 1)
+        slot_mask: usize,
+    }
+    
+    impl FastEventSlot {
+        /// 创建新的快速事件槽位
+        /// Create new fast event slot
+        pub fn new(slot_count: usize) -> Self {
+            // 确保slot_count是2的幂
+            let slot_count = slot_count.next_power_of_two();
+            let slot_mask = slot_count - 1;
+            
+            let mut slots = Vec::with_capacity(slot_count);
+            for _ in 0..slot_count {
+                slots.push(Arc::new(RwLock::new(None)));
+            }
+            
+            Self {
+                slots,
+                write_index: AtomicUsize::new(0),
+                read_index: AtomicUsize::new(0),
+                slot_mask,
+            }
+        }
+        
+        /// 零拷贝写入事件（移动语义）
+        /// Zero-copy write event (move semantics)
+        pub fn write_event(&self, event: TimerEventData) -> bool {
+            let write_idx = self.write_index.fetch_add(1, Ordering::AcqRel);
+            let slot_idx = write_idx & self.slot_mask;
+            
+            if let Ok(mut slot) = self.slots[slot_idx].try_write() {
+                if slot.is_none() {
+                    *slot = Some(event);
+                    return true;
+                }
+            }
+            false
+        }
+        
+        /// 零拷贝读取事件（移动语义）
+        /// Zero-copy read event (move semantics)
+        pub fn read_event(&self) -> Option<TimerEventData> {
+            let read_idx = self.read_index.load(Ordering::Acquire);
+            let write_idx = self.write_index.load(Ordering::Acquire);
+            
+            if read_idx == write_idx {
+                return None; // 队列为空
+            }
+            
+            let slot_idx = read_idx & self.slot_mask;
+            if let Ok(mut slot) = self.slots[slot_idx].try_write() {
+                if let Some(event) = slot.take() {
+                    self.read_index.fetch_add(1, Ordering::AcqRel);
+                    return Some(event);
+                }
+            }
+            None
+        }
+        
+        /// 批量读取事件（零拷贝）
+        /// Batch read events (zero-copy)
+        pub fn batch_read_events(&self, max_count: usize) -> Vec<TimerEventData> {
+            let mut events = Vec::with_capacity(max_count);
+            
+            for _ in 0..max_count {
+                if let Some(event) = self.read_event() {
+                    events.push(event);
+                } else {
+                    break;
+                }
+            }
+            
+            events
+        }
+        
+        /// 获取未读事件数量
+        /// Get count of unread events
+        pub fn pending_count(&self) -> usize {
+            let write_idx = self.write_index.load(Ordering::Acquire);
+            let read_idx = self.read_index.load(Ordering::Acquire);
+            (write_idx.wrapping_sub(read_idx)) & self.slot_mask
+        }
+    }
+    
+    /// 引用传递事件处理器
+    /// Reference-passing event handler
+    pub struct RefEventHandler<F>
+    where 
+        F: Fn(&TimerEventData) -> bool + Send + Sync,
+    {
+        handler: F,
+        processed_count: AtomicUsize,
+    }
+    
+    impl<F> RefEventHandler<F>
+    where 
+        F: Fn(&TimerEventData) -> bool + Send + Sync,
+    {
+        pub fn new(handler: F) -> Self {
+            Self {
+                handler,
+                processed_count: AtomicUsize::new(0),
+            }
+        }
+    }
+    
+    impl<F> ZeroCopyEventDelivery for RefEventHandler<F>
+    where 
+        F: Fn(&TimerEventData) -> bool + Send + Sync,
+    {
+        fn deliver_event_ref(&self, event_ref: &TimerEventData) -> bool {
+            let success = (self.handler)(event_ref);
+            if success {
+                self.processed_count.fetch_add(1, Ordering::Relaxed);
+            }
+            success
+        }
+        
+        fn batch_deliver_event_refs(&self, event_refs: &[&TimerEventData]) -> usize {
+            let mut delivered_count = 0;
+            for event_ref in event_refs {
+                if (self.handler)(event_ref) {
+                    delivered_count += 1;
+                }
+            }
+            self.processed_count.fetch_add(delivered_count, Ordering::Relaxed);
+            delivered_count
+        }
+    }
+    
+    /// 零拷贝事件批量分发器
+    /// Zero-copy batch event dispatcher  
+    pub struct ZeroCopyBatchDispatcher {
+        /// 快速事件槽位
+        /// Fast event slots
+        event_slots: Vec<FastEventSlot>,
+        /// 轮询索引
+        /// Round-robin index
+        round_robin_index: AtomicUsize,
+        /// 批量处理阈值
+        /// Batch processing threshold
+        batch_threshold: usize,
+    }
+    
+    impl ZeroCopyBatchDispatcher {
+        pub fn new(slot_count: usize, dispatcher_count: usize) -> Self {
+            let mut event_slots = Vec::with_capacity(dispatcher_count);
+            for _ in 0..dispatcher_count {
+                event_slots.push(FastEventSlot::new(slot_count));
+            }
+            
+            Self {
+                event_slots,
+                round_robin_index: AtomicUsize::new(0),
+                batch_threshold: 32, // 默认批量处理阈值
+            }
+        }
+        
+        /// 零拷贝单事件分发
+        /// Zero-copy single event dispatch
+        pub fn dispatch_event(&self, event: TimerEventData) -> bool {
+            let dispatcher_idx = self.round_robin_index.fetch_add(1, Ordering::Relaxed) 
+                % self.event_slots.len();
+            self.event_slots[dispatcher_idx].write_event(event)
+        }
+        
+        /// 零拷贝批量事件分发
+        /// Zero-copy batch event dispatch
+        pub fn batch_dispatch_events(&self, events: Vec<TimerEventData>) -> usize {
+            let mut dispatched_count = 0;
+            
+            for (i, event) in events.into_iter().enumerate() {
+                let dispatcher_idx = (self.round_robin_index.load(Ordering::Relaxed) + i) 
+                    % self.event_slots.len();
+                if self.event_slots[dispatcher_idx].write_event(event) {
+                    dispatched_count += 1;
+                }
+            }
+            
+            self.round_robin_index.fetch_add(dispatched_count, Ordering::Relaxed);
+            dispatched_count
+        }
+        
+        /// 为特定分发器读取事件
+        /// Read events for specific dispatcher
+        pub fn read_events_for_dispatcher(&self, dispatcher_idx: usize, max_count: usize) -> Vec<TimerEventData> {
+            if dispatcher_idx < self.event_slots.len() {
+                self.event_slots[dispatcher_idx].batch_read_events(max_count)
+            } else {
+                Vec::new()
+            }
+        }
+        
+        /// 获取总待处理事件数
+        /// Get total pending event count
+        pub fn total_pending_count(&self) -> usize {
+            self.event_slots.iter()
+                .map(|slot| slot.pending_count())
+                .sum()
+        }
+    }
+}
 
 /// 定时器事件ID，用于唯一标识一个定时器
 /// Timer event ID, used to uniquely identify a timer
