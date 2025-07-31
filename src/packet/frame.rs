@@ -443,6 +443,42 @@ impl Frame {
         }
     }
 
+    /// Updates the connection ID in frames that use ShortHeader.
+    /// This is used for retransmission when the peer CID changes after handshake.
+    /// 
+    /// 更新使用ShortHeader的帧中的连接ID。
+    /// 这用于握手后对端CID更改时的重传。
+    pub fn update_connection_id(&mut self, new_connection_id: u32) {
+        match self {
+            // Long header frames (SYN, SYN-ACK) don't update connection_id
+            // 长头部帧（SYN、SYN-ACK）不更新connection_id
+            Frame::Syn { .. } | Frame::SynAck { .. } => {
+                // Do nothing - long header frames use destination_cid which is different
+                // 不做任何事 - 长头部帧使用destination_cid，这是不同的
+            }
+            // Short header frames update their connection_id
+            // 短头部帧更新它们的connection_id
+            Frame::Push { header, .. } => {
+                header.connection_id = new_connection_id;
+            }
+            Frame::Ack { header, .. } => {
+                header.connection_id = new_connection_id;
+            }
+            Frame::Fin { header, .. } => {
+                header.connection_id = new_connection_id;
+            }
+            Frame::Ping { header, .. } => {
+                header.connection_id = new_connection_id;
+            }
+            Frame::PathChallenge { header, .. } => {
+                header.connection_id = new_connection_id;
+            }
+            Frame::PathResponse { header, .. } => {
+                header.connection_id = new_connection_id;
+            }
+        }
+    }
+
     /// Returns the reliability mode for this frame type with custom configuration.
     /// 使用自定义配置返回此帧类型的可靠性模式。
     pub fn reliability_mode_with_config(&self, config: &crate::config::Config) -> ReliabilityMode {

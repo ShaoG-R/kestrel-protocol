@@ -127,18 +127,20 @@ impl SimpleRetransmissionManager {
         acked_sequences
     }
 
-    /// Checks for packets that need retransmission and returns them.
-    /// 检查需要重传的数据包并返回它们。
-    pub fn check_for_retransmissions(&mut self, now: Instant) -> Vec<Frame> {
+    /// Checks for packets that need retransmission and returns them with updated connection ID.
+    /// 检查需要重传的数据包并返回它们，同时更新连接ID。
+    pub fn check_for_retransmissions(&mut self, now: Instant, current_peer_cid: u32) -> Vec<Frame> {
         let mut frames_to_retx = Vec::new();
         let mut expired_sequences = Vec::new();
 
         for (&seq, packet) in self.in_flight_simple.iter_mut() {
             if now.duration_since(packet.last_sent_at) >= packet.retry_interval {
                 if packet.retry_count < packet.max_retries {
-                    // Retransmit the packet
-                    // 重传数据包
-                    frames_to_retx.push(packet.frame.clone());
+                    // Retransmit the packet with updated connection ID
+                    // 重传数据包，同时更新连接ID
+                    let mut frame_to_retx = packet.frame.clone();
+                    frame_to_retx.update_connection_id(current_peer_cid);
+                    frames_to_retx.push(frame_to_retx);
                     packet.last_sent_at = now;
                     packet.retry_count += 1;
 
@@ -146,7 +148,9 @@ impl SimpleRetransmissionManager {
                         seq,
                         retry_count = packet.retry_count,
                         max_retries = packet.max_retries,
-                        "Simple retransmission triggered"
+                        original_cid = packet.frame.destination_cid(),
+                        updated_cid = current_peer_cid,
+                        "Simple retransmission triggered with updated connection ID"
                     );
                 } else {
                     // Max retries reached, give up
@@ -247,12 +251,12 @@ mod tests {
         assert_eq!(manager.in_flight_count(), 1);
 
         // No retransmission needed immediately
-        let frames = manager.check_for_retransmissions(now);
+        let frames = manager.check_for_retransmissions(now, 12345);
         assert!(frames.is_empty());
 
         // After retry interval, should trigger retransmission
         let later = now + Duration::from_millis(600); // > 500ms retry interval
-        let frames = manager.check_for_retransmissions(later);
+        let frames = manager.check_for_retransmissions(later, 12345);
         assert_eq!(frames.len(), 1);
 
         // Check that retry count was incremented
@@ -277,13 +281,13 @@ mod tests {
         let mut current_time = now;
         for i in 1..=5 {
             current_time = current_time + Duration::from_millis(600);
-            let frames = manager.check_for_retransmissions(current_time);
+            let frames = manager.check_for_retransmissions(current_time, 12345);
             assert_eq!(frames.len(), 1, "Retry {}", i);
         }
 
         // After max retries, should give up
         current_time = current_time + Duration::from_millis(600);
-        let frames = manager.check_for_retransmissions(current_time);
+        let frames = manager.check_for_retransmissions(current_time, 12345);
         assert!(frames.is_empty());
         assert_eq!(manager.in_flight_count(), 0);
     }

@@ -102,16 +102,20 @@ impl SackManager {
         self.ack_eliciting_packets_count = 0;
     }
 
-    /// Checks for RTO retransmissions
-    pub fn check_for_rto(&mut self, rto: Duration, now: Instant) -> Vec<Frame> {
+    /// Checks for RTO retransmissions with updated connection ID
+    pub fn check_for_rto(&mut self, rto: Duration, now: Instant, current_peer_cid: u32) -> Vec<Frame> {
         let mut frames_to_resend = Vec::new();
         for packet in self.in_flight_packets.values_mut() {
             if now.duration_since(packet.last_sent_at) > rto {
                 debug!(
                     seq = packet.frame.sequence_number().unwrap_or(u32::MAX),
+                    original_cid = packet.frame.destination_cid(),
+                    updated_cid = current_peer_cid,
                     "RTO retransmission triggered"
                 );
-                frames_to_resend.push(packet.frame.clone());
+                let mut frame_to_retx = packet.frame.clone();
+                frame_to_retx.update_connection_id(current_peer_cid);
+                frames_to_resend.push(frame_to_retx);
                 packet.last_sent_at = now;
             }
         }

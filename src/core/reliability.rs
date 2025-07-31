@@ -180,10 +180,10 @@ impl ReliabilityLayer {
     /// 根据当前RTO检查已超时的数据包。
     ///
     /// 如果检测到超时，它会通知拥塞控制器，退避RTO计时器，
-    /// 并返回需要重传的帧。
-    pub fn check_for_retransmissions(&mut self, now: Instant) -> Vec<Frame> {
+    /// 并返回需要重传的帧。重传的帧将使用当前的peer_cid更新connection_id。
+    pub fn check_for_retransmissions(&mut self, now: Instant, current_peer_cid: u32) -> Vec<Frame> {
         let rto = self.rto_estimator.rto();
-        let frames_to_resend = self.retransmission_manager.check_for_retransmissions(rto, now);
+        let frames_to_resend = self.retransmission_manager.check_for_retransmissions(rto, now, current_peer_cid);
 
         // If packets timed out, notify congestion control and back off the RTO timer.
         // 如果数据包超时，通知拥塞控制并退避RTO计时器。
@@ -528,14 +528,14 @@ impl ReliabilityLayer {
     /// This method checks all reliability-related timeout conditions and returns
     /// timeout check results. This is the unified entry point for the reliability
     /// layer in the layered timeout management architecture.
-    pub fn check_reliability_timeouts(&mut self, now: Instant) -> TimeoutCheckResult {
+    pub fn check_reliability_timeouts(&mut self, now: Instant, current_peer_cid: u32) -> TimeoutCheckResult {
         let mut all_events = Vec::new();
         let mut all_frames_to_retransmit = Vec::new();
 
         // 使用分层超时管理接口检查重传超时
         // Use layered timeout management interface to check retransmission timeout
         let rto = self.rto_estimator.rto();
-        let (retx_events, frames_to_resend) = self.retransmission_manager.check_retransmission_timeouts(rto, now);
+        let (retx_events, frames_to_resend) = self.retransmission_manager.check_retransmission_timeouts(rto, now, current_peer_cid);
         
         all_events.extend(retx_events);
         all_frames_to_retransmit.extend(frames_to_resend);

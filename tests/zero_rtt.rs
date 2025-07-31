@@ -568,7 +568,6 @@ async fn test_mixed_zero_rtt_and_regular_connections() {
 /// 压力测试：大量0-RTT连接下的性能
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 async fn test_zero_rtt_performance_stress() {
-    init_tracing();
     const NUM_CLIENTS: usize = 500;
     const DATA_SIZE: usize = 1024; // 1KB per client
     info!("--- 0-RTT性能压力测试 ({} 客户端, 每个 {}B) ---", NUM_CLIENTS, DATA_SIZE);
@@ -653,13 +652,13 @@ async fn test_zero_rtt_performance_stress() {
     let total_data = (completed as usize) * DATA_SIZE;
     let throughput = total_data as f64 / elapsed.as_secs_f64() / 1024.0 / 1024.0; // MB/s
 
-    info!("--- 0-RTT性能压力测试结果 ---");
-    info!("完成连接数: {}", completed);
-    info!("总耗时: {:?}", elapsed);
-    info!("总数据量: {:.2} MB", total_data as f64 / 1024.0 / 1024.0);
-    info!("吞吐量: {:.2} MB/s", throughput);
-    info!("平均连接时间: {:.2} ms", elapsed.as_millis() as f64 / NUM_CLIENTS as f64);
+    println!("--- 0-RTT性能压力测试结果 ---");
+    println!("完成连接数: {}", completed);
+    println!("总耗时: {:?}", elapsed);
+    println!("总数据量: {:.2} MB", total_data as f64 / 1024.0 / 1024.0);
+    println!("吞吐量: {:.2} MB/s", throughput);
+    println!("平均连接时间: {:.2} ms", elapsed.as_millis() as f64 / NUM_CLIENTS as f64);
 
     assert_eq!(completed as usize, NUM_CLIENTS);
-    info!("--- 0-RTT性能压力测试通过 ---");
+    println!("--- 0-RTT性能压力测试通过 ---");
 }

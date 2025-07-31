@@ -148,25 +148,26 @@ impl RetransmissionManager {
         }
     }
 
-    /// Checks for retransmissions in both SACK and simple managers.
-    /// 检查SACK和简单管理器中的重传。
-    pub fn check_for_retransmissions(&mut self, rto: Duration, now: Instant) -> Vec<Frame> {
+    /// Checks for retransmissions in both SACK and simple managers with updated connection ID.
+    /// 检查SACK和简单管理器中的重传，并更新连接ID。
+    pub fn check_for_retransmissions(&mut self, rto: Duration, now: Instant, current_peer_cid: u32) -> Vec<Frame> {
         let mut frames_to_retx = Vec::new();
 
         // Check SACK-based retransmissions
         // 检查基于SACK的重传
-        let sack_retx = self.sack_manager.check_for_rto(rto, now);
+        let sack_retx = self.sack_manager.check_for_rto(rto, now, current_peer_cid);
         frames_to_retx.extend(sack_retx);
 
         // Check simple retransmissions
         // 检查简单重传
-        let simple_retx = self.simple_retx_manager.check_for_retransmissions(now);
+        let simple_retx = self.simple_retx_manager.check_for_retransmissions(now, current_peer_cid);
         frames_to_retx.extend(simple_retx);
 
         if !frames_to_retx.is_empty() {
             debug!(
                 retx_count = frames_to_retx.len(),
-                "Retransmissions triggered by unified manager"
+                current_peer_cid = current_peer_cid,
+                "Retransmissions triggered by unified manager with updated connection ID"
             );
         }
 
@@ -275,18 +276,19 @@ impl RetransmissionManager {
         &mut self,
         rto: Duration,
         now: Instant,
+        current_peer_cid: u32,
     ) -> (Vec<TimeoutEvent>, Vec<Frame>) {
         let mut events = Vec::new();
         let mut frames_to_retx = Vec::new();
 
         // 检查SACK-based重传
         // Check SACK-based retransmissions
-        let sack_retx = self.sack_manager.check_for_rto(rto, now);
+        let sack_retx = self.sack_manager.check_for_rto(rto, now, current_peer_cid);
         frames_to_retx.extend(sack_retx);
 
         // 检查简单重传
         // Check simple retransmissions
-        let simple_retx = self.simple_retx_manager.check_for_retransmissions(now);
+        let simple_retx = self.simple_retx_manager.check_for_retransmissions(now, current_peer_cid);
         frames_to_retx.extend(simple_retx);
 
         // 如果有需要重传的帧，添加重传超时事件
@@ -295,7 +297,8 @@ impl RetransmissionManager {
             events.push(TimeoutEvent::RetransmissionTimeout);
             debug!(
                 retx_count = frames_to_retx.len(),
-                "Retransmission timeout detected by unified manager"
+                current_peer_cid = current_peer_cid,
+                "Retransmission timeout detected by unified manager with updated connection ID"
             );
         }
 
@@ -402,12 +405,12 @@ mod tests {
         manager.add_in_flight_packet(create_regular_push_frame(10), now);
 
         // Check immediately - no retransmissions yet
-        let frames = manager.check_for_retransmissions(Duration::from_secs(1), now);
+        let frames = manager.check_for_retransmissions(Duration::from_secs(1), now, 12345);
         assert!(frames.is_empty());
 
         // Check after timeout - should trigger retransmissions
         let later = now + Duration::from_secs(2);
-        let frames = manager.check_for_retransmissions(Duration::from_secs(1), later);
+        let frames = manager.check_for_retransmissions(Duration::from_secs(1), later, 12345);
         assert_eq!(frames.len(), 2); // Both frames should be retransmitted
     }
 
@@ -477,7 +480,7 @@ mod tests {
         manager.add_in_flight_packet(create_regular_push_frame(10), now);
 
         // Check immediately - no timeouts yet
-        let (events, frames) = manager.check_retransmission_timeouts(Duration::from_secs(1), now);
+        let (events, frames) = manager.check_retransmission_timeouts(Duration::from_secs(1), now, 12345);
         assert!(events.is_empty());
         assert!(frames.is_empty());
     }
@@ -493,7 +496,7 @@ mod tests {
 
         // Check after timeout period
         let later = now + Duration::from_secs(2);
-        let (events, frames) = manager.check_retransmission_timeouts(Duration::from_secs(1), later);
+        let (events, frames) = manager.check_retransmission_timeouts(Duration::from_secs(1), later, 12345);
 
         // Should have retransmission timeout event
         assert_eq!(events.len(), 1);
@@ -539,7 +542,7 @@ mod tests {
         let later = now + Duration::from_secs(2);
 
         // Using layered interface
-        let (events, layered_frames) = manager.check_retransmission_timeouts(rto, later);
+        let (events, layered_frames) = manager.check_retransmission_timeouts(rto, later, 12345);
 
         // Reset state for comparison
         manager.clear();
@@ -547,7 +550,7 @@ mod tests {
         manager.add_in_flight_packet(create_regular_push_frame(10), now);
 
         // Using direct interface
-        let direct_frames = manager.check_for_retransmissions(rto, later);
+        let direct_frames = manager.check_for_retransmissions(rto, later, 12345);
 
         // Results should be consistent
         if !direct_frames.is_empty() {
