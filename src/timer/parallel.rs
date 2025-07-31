@@ -462,8 +462,8 @@ pub struct ParallelProcessingStats {
     pub simd_only_count: u64,
     pub simd_rayon_count: u64,
     pub full_hybrid_count: u64,
-    pub avg_processing_time_ns: u64,
-    pub peak_throughput_ops_per_sec: u64,
+    pub avg_processing_time_ns: f64,
+    pub peak_throughput_ops_per_sec: f64,
 }
 
 impl HybridParallelTimerSystem {
@@ -734,26 +734,23 @@ impl HybridParallelTimerSystem {
 
 
     /// 更新统计信息
-    /// Update statistics
+    /// 将统计逻辑重构到此函数中，结构更清晰
     fn update_stats(&mut self, strategy: OptimalParallelStrategy, batch_size: usize, duration: Duration) {
         self.stats.total_batches_processed += 1;
-        
+        self.stats.avg_processing_time_ns = (self.stats.avg_processing_time_ns + duration.as_nanos() as f64) / 2.0;
+
         match strategy {
             OptimalParallelStrategy::SIMDOnly => self.stats.simd_only_count += 1,
             OptimalParallelStrategy::SIMDWithRayon => self.stats.simd_rayon_count += 1,
             OptimalParallelStrategy::FullHybrid => self.stats.full_hybrid_count += 1,
         }
 
-        let processing_time_ns = duration.as_nanos() as u64;
-        self.stats.avg_processing_time_ns = 
-            (self.stats.avg_processing_time_ns + processing_time_ns) / 2;
-
-        // 避免除零错误，如果处理时间为0则跳过吞吐量计算
-        // Avoid division by zero, skip throughput calculation if processing time is 0
-        if processing_time_ns > 0 {
-            let throughput = (batch_size as u64 * 1_000_000_000) / processing_time_ns;
-            if throughput > self.stats.peak_throughput_ops_per_sec {
-                self.stats.peak_throughput_ops_per_sec = throughput;
+        // 使用f64进行精确的吞吐量计算
+        let duration_secs = duration.as_secs_f64();
+        if duration_secs > 0.0 {
+            let current_throughput = batch_size as f64 / duration_secs;
+            if current_throughput > self.stats.peak_throughput_ops_per_sec {
+                self.stats.peak_throughput_ops_per_sec = current_throughput;
             }
         }
     }
@@ -1244,9 +1241,10 @@ mod tests {
     }
 
     
+    
     #[tokio::test]
     async fn test_comprehensive_optimization_benchmark() {
-        println!("\n🏆 综合优化效果基准测试");
+        println!("\n🏆 综合优化效果基准测试 (已修正)");
         println!("========================================");
         println!("对比传统异步模式 vs 优化模式的性能差异");
         println!();
@@ -1338,9 +1336,9 @@ mod tests {
             println!();
             
             println!("  📈 性能指标:");
-            println!("    平均延迟: {:.2}µs", avg_duration.as_micros());
-            println!("    最小延迟: {:.2}µs", min_duration.as_micros());
-            println!("    最大延迟: {:.2}µs", max_duration.as_micros());
+            println!("    平均延迟: {:.}µs", avg_duration.as_micros() as f64 / 1000.0);
+            println!("    最小延迟: {:.}µs", min_duration.as_micros() as f64 / 1000.0);
+            println!("    最大延迟: {:.}µs", max_duration.as_micros() as f64 / 1000.0);
             println!("    每操作: {} 纳秒", nanos_per_op);
             println!("    吞吐量: {:.0} ops/sec", throughput);
             println!();
@@ -1377,9 +1375,9 @@ mod tests {
         let final_stats = optimized_system.get_stats();
         println!("🎯 最终性能统计:");
         println!("  处理批次总数: {}", final_stats.total_batches_processed);
-        println!("  峰值吞吐量: {} ops/sec", final_stats.peak_throughput_ops_per_sec);
+        println!("  峰值吞吐量: {:.0} ops/sec", final_stats.peak_throughput_ops_per_sec);
         println!("  平均处理时间: {} 纳秒", final_stats.avg_processing_time_ns);
-        println!("  SIMD-only使用: {} 次", final_stats.simd_only_count);
+        println!("  直通模式使用: {} 次", final_stats.simd_only_count);
         println!("  SIMD+Rayon使用: {} 次", final_stats.simd_rayon_count);
         println!("  完整混合使用: {} 次", final_stats.full_hybrid_count);
     }
