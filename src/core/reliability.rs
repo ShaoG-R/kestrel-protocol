@@ -30,6 +30,7 @@ use tokio::time::Instant;
 use tracing::{debug, trace};
 use congestion::CongestionControl;
 use crate::core::endpoint::timing::TimeoutEvent;
+use crate::core::endpoint::unified_scheduler::TimeoutLayer;
 
 /// 超时检查结果
 /// Timeout check result
@@ -582,5 +583,41 @@ impl ReliabilityLayer {
         // Use layered timeout management interface to get retransmission timeout deadline
         let rto = self.rto_estimator.rto();
         self.retransmission_manager.next_retransmission_timeout_deadline(rto)
+    }
+}
+
+// === TimeoutLayer trait 实现 TimeoutLayer trait implementation ===
+
+impl TimeoutLayer for ReliabilityLayer {
+    fn next_deadline(&self) -> Option<Instant> {
+        self.next_reliability_timeout_deadline()
+    }
+    
+    fn check_timeouts(&mut self, now: Instant) -> TimeoutCheckResult {
+        // 创建重传上下文 - 使用默认值，实际使用时应传入正确的参数
+        // Create retransmission context - using default values, should pass correct params in actual use
+        let context = crate::packet::frame::RetransmissionContext::new(
+            now,
+            0, // peer_cid - 默认值
+            1, // local_cid - 默认值  
+            1, // timestamp - 默认值
+            0, // recv_window - 默认值
+            1024, // mtu - 默认值
+        );
+        
+        self.check_reliability_timeouts(now, &context)
+    }
+    
+    fn layer_name(&self) -> &'static str {
+        "ReliabilityLayer"
+    }
+    
+    fn stats(&self) -> Option<String> {
+        Some(format!(
+            "cwnd: {}, in_flight: {}, rto: {:?}",
+            self.congestion_window(),
+            self.retransmission_manager.total_in_flight_count(),
+            self.rto_estimator.rto()
+        ))
     }
 } 

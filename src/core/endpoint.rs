@@ -11,6 +11,7 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 pub mod timing;
+pub mod unified_scheduler;
 
 pub use types::command::StreamCommand;
 

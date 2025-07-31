@@ -12,6 +12,8 @@ use crate::timer::{
     event::{ConnectionId, TimerEventData},
     task::{GlobalTimerTaskHandle, TimerHandle, TimerRegistration},
 };
+use crate::core::endpoint::unified_scheduler::{TimeoutLayer, UnifiedTimeoutScheduler};
+use crate::core::reliability::TimeoutCheckResult;
 use std::collections::HashMap;
 use tokio::{
     sync::mpsc,
@@ -20,7 +22,7 @@ use tokio::{
 
 /// 超时事件类型枚举
 /// Timeout event type enumeration
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub enum TimeoutEvent {
     /// 空闲超时 - 连接长时间无活动
     /// Idle timeout - connection has been inactive for too long
@@ -197,6 +199,10 @@ pub struct TimingManager {
     /// 定时器管理器
     /// Timer manager
     timer_manager: TimerManager,
+
+    /// 统一超时事件调度器
+    /// Unified timeout event scheduler
+    unified_scheduler: UnifiedTimeoutScheduler,
 }
 
 impl TimingManager {
@@ -211,6 +217,7 @@ impl TimingManager {
             last_recv_time: now,
             fin_pending_eof: false,
             timer_manager,
+            unified_scheduler: UnifiedTimeoutScheduler::new(),
         }
     }
 
@@ -228,6 +235,7 @@ impl TimingManager {
             last_recv_time: start_time,
             fin_pending_eof: false,
             timer_manager,
+            unified_scheduler: UnifiedTimeoutScheduler::new(),
         }
     }
 
@@ -549,6 +557,87 @@ impl TimingManager {
         // 目前只有空闲超时，未来可以添加其他连接级超时
         // Currently only idle timeout, can add other connection-level timeouts in the future
         Some(idle_deadline)
+    }
+
+    // === 统一调度器方法 Unified Scheduler Methods ===
+
+    /// 使用统一调度器计算下一次唤醒时间
+    /// Calculate next wakeup time using unified scheduler
+    pub fn calculate_unified_wakeup(&mut self, layers: &[&dyn TimeoutLayer]) -> Instant {
+        self.unified_scheduler.calculate_unified_deadline(layers)
+    }
+
+    /// 使用统一调度器检查所有层的超时
+    /// Check timeouts for all layers using unified scheduler
+    pub fn check_unified_timeouts(&mut self, layers: &mut [&mut dyn TimeoutLayer]) -> Vec<TimeoutCheckResult> {
+        self.unified_scheduler.check_unified_timeouts(layers)
+    }
+
+    /// 获取统一调度器的性能统计
+    /// Get performance statistics from unified scheduler
+    pub fn unified_scheduler_stats(&self) -> String {
+        let stats = self.unified_scheduler.stats();
+        format!(
+            "UnifiedScheduler {{ total_checks: {}, cache_hits: {}, cache_hit_rate: {:.2}%, batch_checks: {}, prediction_hits: {}, avg_check_duration: {:?} }}",
+            stats.total_checks,
+            stats.cache_hits,
+            self.unified_scheduler.cache_hit_rate() * 100.0,
+            stats.batch_checks,
+            stats.prediction_hits,
+            self.unified_scheduler.avg_check_duration()
+        )
+    }
+
+    /// 清理统一调度器的过期数据
+    /// Cleanup expired data in unified scheduler
+    pub fn cleanup_unified_scheduler(&mut self) {
+        let now = Instant::now();
+        self.unified_scheduler.cleanup_expired_data(now);
+    }
+
+    /// 重置统一调度器的统计信息
+    /// Reset unified scheduler statistics
+    pub fn reset_unified_scheduler_stats(&mut self) {
+        self.unified_scheduler.reset_stats();
+    }
+}
+
+// === TimeoutLayer trait 实现 TimeoutLayer trait implementation ===
+
+impl TimeoutLayer for TimingManager {
+    fn next_deadline(&self) -> Option<Instant> {
+        // 使用默认的空闲超时配置计算下一个截止时间
+        // Calculate next deadline using default idle timeout config
+        let default_idle_timeout = Duration::from_secs(30);
+        Some(self.last_recv_time + default_idle_timeout)
+    }
+    
+    fn check_timeouts(&mut self, _now: Instant) -> TimeoutCheckResult {
+        // 检查全局定时器事件
+        // Check global timer events
+        let events = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.timer_manager.check_timer_events().await
+            })
+        });
+        
+        TimeoutCheckResult {
+            events,
+            frames_to_retransmit: Vec::new(), // TimingManager 不处理重传帧
+        }
+    }
+    
+    fn layer_name(&self) -> &'static str {
+        "TimingManager"
+    }
+    
+    fn stats(&self) -> Option<String> {
+        Some(format!(
+            "connection_duration: {:?}, time_since_last_recv: {:?}, fin_pending_eof: {}",
+            self.connection_duration(),
+            self.time_since_last_recv(),
+            self.fin_pending_eof
+        ))
     }
 }
 
@@ -1135,6 +1224,73 @@ mod tests {
         let check_duration = start_time.elapsed();
         println!("1000次事件检查耗时: {:?}", check_duration);
         println!("平均每次检查: {:?}", check_duration / 1000);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_unified_scheduler_performance() {
+        let handle = start_global_timer_task();
+        let mut timing_manager = TimingManager::new(1, handle.clone());
+
+        // 性能测试：统一调度器的性能
+        // Performance test: unified scheduler performance
+        let start_time = tokio::time::Instant::now();
+        
+        // 模拟多个层的超时检查
+        // Simulate timeout checking for multiple layers
+        for _ in 0..100 {
+            // 创建一个临时的 TimingManager 作为层
+            // Create a temporary TimingManager as a layer
+            let temp_manager = TimingManager::new(2, handle.clone());
+            let layers: Vec<&dyn TimeoutLayer> = vec![&temp_manager];
+            
+            // 使用统一调度器计算唤醒时间
+            // Use unified scheduler to calculate wakeup time
+            let _wakeup_time = timing_manager.calculate_unified_wakeup(&layers);
+        }
+        
+        let duration = start_time.elapsed();
+        println!("100次统一调度器唤醒计算耗时: {:?}", duration);
+        println!("平均每次计算: {:?}", duration / 100);
+
+        // 检查缓存命中率
+        // Check cache hit rate
+        let stats = timing_manager.unified_scheduler_stats();
+        println!("统一调度器统计: {}", stats);
+
+        // 性能断言：100次计算应该在50ms内完成
+        // Performance assertion: 100 calculations should complete within 50ms
+        assert!(duration < Duration::from_millis(50), 
+            "统一调度器性能不达标: {:?}", duration);
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_unified_scheduler_cache_efficiency() {
+        let handle = start_global_timer_task();
+        let mut timing_manager = TimingManager::new(1, handle.clone());
+
+        // 测试缓存效率
+        // Test cache efficiency
+        let temp_manager = TimingManager::new(2, handle.clone());
+        let layers: Vec<&dyn TimeoutLayer> = vec![&temp_manager];
+        
+        // 连续多次调用应该命中缓存
+        // Multiple consecutive calls should hit cache
+        for _ in 0..10 {
+            let _wakeup_time = timing_manager.calculate_unified_wakeup(&layers);
+        }
+        
+        // 检查缓存命中率应该很高
+        // Cache hit rate should be high
+        let cache_hit_rate = timing_manager.unified_scheduler.cache_hit_rate();
+        println!("缓存命中率: {:.2}%", cache_hit_rate * 100.0);
+        
+        // 除了第一次，其他都应该命中缓存
+        // All calls except the first should hit cache
+        assert!(cache_hit_rate >= 0.8, "缓存命中率过低: {:.2}%", cache_hit_rate * 100.0);
 
         handle.shutdown().await.unwrap();
     }
