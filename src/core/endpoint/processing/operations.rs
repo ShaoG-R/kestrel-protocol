@@ -123,6 +123,11 @@ impl<T: Transport> EndpointOperations for Endpoint<T> {
     fn update_last_recv_time(&mut self, now: Instant) {
         self.timing.update_last_recv_time(now);
     }
+    
+    async fn cancel_connection_timeout(&mut self) {
+        let cancelled = self.timing.cancel_timer(&crate::core::endpoint::timing::TimeoutEvent::ConnectionTimeout).await;
+        tracing::debug!("Connection timeout timer cancelled: {}", cancelled);
+    }
 
     // ========== 路径迁移操作 (Path Migration Operations) ==========
     

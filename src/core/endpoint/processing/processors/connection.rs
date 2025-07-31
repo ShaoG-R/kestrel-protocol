@@ -202,6 +202,10 @@ impl ConnectionProcessor {
 
         match context.connection_state {
             ConnectionState::Connecting => {
+                // 取消连接超时定时器
+                // Cancel connection timeout timer
+                endpoint.cancel_connection_timeout().await;
+                
                 // 处理连接建立 - 使用新的生命周期管理器API
                 // Handle connection establishment - using new lifecycle manager API
                 endpoint.transition_state(ConnectionState::Established)?;

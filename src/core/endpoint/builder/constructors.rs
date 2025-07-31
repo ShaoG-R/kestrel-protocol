@@ -57,6 +57,13 @@ impl<T: Transport> Endpoint<T> {
         if let Err(e) = timing.register_idle_timeout(&config).await {
             return Err(crate::error::Error::TimerError(e.to_string()));
         }
+        
+        // 为客户端连接注册连接超时定时器（30秒超时）
+        // Register connection timeout timer for client connection (30 seconds timeout)
+        let connection_timeout = tokio::time::Duration::from_secs(30);
+        if let Err(e) = timing.register_connection_timeout(connection_timeout).await {
+            tracing::warn!("Failed to register connection timeout for client: {}", e);
+        }
 
         let endpoint = Self {
             identity: ConnectionIdentity::new(local_cid, 0, remote_addr),

@@ -15,6 +15,7 @@ use crate::timer::{
 use crate::core::endpoint::timing::TimeoutEvent;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
+
 use tokio::{
     sync::{mpsc, oneshot},
     time::{Instant, interval, sleep_until},
@@ -61,6 +62,118 @@ pub struct TimerRegistration {
     /// 回调通道，用于接收超时通知
     /// Callback channel for receiving timeout notifications
     pub callback_tx: mpsc::Sender<TimerEventData>,
+}
+
+/// 批量定时器注册请求
+/// Batch timer registration request
+#[derive(Debug)]
+pub struct BatchTimerRegistration {
+    /// 批量注册列表
+    /// Batch registration list
+    pub registrations: Vec<TimerRegistration>,
+}
+
+impl BatchTimerRegistration {
+    /// 创建新的批量注册请求
+    /// Create new batch registration request
+    pub fn new(registrations: Vec<TimerRegistration>) -> Self {
+        Self { registrations }
+    }
+
+    /// 创建预分配容量的批量注册请求
+    /// Create batch registration request with pre-allocated capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            registrations: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// 添加注册请求
+    /// Add registration request
+    pub fn add(&mut self, registration: TimerRegistration) {
+        self.registrations.push(registration);
+    }
+}
+
+/// 批量定时器取消请求
+/// Batch timer cancellation request
+#[derive(Debug)]
+pub struct BatchTimerCancellation {
+    /// 要取消的定时器条目ID列表
+    /// List of timer entry IDs to cancel
+    pub entry_ids: Vec<TimerEntryId>,
+}
+
+impl BatchTimerCancellation {
+    /// 创建新的批量取消请求
+    /// Create new batch cancellation request
+    pub fn new(entry_ids: Vec<TimerEntryId>) -> Self {
+        Self { entry_ids }
+    }
+
+    /// 创建预分配容量的批量取消请求
+    /// Create batch cancellation request with pre-allocated capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entry_ids: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// 添加要取消的定时器ID
+    /// Add timer ID to cancel
+    pub fn add(&mut self, entry_id: TimerEntryId) {
+        self.entry_ids.push(entry_id);
+    }
+}
+
+/// 批量操作结果
+/// Batch operation result
+#[derive(Debug)]
+pub struct BatchTimerResult<T> {
+    /// 成功的结果
+    /// Successful results
+    pub successes: Vec<T>,
+    /// 失败的结果及其错误
+    /// Failed results with their errors
+    pub failures: Vec<(usize, TimerError)>, // (index, error)
+}
+
+impl<T> BatchTimerResult<T> {
+    /// 创建新的批量结果
+    /// Create new batch result
+    pub fn new() -> Self {
+        Self {
+            successes: Vec::new(),
+            failures: Vec::new(),
+        }
+    }
+
+    /// 创建预分配容量的批量结果
+    /// Create batch result with pre-allocated capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            successes: Vec::with_capacity(capacity),
+            failures: Vec::new(),
+        }
+    }
+
+    /// 获取成功数量
+    /// Get success count
+    pub fn success_count(&self) -> usize {
+        self.successes.len()
+    }
+
+    /// 获取失败数量
+    /// Get failure count
+    pub fn failure_count(&self) -> usize {
+        self.failures.len()
+    }
+
+    /// 是否全部成功
+    /// Check if all operations succeeded
+    pub fn all_succeeded(&self) -> bool {
+        self.failures.is_empty()
+    }
 }
 
 impl TimerRegistration {
@@ -134,11 +247,23 @@ pub enum TimerTaskCommand {
         registration: TimerRegistration,
         response_tx: oneshot::Sender<Result<TimerHandle, TimerError>>,
     },
+    /// 批量注册定时器
+    /// Batch register timers
+    BatchRegisterTimers {
+        batch_registration: BatchTimerRegistration,
+        response_tx: oneshot::Sender<BatchTimerResult<TimerHandle>>,
+    },
     /// 取消定时器
     /// Cancel timer
     CancelTimer {
         entry_id: TimerEntryId,
         response_tx: oneshot::Sender<bool>,
+    },
+    /// 批量取消定时器
+    /// Batch cancel timers
+    BatchCancelTimers {
+        batch_cancellation: BatchTimerCancellation,
+        response_tx: oneshot::Sender<BatchTimerResult<bool>>,
     },
     /// 清除连接的所有定时器
     /// Clear all timers for a connection
@@ -337,10 +462,24 @@ impl GlobalTimerTask {
                 }
             }
             
+            TimerTaskCommand::BatchRegisterTimers { batch_registration, response_tx } => {
+                let result = self.batch_register_timers(batch_registration).await;
+                if let Err(err) = response_tx.send(result) {
+                    warn!(error = ?err, "Failed to send batch register timers response");
+                }
+            }
+            
             TimerTaskCommand::CancelTimer { entry_id, response_tx } => {
                 let result = self.cancel_timer(entry_id);
                 if let Err(err) = response_tx.send(result) {
                     warn!(error = ?err, "Failed to send cancel timer response");
+                }
+            }
+            
+            TimerTaskCommand::BatchCancelTimers { batch_cancellation, response_tx } => {
+                let result = self.batch_cancel_timers(batch_cancellation);
+                if let Err(err) = response_tx.send(result) {
+                    warn!(error = ?err, "Failed to send batch cancel timers response");
                 }
             }
             
@@ -412,6 +551,144 @@ impl GlobalTimerTask {
         );
 
         Ok(handle)
+    }
+
+    /// 批量注册定时器（高性能版本）
+    /// Batch register timers (high-performance version)
+    async fn batch_register_timers(&mut self, batch_registration: BatchTimerRegistration) -> BatchTimerResult<TimerHandle> {
+        let registrations = batch_registration.registrations;
+        let total_count = registrations.len();
+        
+        if total_count == 0 {
+            return BatchTimerResult::new();
+        }
+
+        let mut result = BatchTimerResult::with_capacity(total_count);
+        
+        // 预分配event IDs，减少分配开销
+        // Pre-allocate event IDs to reduce allocation overhead
+        let start_event_id = self.next_event_id;
+        self.next_event_id += total_count as u64;
+        
+        // 批量创建定时器事件，为时间轮批量操作准备数据
+        // Batch create timer events, prepare data for timing wheel batch operation
+        let mut timers_for_wheel = Vec::with_capacity(total_count);
+        let mut registration_data = Vec::with_capacity(total_count);
+        
+        // 为批量对象池API准备数据
+        // Prepare data for batch object pool API
+        let pool_requests: Vec<_> = registrations.iter()
+            .map(|reg| (reg.connection_id, reg.timeout_event.clone()))
+            .collect();
+        let callback_txs: Vec<_> = registrations.iter()
+            .map(|reg| reg.callback_tx.clone())
+            .collect();
+        
+        // 批量创建定时器事件，大幅减少对象池锁定次数
+        // Batch create timer events, dramatically reduce object pool lock count
+        let timer_events = TimerEvent::batch_from_pool(
+            start_event_id,
+            &pool_requests,
+            &callback_txs,
+        );
+        
+        // 构建时间轮数据
+        // Build timing wheel data
+        for (timer_event, registration) in timer_events.into_iter().zip(registrations.iter()) {
+            timers_for_wheel.push((registration.delay, timer_event));
+            registration_data.push((registration.connection_id, registration.delay));
+        }
+        
+        // 使用时间轮的批量API一次性添加所有定时器
+        // Use timing wheel's batch API to add all timers at once
+        let entry_ids = self.timing_wheel.batch_add_timers(timers_for_wheel);
+        
+        // 批量更新映射关系
+        // Batch update mapping relationships
+        for (entry_id, (connection_id, _delay)) in entry_ids.iter().zip(registration_data.iter()) {
+            self.connection_timers
+                .entry(*connection_id)
+                .or_default()
+                .insert(*entry_id);
+            
+            self.entry_to_connection.insert(*entry_id, *connection_id);
+            
+            // 创建定时器句柄
+            // Create timer handle
+            let handle = TimerHandle::new(*entry_id, self.command_tx.clone());
+            result.successes.push(handle);
+        }
+        
+        trace!(
+            batch_size = total_count,
+            "Batch registered timers successfully using wheel batch API"
+        );
+        
+        result
+    }
+
+    /// 批量取消定时器（高性能版本）
+    /// Batch cancel timers (high-performance version)
+    fn batch_cancel_timers(&mut self, batch_cancellation: BatchTimerCancellation) -> BatchTimerResult<bool> {
+        let entry_ids = batch_cancellation.entry_ids;
+        let total_count = entry_ids.len();
+        
+        if total_count == 0 {
+            return BatchTimerResult::new();
+        }
+
+        let mut result = BatchTimerResult::with_capacity(total_count);
+        
+        // 使用时间轮的批量取消API
+        // Use timing wheel's batch cancel API
+        let cancelled_count = self.timing_wheel.batch_cancel_timers(&entry_ids);
+        
+        // 批量收集要移除的映射信息
+        // Batch collect mapping info to remove
+        let mut connections_to_update: HashMap<ConnectionId, Vec<TimerEntryId>> = HashMap::new();
+        
+        for (index, entry_id) in entry_ids.iter().enumerate() {
+            // 检查是否在entry_to_connection映射中（表示成功取消）
+            // Check if exists in entry_to_connection mapping (indicates successful cancellation)
+            if let Some(connection_id) = self.entry_to_connection.remove(entry_id) {
+                // 收集连接映射信息，批量处理
+                // Collect connection mapping info for batch processing
+                connections_to_update
+                    .entry(connection_id)
+                    .or_default()
+                    .push(*entry_id);
+                
+                self.stats.cancelled_timers += 1;
+                result.successes.push(true);
+            } else {
+                result.failures.push((index, TimerError::TimerNotFound));
+            }
+        }
+        
+        // 批量更新连接定时器映射
+        // Batch update connection timer mappings  
+        for (connection_id, cancelled_entry_ids) in connections_to_update {
+            if let Some(entry_ids_set) = self.connection_timers.get_mut(&connection_id) {
+                for entry_id in cancelled_entry_ids {
+                    entry_ids_set.remove(&entry_id);
+                }
+                
+                // 如果该连接没有更多定时器，移除连接条目
+                // If connection has no more timers, remove connection entry
+                if entry_ids_set.is_empty() {
+                    self.connection_timers.remove(&connection_id);
+                }
+            }
+        }
+        
+        trace!(
+            batch_size = total_count,
+            cancelled_count = result.success_count(),
+            wheel_cancelled_count = cancelled_count,
+            "Batch cancelled timers using wheel batch API"
+        );
+        
+        result
     }
 
     /// 取消定时器
@@ -640,6 +917,52 @@ impl GlobalTimerTaskHandle {
         response_rx
             .await
             .map_err(|_| TimerError::TaskShutdown)?
+    }
+
+    /// 批量注册定时器（高性能版本）
+    /// Batch register timers (high-performance version)
+    pub async fn batch_register_timers(
+        &self,
+        batch_registration: BatchTimerRegistration,
+    ) -> Result<BatchTimerResult<TimerHandle>, TimerError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        
+        let command = TimerTaskCommand::BatchRegisterTimers {
+            batch_registration,
+            response_tx,
+        };
+
+        self.command_tx
+            .send(command)
+            .await
+            .map_err(|_| TimerError::TaskShutdown)?;
+
+        response_rx
+            .await
+            .map_err(|_| TimerError::TaskShutdown)
+    }
+
+    /// 批量取消定时器（高性能版本）
+    /// Batch cancel timers (high-performance version)
+    pub async fn batch_cancel_timers(
+        &self,
+        batch_cancellation: BatchTimerCancellation,
+    ) -> Result<BatchTimerResult<bool>, TimerError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        
+        let command = TimerTaskCommand::BatchCancelTimers {
+            batch_cancellation,
+            response_tx,
+        };
+
+        self.command_tx
+            .send(command)
+            .await
+            .map_err(|_| TimerError::TaskShutdown)?;
+
+        response_rx
+            .await
+            .map_err(|_| TimerError::TaskShutdown)
     }
 
     /// 清除连接的所有定时器
@@ -905,7 +1228,7 @@ mod tests {
         handle.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_timer_performance() {
         let handle = start_global_timer_task();
         let (callback_tx, _callback_rx) = mpsc::channel(1000);
@@ -996,6 +1319,8 @@ mod tests {
         assert!(received_count >= timer_count * 9 / 10, 
             "至少90%的定时器应该被处理，实际: {}/{}", received_count, timer_count);
         
+        println!("handle_timer_events_percent: {}", received_count as f64 / timer_count as f64);
+
         // 性能检查：批量处理应该是合理的
         // Performance check: batch processing should be reasonable
         if received_count > 0 {
@@ -1041,6 +1366,235 @@ mod tests {
         
         // 性能断言：多次查询应该受益于缓存
         assert!(stats_duration < Duration::from_millis(10), "统计查询性能不达标");
+        
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_batch_timer_performance_comparison() {
+        let handle = start_global_timer_task();
+        let (callback_tx, _callback_rx) = mpsc::channel(1000);
+        
+        let timer_count = 1000;
+        
+        // 测试单个操作性能
+        // Test individual operation performance
+        let start_time = tokio::time::Instant::now();
+        let mut individual_handles = Vec::with_capacity(timer_count);
+        
+        for i in 0..timer_count {
+            let registration = TimerRegistration::new(
+                i as u32,
+                Duration::from_secs(60), // 长时间定时器
+                TimeoutEvent::IdleTimeout,
+                callback_tx.clone(),
+            );
+            let timer_handle = handle.register_timer(registration).await.unwrap();
+            individual_handles.push(timer_handle);
+        }
+        
+        let individual_registration_duration = start_time.elapsed();
+        println!("单个注册{}个定时器耗时: {:?}", timer_count, individual_registration_duration);
+        
+        // 单个取消
+        let start_time = tokio::time::Instant::now();
+        for timer_handle in individual_handles {
+            timer_handle.cancel().await.unwrap();
+        }
+        let individual_cancellation_duration = start_time.elapsed();
+        println!("单个取消{}个定时器耗时: {:?}", timer_count, individual_cancellation_duration);
+        
+        // 测试批量操作性能
+        // Test batch operation performance
+        let start_time = tokio::time::Instant::now();
+        
+        // 创建批量注册请求
+        let mut batch_registration = BatchTimerRegistration::with_capacity(timer_count);
+        for i in 0..timer_count {
+            let registration = TimerRegistration::new(
+                (i + timer_count) as u32, // 避免ID冲突
+                Duration::from_secs(60),
+                TimeoutEvent::IdleTimeout,
+                callback_tx.clone(),
+            );
+            batch_registration.add(registration);
+        }
+        
+        let batch_result = handle.batch_register_timers(batch_registration).await.unwrap();
+        let batch_registration_duration = start_time.elapsed();
+        println!("批量注册{}个定时器耗时: {:?}", timer_count, batch_registration_duration);
+        
+        assert_eq!(batch_result.success_count(), timer_count);
+        assert!(batch_result.all_succeeded());
+        
+        // 批量取消
+        let start_time = tokio::time::Instant::now();
+        let entry_ids: Vec<_> = batch_result.successes.into_iter().map(|h| h.entry_id).collect();
+        let batch_cancellation = BatchTimerCancellation::new(entry_ids);
+        let cancel_result = handle.batch_cancel_timers(batch_cancellation).await.unwrap();
+        let batch_cancellation_duration = start_time.elapsed();
+        println!("批量取消{}个定时器耗时: {:?}", timer_count, batch_cancellation_duration);
+        
+        assert_eq!(cancel_result.success_count(), timer_count);
+        
+        // 性能比较
+        // Performance comparison
+        let individual_total = individual_registration_duration + individual_cancellation_duration;
+        let batch_total = batch_registration_duration + batch_cancellation_duration;
+        let speedup_ratio = individual_total.as_nanos() as f64 / batch_total.as_nanos() as f64;
+        
+        println!("单个操作总耗时: {:?}", individual_total);
+        println!("批量操作总耗时: {:?}", batch_total);
+        println!("性能提升倍数: {:.2}x", speedup_ratio);
+        
+        // 计算每个定时器的平均操作时间
+        let individual_avg_per_timer = individual_total / (timer_count as u32 * 2); // 注册+取消
+        let batch_avg_per_timer = batch_total / (timer_count as u32 * 2);
+        
+        println!("单个操作平均每定时器耗时: {:?}", individual_avg_per_timer);
+        println!("批量操作平均每定时器耗时: {:?}", batch_avg_per_timer);
+        
+        // 目标：批量操作应该显著快于单个操作
+        assert!(speedup_ratio > 2.0, "批量操作应该至少比单个操作快2倍，实际: {:.2}x", speedup_ratio);
+        
+        // 目标：批量操作每定时器时间应该小于1微秒
+        let batch_nanos_per_timer = batch_avg_per_timer.as_nanos();
+        println!("批量操作每定时器纳秒: {}", batch_nanos_per_timer);
+        
+        // 1微秒 = 1000纳秒
+        if batch_nanos_per_timer <= 1000 {
+            println!("🎉 达成目标！批量操作每定时器耗时: {}纳秒 (< 1微秒)", batch_nanos_per_timer);
+        } else {
+            println!("⚠️  距离目标还有差距，当前: {}纳秒，目标: <1000纳秒", batch_nanos_per_timer);
+        }
+        
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_ultra_high_performance_batch_operations() {
+        let handle = start_global_timer_task();
+        let (callback_tx, _callback_rx) = mpsc::channel(10000);
+        
+        // 测试超大批量操作性能
+        // Test ultra-large batch operation performance
+        let batch_sizes = vec![100, 500, 1000, 2000, 5000];
+        
+        for batch_size in batch_sizes {
+            println!("\n=== 测试批量大小: {} ===", batch_size);
+            
+            // 创建批量注册请求
+            let mut batch_registration = BatchTimerRegistration::with_capacity(batch_size);
+            for i in 0..batch_size {
+                let registration = TimerRegistration::new(
+                    i as u32,
+                    Duration::from_secs(60), // 长时间定时器避免触发
+                    TimeoutEvent::IdleTimeout,
+                    callback_tx.clone(),
+                );
+                batch_registration.add(registration);
+            }
+            
+            // 测试批量注册性能
+            let start_time = std::time::Instant::now();
+            let batch_result = handle.batch_register_timers(batch_registration).await.unwrap();
+            let registration_duration = start_time.elapsed();
+            
+            assert_eq!(batch_result.success_count(), batch_size);
+            
+            // 测试批量取消性能
+            let entry_ids: Vec<_> = batch_result.successes.into_iter().map(|h| h.entry_id).collect();
+            let batch_cancellation = BatchTimerCancellation::new(entry_ids);
+            
+            let start_time = std::time::Instant::now();
+            let cancel_result = handle.batch_cancel_timers(batch_cancellation).await.unwrap();
+            let cancellation_duration = start_time.elapsed();
+            
+            assert_eq!(cancel_result.success_count(), batch_size);
+            
+            // 性能分析
+            let total_duration = registration_duration + cancellation_duration;
+            let nanos_per_operation = total_duration.as_nanos() / (batch_size as u128 * 2); // 注册+取消
+            
+            println!("批量注册耗时: {:?}", registration_duration);
+            println!("批量取消耗时: {:?}", cancellation_duration);
+            println!("总耗时: {:?}", total_duration);
+            println!("每操作平均: {} 纳秒", nanos_per_operation);
+            
+            // 性能目标检查
+            if nanos_per_operation <= 200 {
+                println!("🎉 性能优秀！每操作 {} 纳秒", nanos_per_operation);
+            } else if nanos_per_operation <= 500 {
+                println!("✅ 性能良好！每操作 {} 纳秒", nanos_per_operation);
+            } else if nanos_per_operation <= 1000 {
+                println!("⚠️  性能达标！每操作 {} 纳秒", nanos_per_operation);
+            } else {
+                println!("❌ 性能不足！每操作 {} 纳秒", nanos_per_operation);
+            }
+            
+            // 清理：确保没有残留的定时器
+            let stats = handle.get_stats().await.unwrap();
+            if stats.total_timers > 0 {
+                println!("⚠️  警告：还有 {} 个定时器未清理", stats.total_timers);
+            }
+        }
+        
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_memory_pool_efficiency() {
+        let handle = start_global_timer_task();
+        let (callback_tx, _callback_rx) = mpsc::channel(10000);
+        
+        // 测试对象池的重用效率
+        // Test object pool reuse efficiency
+        let iterations = 10;
+        let batch_size = 1000;
+        
+        println!("测试对象池重用效率 - {} 次迭代，每次 {} 个定时器", iterations, batch_size);
+        
+        let total_start = std::time::Instant::now();
+        
+        for iteration in 0..iterations {
+            // 批量注册
+            let mut batch_registration = BatchTimerRegistration::with_capacity(batch_size);
+            for i in 0..batch_size {
+                let registration = TimerRegistration::new(
+                    (iteration * batch_size + i) as u32,
+                    Duration::from_secs(60),
+                    TimeoutEvent::IdleTimeout,
+                    callback_tx.clone(),
+                );
+                batch_registration.add(registration);
+            }
+            
+            let batch_result = handle.batch_register_timers(batch_registration).await.unwrap();
+            
+            // 立即批量取消（模拟频繁的创建销毁）
+            let entry_ids: Vec<_> = batch_result.successes.into_iter().map(|h| h.entry_id).collect();
+            let batch_cancellation = BatchTimerCancellation::new(entry_ids);
+            handle.batch_cancel_timers(batch_cancellation).await.unwrap();
+            
+            if iteration % 2 == 0 {
+                print!(".");
+                // 强制刷新标准输出
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+        }
+        
+        let total_duration = total_start.elapsed();
+        let operations_count = iterations * batch_size * 2; // 注册+取消
+        let nanos_per_operation = total_duration.as_nanos() / operations_count as u128;
+        
+        println!("\n对象池重用测试完成:");
+        println!("总操作数: {}", operations_count);
+        println!("总耗时: {:?}", total_duration);
+        println!("平均每操作: {} 纳秒", nanos_per_operation);
+        
+        // 对象池应该显著提升性能
+        assert!(nanos_per_operation < 1000, "对象池优化后性能应该更好，当前: {} 纳秒", nanos_per_operation);
         
         handle.shutdown().await.unwrap();
     }

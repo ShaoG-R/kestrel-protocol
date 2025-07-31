@@ -126,6 +126,176 @@ impl TimingWheel {
         Self::new(512, Duration::from_millis(100))
     }
 
+    /// 批量添加定时器到时间轮（高性能版本）
+    /// Batch add timers to timing wheel (high-performance version)
+    ///
+    /// # Arguments
+    /// * `timers` - 定时器列表（延迟时间，定时器事件）
+    ///
+    /// # Returns
+    /// 返回定时器条目ID列表
+    /// Returns list of timer entry IDs
+    pub fn batch_add_timers(&mut self, timers: Vec<(Duration, TimerEvent)>) -> Vec<TimerEntryId> {
+        if timers.is_empty() {
+            return Vec::new();
+        }
+
+        let mut result = Vec::with_capacity(timers.len());
+        let mut earliest_expiry: Option<Instant> = self.cached_next_expiry;
+        
+        // 预分配entry IDs，减少分配开销
+        // Pre-allocate entry IDs to reduce allocation overhead
+        let start_id = self.next_entry_id;
+        self.next_entry_id += timers.len() as u64;
+        
+        // 按槽位分组定时器，减少散列访问
+        // Group timers by slot to reduce scattered access
+        let mut slot_groups: HashMap<usize, Vec<(TimerEntryId, Instant, TimerEvent)>> = HashMap::new();
+        
+        for (index, (delay, event)) in timers.into_iter().enumerate() {
+            let entry_id = start_id + index as u64;
+            let expiry_time = self.current_time + delay;
+            let slot_index = self.calculate_slot_index(expiry_time);
+            
+            // 更新最早到期时间
+            // Update earliest expiry time
+            match earliest_expiry {
+                None => earliest_expiry = Some(expiry_time),
+                Some(current_earliest) => {
+                    if expiry_time < current_earliest {
+                        earliest_expiry = Some(expiry_time);
+                    }
+                }
+            }
+            
+            slot_groups
+                .entry(slot_index)
+                .or_insert_with(|| Vec::with_capacity(4))
+                .push((entry_id, expiry_time, event));
+            
+            result.push(entry_id);
+        }
+        
+        // 批量插入到各个槽位
+        // Batch insert into each slot
+        for (slot_index, entries) in slot_groups {
+            let slot = &mut self.slots[slot_index];
+            
+            for (entry_id, expiry_time, event) in entries {
+                let position_in_slot = slot.len();
+                let entry = TimerEntry::new(entry_id, expiry_time, event);
+                slot.push_back(entry);
+                
+                // 记录定时器位置
+                // Record timer position
+                self.timer_map.insert(entry_id, (slot_index, position_in_slot));
+            }
+        }
+        
+        // 更新缓存
+        // Update cache
+        self.cached_next_expiry = earliest_expiry;
+        
+        trace!(
+            batch_size = result.len(),
+            "Batch added timers to timing wheel"
+        );
+        
+        result
+    }
+
+    /// 批量取消定时器（高性能版本）
+    /// Batch cancel timers (high-performance version)
+    ///
+    /// # Arguments
+    /// * `entry_ids` - 要取消的定时器条目ID列表
+    ///
+    /// # Returns
+    /// 返回成功取消的定时器数量
+    /// Returns number of successfully cancelled timers
+    pub fn batch_cancel_timers(&mut self, entry_ids: &[TimerEntryId]) -> usize {
+        if entry_ids.is_empty() {
+            return 0;
+        }
+
+        let mut cancelled_count = 0;
+        let mut need_cache_invalidation = false;
+        
+        // 按槽位分组要取消的定时器，提高cache locality
+        // Group timers to cancel by slot for better cache locality
+        let mut slot_groups: HashMap<usize, Vec<(TimerEntryId, usize)>> = HashMap::new();
+        
+        for &entry_id in entry_ids {
+            if let Some((slot_index, position_in_slot)) = self.timer_map.get(&entry_id) {
+                slot_groups
+                    .entry(*slot_index)
+                    .or_insert_with(|| Vec::with_capacity(4))
+                    .push((entry_id, *position_in_slot));
+            }
+        }
+        
+        // 批量处理每个槽位的取消操作
+        // Batch process cancellation for each slot
+        for (slot_index, entries) in slot_groups {
+            if slot_index >= self.slots.len() {
+                continue;
+            }
+            
+            let slot = &mut self.slots[slot_index];
+            
+            // 按位置倒序排序，从后往前删除避免位置偏移
+            // Sort by position in reverse order, delete from back to front to avoid position shifts
+            let mut entries = entries;
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+            
+            for (entry_id, position_in_slot) in entries {
+                if position_in_slot < slot.len() {
+                    // 检查是否需要缓存失效
+                    // Check if cache invalidation is needed
+                    if let Some(cached_expiry) = self.cached_next_expiry {
+                        if let Some(entry) = slot.get(position_in_slot) {
+                            if entry.expiry_time <= cached_expiry + Duration::from_millis(1) {
+                                need_cache_invalidation = true;
+                            }
+                        }
+                    }
+                    
+                    // 智能删除：如果是最后一个元素，直接弹出；否则交换后弹出
+                    // Smart deletion: if last element, pop directly; otherwise swap and pop
+                    if position_in_slot == slot.len() - 1 {
+                        slot.pop_back();
+                    } else {
+                        slot.swap(position_in_slot, slot.len() - 1);
+                        slot.pop_back();
+                        
+                        // 更新被交换元素的位置信息
+                        // Update position info for swapped element
+                        if let Some(swapped_entry) = slot.get(position_in_slot) {
+                            self.timer_map.insert(swapped_entry.id, (slot_index, position_in_slot));
+                        }
+                    }
+                    
+                    self.timer_map.remove(&entry_id);
+                    cancelled_count += 1;
+                }
+            }
+        }
+        
+        // 智能缓存失效
+        // Smart cache invalidation
+        if need_cache_invalidation {
+            self.cached_next_expiry = None;
+        }
+        
+        trace!(
+            batch_size = entry_ids.len(),
+            cancelled_count,
+            "Batch cancelled timers"
+        );
+        
+        cancelled_count
+    }
+
     /// 添加定时器到时间轮
     /// Add timer to timing wheel
     ///

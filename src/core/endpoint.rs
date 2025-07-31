@@ -158,7 +158,12 @@ impl<T: Transport> Endpoint<T> {
 
     /// 完成路径验证（使用生命周期管理器）
     /// Complete path validation (using lifecycle manager)
-    pub fn complete_path_validation(&mut self, success: bool) -> crate::error::Result<()> {
+    pub async fn complete_path_validation(&mut self, success: bool) -> crate::error::Result<()> {
+        // 取消路径验证超时定时器
+        // Cancel path validation timeout timer
+        let cancelled = self.timing.cancel_timer(&crate::core::endpoint::timing::TimeoutEvent::PathValidationTimeout).await;
+        tracing::debug!("Path validation timeout timer cancelled on completion: {}", cancelled);
+        
         self.lifecycle_manager.complete_path_validation(success)
     }
 
@@ -358,6 +363,13 @@ impl<T: Transport> Endpoint<T> {
                     // Path validation timeout handling
                     self.handle_path_validation_timeout().await?;
                 }
+                TimeoutEvent::ConnectionTimeout => {
+                    // 连接超时处理
+                    // Connection timeout handling
+                    tracing::info!("Connection establishment timeout");
+                    self.lifecycle_manager.force_close()?;
+                    return Err(crate::error::Error::ConnectionTimeout);
+                }
                 _ => {
                     // 其他连接级超时事件的处理可以在这里添加
                     // Handling for other connection-level timeout events can be added here
@@ -389,6 +401,11 @@ impl<T: Transport> Endpoint<T> {
             if let ConnectionState::ValidatingPath { notifier, .. } =
                 self.lifecycle_manager.current_state().clone()
             {
+                // 取消路径验证超时定时器
+                // Cancel path validation timeout timer
+                let cancelled = self.timing.cancel_timer(&crate::core::endpoint::timing::TimeoutEvent::PathValidationTimeout).await;
+                tracing::debug!("Path validation timeout timer cancelled: {}", cancelled);
+                
                 if let Some(notifier) = notifier {
                     let _ = notifier.send(Err(crate::error::Error::PathValidationTimeout));
                 }

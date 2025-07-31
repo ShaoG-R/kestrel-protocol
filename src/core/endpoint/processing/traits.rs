@@ -132,6 +132,10 @@ pub trait EndpointOperations: Send {
     /// 更新最后接收时间
     /// Update last receive time
     fn update_last_recv_time(&mut self, now: Instant);
+    
+    /// 取消连接超时定时器
+    /// Cancel connection timeout timer
+    async fn cancel_connection_timeout(&mut self);
 
     // ========== 路径迁移操作 (Path Migration Operations) ==========
     
@@ -299,6 +303,7 @@ mod tests {
         fn command_tx(&self) -> &mpsc::Sender<SocketActorCommand> { &self.command_tx }
         fn update_last_recv_time(&mut self, _now: Instant) {}
         async fn check_for_path_migration(&mut self, _src_addr: SocketAddr) -> Result<()> { Ok(()) }
+        async fn cancel_connection_timeout(&mut self) {}
     }
 
     #[tokio::test]

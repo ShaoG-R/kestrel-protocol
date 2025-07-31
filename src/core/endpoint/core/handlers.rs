@@ -28,6 +28,14 @@ impl<T: Transport> Endpoint<T> {
             let challenge_data = rand::random();
             let (tx, _rx) = tokio::sync::oneshot::channel();
             self.start_path_validation(src_addr, challenge_data, tx)?;
+            
+            // 注册路径验证超时定时器 (30秒超时)
+            // Register path validation timeout timer (30 seconds timeout)
+            let validation_timeout = tokio::time::Duration::from_secs(30);
+            if let Err(e) = self.timing.register_path_validation_timeout(validation_timeout).await {
+                tracing::warn!("Failed to register path validation timeout: {}", e);
+            }
+            
             let challenge_frame = create_path_challenge_frame(
                 self.identity.peer_cid(),
                 self.transport.reliability_mut().next_sequence_number(),
@@ -198,7 +206,7 @@ impl<T: Transport> Endpoint<T> {
                             new_addr = %new_addr,
                             "Path validation successful, updating remote address"
                         );
-                        self.complete_path_validation(true)?;
+                        self.complete_path_validation(true).await?;
                         self.identity.set_remote_addr(new_addr);
 
                         // Notify the caller of migrate() if there is one
