@@ -110,6 +110,10 @@ impl ActorTestHarness {
             DrainingPool::new(config.connection.drain_timeout)
         );
 
+        // 启动测试用全局定时器任务
+        // Start global timer task for testing
+        let timer_handle = crate::timer::task::start_global_timer_task();
+
         // 创建会话协调器用于测试
         // Create session coordinator for testing
         let session_coordinator = SocketSessionCoordinator::new(
@@ -118,6 +122,7 @@ impl ActorTestHarness {
             config.clone(),
             accept_tx,
             command_tx.clone(),
+            timer_handle,
         );
 
         let mut actor = SocketEventLoop {

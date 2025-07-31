@@ -8,11 +8,16 @@
 //! including connection start time, last receive time, timeout checks, etc.
 
 use crate::config::Config;
-use tokio::time::{Duration, Instant};
+use crate::timer::{
+    event::{TimerEventData, ConnectionId},
+    task::{GlobalTimerTaskHandle, TimerRegistration, TimerHandle},
+};
+use tokio::{sync::mpsc, time::{Duration, Instant}};
+use std::collections::HashMap;
 
 /// 超时事件类型枚举
 /// Timeout event type enumeration
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TimeoutEvent {
     /// 空闲超时 - 连接长时间无活动
     /// Idle timeout - connection has been inactive for too long
@@ -30,7 +35,6 @@ pub enum TimeoutEvent {
 
 /// 时间管理器
 /// Timing manager
-#[derive(Debug, Clone)]
 pub struct TimingManager {
     /// 连接开始时间
     /// Connection start time
@@ -43,6 +47,26 @@ pub struct TimingManager {
     /// FIN挂起EOF标志，表示已收到FIN但还未向用户发送EOF
     /// FIN pending EOF flag, indicates FIN received but EOF not yet sent to user
     fin_pending_eof: bool,
+
+    /// 连接ID，用于全局定时器注册
+    /// Connection ID for global timer registration
+    connection_id: Option<ConnectionId>,
+
+    /// 全局定时器任务句柄
+    /// Global timer task handle
+    timer_handle: Option<GlobalTimerTaskHandle>,
+
+    /// 接收超时事件的通道
+    /// Channel for receiving timeout events
+    timeout_rx: Option<mpsc::Receiver<TimerEventData>>,
+
+    /// 发送超时事件的通道（用于注册定时器）
+    /// Channel for sending timeout events (used for timer registration)
+    timeout_tx: Option<mpsc::Sender<TimerEventData>>,
+
+    /// 活跃定时器句柄映射
+    /// Active timer handles mapping
+    active_timers: HashMap<TimeoutEvent, TimerHandle>,
 }
 
 impl TimingManager {
@@ -54,6 +78,11 @@ impl TimingManager {
             start_time: now,
             last_recv_time: now,
             fin_pending_eof: false,
+            connection_id: None,
+            timer_handle: None,
+            timeout_rx: None,
+            timeout_tx: None,
+            active_timers: HashMap::new(),
         }
     }
 
@@ -64,7 +93,123 @@ impl TimingManager {
             start_time,
             last_recv_time: start_time,
             fin_pending_eof: false,
+            connection_id: None,
+            timer_handle: None,
+            timeout_rx: None,
+            timeout_tx: None,
+            active_timers: HashMap::new(),
         }
+    }
+
+    /// 初始化与全局定时器任务的连接
+    /// Initialize connection with global timer task
+    pub fn initialize_global_timer(
+        &mut self,
+        connection_id: ConnectionId,
+        timer_handle: GlobalTimerTaskHandle,
+    ) {
+        let (timeout_tx, timeout_rx) = mpsc::channel(32);
+        self.connection_id = Some(connection_id);
+        self.timer_handle = Some(timer_handle);
+        self.timeout_rx = Some(timeout_rx);
+        self.timeout_tx = Some(timeout_tx);
+    }
+
+    /// 检查是否有到期的定时器事件
+    /// Check for expired timer events
+    pub async fn check_timer_events(&mut self) -> Vec<TimeoutEvent> {
+        let mut events = Vec::new();
+        
+        if let Some(rx) = &mut self.timeout_rx {
+            while let Ok(event_data) = rx.try_recv() {
+                let timeout_event = event_data.timeout_event.clone();
+                events.push(timeout_event.clone());
+                // 从活跃定时器中移除这个事件类型
+                // Remove this event type from active timers
+                self.active_timers.remove(&timeout_event);
+            }
+        }
+        
+        events
+    }
+
+    /// 注册定时器到全局定时器任务
+    /// Register timer with global timer task
+    pub async fn register_timer(&mut self, timeout_event: TimeoutEvent, delay: Duration) -> Result<(), String> {
+        if let (Some(connection_id), Some(timer_handle), Some(timeout_tx)) = 
+            (self.connection_id, &self.timer_handle, &self.timeout_tx) {
+            
+            // 如果已经有这个类型的定时器，先取消它
+            // If there's already a timer of this type, cancel it first
+            if let Some(old_handle) = self.active_timers.remove(&timeout_event) {
+                let _ = old_handle.cancel().await;
+            }
+            
+            let registration = TimerRegistration::new(
+                connection_id,
+                delay,
+                timeout_event.clone(),
+                timeout_tx.clone(),
+            );
+            
+            match timer_handle.register_timer(registration).await {
+                Ok(handle) => {
+                    self.active_timers.insert(timeout_event, handle);
+                    Ok(())
+                }
+                Err(err) => Err(format!("Failed to register timer: {:?}", err)),
+            }
+        } else {
+            Err("Timer manager not properly initialized".to_string())
+        }
+    }
+
+    /// 取消指定类型的定时器
+    /// Cancel timer of specified type
+    pub async fn cancel_timer(&mut self, timeout_event: &TimeoutEvent) -> bool {
+        if let Some(handle) = self.active_timers.remove(timeout_event) {
+            match handle.cancel().await {
+                Ok(cancelled) => cancelled,
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// 取消所有活跃的定时器
+    /// Cancel all active timers
+    pub async fn cancel_all_timers(&mut self) {
+        for (_, handle) in self.active_timers.drain() {
+            let _ = handle.cancel().await;
+        }
+    }
+
+    /// 注册空闲超时定时器
+    /// Register idle timeout timer
+    pub async fn register_idle_timeout(&mut self, config: &crate::config::Config) -> Result<(), String> {
+        self.register_timer(TimeoutEvent::IdleTimeout, config.connection.idle_timeout).await
+    }
+
+    /// 注册路径验证超时定时器
+    /// Register path validation timeout timer
+    pub async fn register_path_validation_timeout(&mut self, delay: Duration) -> Result<(), String> {
+        self.register_timer(TimeoutEvent::PathValidationTimeout, delay).await
+    }
+
+    /// 注册连接超时定时器
+    /// Register connection timeout timer
+    pub async fn register_connection_timeout(&mut self, delay: Duration) -> Result<(), String> {
+        self.register_timer(TimeoutEvent::ConnectionTimeout, delay).await
+    }
+
+    /// 重置空闲超时定时器（在收到数据包时调用）
+    /// Reset idle timeout timer (called when receiving packets)
+    pub async fn reset_idle_timeout(&mut self, config: &crate::config::Config) -> Result<(), String> {
+        // 取消现有的空闲超时定时器
+        self.cancel_timer(&TimeoutEvent::IdleTimeout).await;
+        // 注册新的空闲超时定时器
+        self.register_idle_timeout(config).await
     }
 
     /// 获取连接开始时间
@@ -341,6 +486,23 @@ impl TimingManager {
 impl Default for TimingManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Clone for TimingManager {
+    fn clone(&self) -> Self {
+        // 注意：克隆不会复制全局定时器连接状态
+        // Note: cloning does not copy global timer connection state
+        Self {
+            start_time: self.start_time,
+            last_recv_time: self.last_recv_time,
+            fin_pending_eof: self.fin_pending_eof,
+            connection_id: None,
+            timer_handle: None,
+            timeout_rx: None,
+            timeout_tx: None,
+            active_timers: HashMap::new(),
+        }
     }
 }
 

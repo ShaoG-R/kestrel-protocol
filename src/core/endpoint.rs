@@ -241,9 +241,9 @@ impl<T: Transport> Endpoint<T> {
     /// connection-level and reliability-level timeouts in sequence and handles
     /// timeout events uniformly.
     pub async fn check_all_timeouts(&mut self, now: Instant) -> Result<()> {
-        // 1. 检查连接级超时
-        // Check connection-level timeouts
-        let connection_timeout_events = self.timing.check_connection_timeouts(&self.config, now);
+        // 1. 检查全局定时器事件
+        // Check global timer events
+        let connection_timeout_events = self.timing.check_timer_events().await;
         
         // 2. 检查可靠性超时，使用帧重构
         // Check reliability timeouts with frame reconstruction
@@ -265,10 +265,18 @@ impl<T: Transport> Endpoint<T> {
     /// the optimal wakeup time for the event loop. This ensures the event loop
     /// can handle various timeout events in a timely manner.
     pub fn calculate_next_wakeup_time(&self) -> Instant {
-        let is_syn_received = *self.lifecycle_manager.current_state() == ConnectionState::SynReceived;
         let rto_deadline = self.transport.reliability().next_reliability_timeout_deadline();
         
-        self.timing.calculate_next_wakeup(&self.config, is_syn_received, rto_deadline)
+        // 使用全局定时器时，我们使用更频繁的检查间隔
+        // When using global timer, we use more frequent check intervals
+        let timer_check_interval = Instant::now() + std::time::Duration::from_millis(50);
+        
+        // 返回RTO截止时间和定时器检查间隔中的较早者
+        // Return the earlier of RTO deadline and timer check interval
+        match rto_deadline {
+            Some(deadline) => deadline.min(timer_check_interval),
+            None => timer_check_interval,
+        }
     }
 
     /// 处理各种超时事件

@@ -20,6 +20,10 @@ mod tests {
         let (sender_tx, _sender_rx) = mpsc::channel(10);
         let (command_tx, _command_rx) = mpsc::channel(10);
 
+        // 启动测试用全局定时器任务
+        // Start global timer task for testing
+        let timer_handle = crate::timer::task::start_global_timer_task();
+
         let (endpoint, _stream_tx, _stream_rx) = Endpoint::<MockTransport>::new_client(
             config,
             remote_addr,
@@ -28,7 +32,8 @@ mod tests {
             sender_tx,
             command_tx,
             None,
-        ).unwrap();
+            timer_handle,
+        ).await.unwrap();
 
         // 验证初始状态
         assert_eq!(endpoint.local_cid(), local_cid);

@@ -80,6 +80,10 @@ impl<T: BindableTransport> TransportReliableUdpSocket<T> {
 
         let config = Arc::new(Config::default());
 
+        // 启动全局定时器任务
+        // Start global timer task
+        let timer_handle = crate::timer::task::start_global_timer_task();
+
         // 创建传输管理器
         // Create transport manager
         let transport_manager = super::transport::TransportManager::new(transport, send_tx);
@@ -98,6 +102,7 @@ impl<T: BindableTransport> TransportReliableUdpSocket<T> {
             config.clone(),
             accept_tx,
             command_tx.clone(),
+            timer_handle,
         );
 
         let mut actor = SocketEventLoop {

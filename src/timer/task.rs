@@ -1,0 +1,822 @@
+//! 全局定时器任务实现
+//! Global Timer Task Implementation
+//!
+//! 该模块实现了全局唯一的定时器后台任务，负责管理所有连接的定时器需求。
+//! 它使用时间轮算法来高效处理海量定时器，并通过消息传递与其他组件通信。
+//!
+//! This module implements the globally unique timer background task that manages
+//! all connection timer needs. It uses timing wheel algorithm for efficient
+//! handling of massive timers and communicates with other components via message passing.
+
+use crate::timer::{
+    event::{TimerEvent, TimerEventData, TimerEventId, ConnectionId},
+    wheel::{TimingWheel, TimerEntryId},
+};
+use crate::core::endpoint::timing::TimeoutEvent;
+use std::collections::HashMap;
+use std::time::Duration;
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::{Instant, interval, sleep_until},
+};
+use tracing::{debug, error, info, trace, warn};
+
+/// 定时器注册请求
+/// Timer registration request
+#[derive(Debug)]
+pub struct TimerRegistration {
+    /// 连接ID
+    /// Connection ID
+    pub connection_id: ConnectionId,
+    /// 延迟时间
+    /// Delay duration
+    pub delay: Duration,
+    /// 超时事件类型
+    /// Timeout event type
+    pub timeout_event: TimeoutEvent,
+    /// 回调通道，用于接收超时通知
+    /// Callback channel for receiving timeout notifications
+    pub callback_tx: mpsc::Sender<TimerEventData>,
+    /// 额外数据
+    /// Extra data
+    pub extra_data: Option<Vec<u8>>,
+}
+
+impl TimerRegistration {
+    /// 创建新的定时器注册请求
+    /// Create new timer registration request
+    pub fn new(
+        connection_id: ConnectionId,
+        delay: Duration,
+        timeout_event: TimeoutEvent,
+        callback_tx: mpsc::Sender<TimerEventData>,
+    ) -> Self {
+        Self {
+            connection_id,
+            delay,
+            timeout_event,
+            callback_tx,
+            extra_data: None,
+        }
+    }
+
+    /// 创建带额外数据的定时器注册请求
+    /// Create timer registration request with extra data
+    pub fn with_extra_data(
+        connection_id: ConnectionId,
+        delay: Duration,
+        timeout_event: TimeoutEvent,
+        callback_tx: mpsc::Sender<TimerEventData>,
+        extra_data: Vec<u8>,
+    ) -> Self {
+        Self {
+            connection_id,
+            delay,
+            timeout_event,
+            callback_tx,
+            extra_data: Some(extra_data),
+        }
+    }
+}
+
+/// 定时器句柄，用于取消定时器
+/// Timer handle for canceling timers
+#[derive(Debug, Clone)]
+pub struct TimerHandle {
+    /// 定时器条目ID
+    /// Timer entry ID
+    pub entry_id: TimerEntryId,
+    /// 向定时器任务发送取消请求的通道
+    /// Channel for sending cancel requests to timer task
+    cancel_tx: mpsc::Sender<TimerTaskCommand>,
+}
+
+impl TimerHandle {
+    /// 创建新的定时器句柄
+    /// Create new timer handle
+    pub fn new(entry_id: TimerEntryId, cancel_tx: mpsc::Sender<TimerTaskCommand>) -> Self {
+        Self {
+            entry_id,
+            cancel_tx,
+        }
+    }
+
+    /// 取消定时器
+    /// Cancel timer
+    pub async fn cancel(&self) -> Result<bool, TimerError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        
+        let command = TimerTaskCommand::CancelTimer {
+            entry_id: self.entry_id,
+            response_tx,
+        };
+
+        self.cancel_tx
+            .send(command)
+            .await
+            .map_err(|_| TimerError::TaskShutdown)?;
+
+        response_rx
+            .await
+            .map_err(|_| TimerError::TaskShutdown)
+    }
+}
+
+/// 定时器任务命令
+/// Timer task commands
+#[derive(Debug)]
+pub enum TimerTaskCommand {
+    /// 注册定时器
+    /// Register timer
+    RegisterTimer {
+        registration: TimerRegistration,
+        response_tx: oneshot::Sender<Result<TimerHandle, TimerError>>,
+    },
+    /// 取消定时器
+    /// Cancel timer
+    CancelTimer {
+        entry_id: TimerEntryId,
+        response_tx: oneshot::Sender<bool>,
+    },
+    /// 清除连接的所有定时器
+    /// Clear all timers for a connection
+    ClearConnectionTimers {
+        connection_id: ConnectionId,
+        response_tx: oneshot::Sender<usize>,
+    },
+    /// 获取统计信息
+    /// Get statistics
+    GetStats {
+        response_tx: oneshot::Sender<TimerTaskStats>,
+    },
+    /// 关闭定时器任务
+    /// Shutdown timer task
+    Shutdown,
+}
+
+/// 定时器错误类型
+/// Timer error types
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum TimerError {
+    #[error("Timer task has been shutdown")]
+    TaskShutdown,
+    #[error("Channel error: {0}")]
+    ChannelError(String),
+    #[error("Timer not found")]
+    TimerNotFound,
+}
+
+/// 定时器任务统计信息
+/// Timer task statistics
+#[derive(Debug, Clone)]
+pub struct TimerTaskStats {
+    /// 总定时器数
+    /// Total number of timers
+    pub total_timers: usize,
+    /// 活跃连接数
+    /// Number of active connections
+    pub active_connections: usize,
+    /// 已处理的定时器数
+    /// Number of processed timers
+    pub processed_timers: u64,
+    /// 已取消的定时器数
+    /// Number of cancelled timers
+    pub cancelled_timers: u64,
+    /// 时间轮统计信息
+    /// Timing wheel statistics
+    pub wheel_stats: crate::timer::wheel::TimingWheelStats,
+}
+
+impl std::fmt::Display for TimerTaskStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "TimerTaskStats {{ timers: {}, connections: {}, processed: {}, cancelled: {}, wheel: {} }}",
+            self.total_timers,
+            self.active_connections,
+            self.processed_timers,
+            self.cancelled_timers,
+            self.wheel_stats
+        )
+    }
+}
+
+/// 全局定时器任务
+/// Global timer task
+pub struct GlobalTimerTask {
+    /// 时间轮
+    /// Timing wheel
+    timing_wheel: TimingWheel,
+    /// 命令接收通道
+    /// Command receiver channel
+    command_rx: mpsc::Receiver<TimerTaskCommand>,
+    /// 命令发送通道（用于创建句柄）
+    /// Command sender channel (for creating handles)
+    command_tx: mpsc::Sender<TimerTaskCommand>,
+    /// 连接到定时器条目的映射
+    /// Connection to timer entries mapping
+    connection_timers: HashMap<ConnectionId, Vec<TimerEntryId>>,
+    /// 下一个分配的定时器事件ID
+    /// Next timer event ID to allocate
+    next_event_id: TimerEventId,
+    /// 统计信息
+    /// Statistics
+    stats: TimerTaskStats,
+}
+
+impl GlobalTimerTask {
+    /// 创建新的全局定时器任务
+    /// Create new global timer task
+    pub fn new(command_buffer_size: usize) -> (Self, mpsc::Sender<TimerTaskCommand>) {
+        let (command_tx, command_rx) = mpsc::channel(command_buffer_size);
+        // 使用更小的槽位持续时间以支持更精确的定时器
+        let timing_wheel = TimingWheel::new(512, Duration::from_millis(10));
+        
+        let wheel_stats = timing_wheel.stats();
+        let task = Self {
+            timing_wheel,
+            command_rx,
+            command_tx: command_tx.clone(),
+            connection_timers: HashMap::new(),
+            next_event_id: 1,
+            stats: TimerTaskStats {
+                total_timers: 0,
+                active_connections: 0,
+                processed_timers: 0,
+                cancelled_timers: 0,
+                wheel_stats,
+            },
+        };
+
+        (task, command_tx)
+    }
+
+    /// 创建默认配置的全局定时器任务
+    /// Create global timer task with default configuration
+    pub fn new_default() -> (Self, mpsc::Sender<TimerTaskCommand>) {
+        Self::new(1024)
+    }
+
+    /// 运行定时器任务主循环
+    /// Run timer task main loop
+    pub async fn run(mut self) {
+        info!("Global timer task started");
+        
+        // 设置定期推进时间轮的间隔（50ms）
+        // Set interval for periodically advancing timing wheel (50ms)
+        let mut advance_interval = interval(Duration::from_millis(50));
+        
+        loop {
+            // 计算下一次唤醒时间
+            // Calculate next wakeup time
+            let next_wakeup = self.timing_wheel
+                .next_expiry_time()
+                .unwrap_or_else(|| Instant::now() + Duration::from_secs(1));
+
+            tokio::select! {
+                // 处理命令
+                // Process commands
+                Some(command) = self.command_rx.recv() => {
+                    if !self.handle_command(command).await {
+                        break; // 收到关闭命令
+                    }
+                }
+                
+                // 定期推进时间轮
+                // Periodically advance timing wheel
+                _ = advance_interval.tick() => {
+                    self.advance_timing_wheel().await;
+                }
+                
+                // 基于最早定时器的精确唤醒
+                // Precise wakeup based on earliest timer
+                _ = sleep_until(next_wakeup) => {
+                    self.advance_timing_wheel().await;
+                }
+            }
+        }
+
+        info!("Global timer task shutdown completed");
+    }
+
+    /// 处理定时器任务命令
+    /// Handle timer task command
+    ///
+    /// # Returns
+    /// 返回false表示应该关闭任务
+    /// Returns false if task should shutdown
+    async fn handle_command(&mut self, command: TimerTaskCommand) -> bool {
+        match command {
+            TimerTaskCommand::RegisterTimer { registration, response_tx } => {
+                let result = self.register_timer(registration).await;
+                if let Err(err) = response_tx.send(result) {
+                    warn!(error = ?err, "Failed to send register timer response");
+                }
+            }
+            
+            TimerTaskCommand::CancelTimer { entry_id, response_tx } => {
+                let result = self.cancel_timer(entry_id);
+                if let Err(err) = response_tx.send(result) {
+                    warn!(error = ?err, "Failed to send cancel timer response");
+                }
+            }
+            
+            TimerTaskCommand::ClearConnectionTimers { connection_id, response_tx } => {
+                let count = self.clear_connection_timers(connection_id);
+                if let Err(err) = response_tx.send(count) {
+                    warn!(error = ?err, "Failed to send clear timers response");
+                }
+            }
+            
+            TimerTaskCommand::GetStats { response_tx } => {
+                self.update_stats();
+                if let Err(err) = response_tx.send(self.stats.clone()) {
+                    warn!(error = ?err, "Failed to send stats response");
+                }
+            }
+            
+            TimerTaskCommand::Shutdown => {
+                info!("Received shutdown command");
+                return false;
+            }
+        }
+        
+        true
+    }
+
+    /// 注册定时器
+    /// Register timer
+    async fn register_timer(&mut self, registration: TimerRegistration) -> Result<TimerHandle, TimerError> {
+        let event_id = self.next_event_id;
+        self.next_event_id += 1;
+
+        // 创建定时器事件数据
+        // Create timer event data
+        let event_data = if let Some(extra_data) = registration.extra_data {
+            TimerEventData::with_extra_data(
+                registration.connection_id,
+                registration.timeout_event.clone(),
+                extra_data,
+            )
+        } else {
+            TimerEventData::new(registration.connection_id, registration.timeout_event.clone())
+        };
+
+        let timeout_event_for_log = event_data.timeout_event.clone();
+
+        // 创建定时器事件
+        // Create timer event
+        let timer_event = TimerEvent::new(event_id, event_data, registration.callback_tx);
+
+        // 添加到时间轮
+        // Add to timing wheel
+        let entry_id = self.timing_wheel.add_timer(registration.delay, timer_event);
+
+        // 记录连接关联
+        // Record connection association
+        self.connection_timers
+            .entry(registration.connection_id)
+            .or_insert_with(Vec::new)
+            .push(entry_id);
+
+        // 创建定时器句柄
+        // Create timer handle
+        let handle = TimerHandle::new(entry_id, self.command_tx.clone());
+
+        trace!(
+            event_id,
+            entry_id,
+            connection_id = registration.connection_id,
+            delay_ms = registration.delay.as_millis(),
+            event_type = ?timeout_event_for_log,
+            "Timer registered successfully"
+        );
+
+        Ok(handle)
+    }
+
+    /// 取消定时器
+    /// Cancel timer
+    fn cancel_timer(&mut self, entry_id: TimerEntryId) -> bool {
+        let cancelled = self.timing_wheel.cancel_timer(entry_id);
+        
+        if cancelled {
+            // 从连接映射中移除
+            // Remove from connection mapping
+            for (_, entry_ids) in self.connection_timers.iter_mut() {
+                entry_ids.retain(|&id| id != entry_id);
+            }
+            
+            self.stats.cancelled_timers += 1;
+            trace!(entry_id, "Timer cancelled successfully");
+        }
+        
+        cancelled
+    }
+
+    /// 清除连接的所有定时器
+    /// Clear all timers for a connection
+    fn clear_connection_timers(&mut self, connection_id: ConnectionId) -> usize {
+        let mut count = 0;
+        
+        if let Some(entry_ids) = self.connection_timers.remove(&connection_id) {
+            for entry_id in &entry_ids {
+                if self.timing_wheel.cancel_timer(*entry_id) {
+                    count += 1;
+                    self.stats.cancelled_timers += 1;
+                }
+            }
+            
+            debug!(
+                connection_id,
+                count,
+                "Cleared all timers for connection"
+            );
+        }
+        
+        count
+    }
+
+    /// 推进时间轮并处理到期的定时器
+    /// Advance timing wheel and process expired timers
+    async fn advance_timing_wheel(&mut self) {
+        let now = Instant::now();
+        let expired_timers = self.timing_wheel.advance(now);
+
+        for entry in expired_timers {
+            // 从连接映射中移除
+            // Remove from connection mapping
+            for (_, entry_ids) in self.connection_timers.iter_mut() {
+                entry_ids.retain(|&id| id != entry.id);
+            }
+
+            // 触发定时器事件
+            // Trigger timer event
+            let entry_id = entry.id;
+            let connection_id = entry.event.data.connection_id;
+            let event_type = entry.event.data.timeout_event.clone();
+            
+            entry.event.trigger().await;
+            self.stats.processed_timers += 1;
+            
+            trace!(
+                entry_id,
+                connection_id,
+                event_type = ?event_type,
+                "Timer event processed"
+            );
+        }
+
+        // 清理空的连接映射
+        // Clean up empty connection mappings
+        self.connection_timers.retain(|_, entry_ids| !entry_ids.is_empty());
+    }
+
+    /// 更新统计信息
+    /// Update statistics
+    fn update_stats(&mut self) {
+        self.stats.total_timers = self.timing_wheel.timer_count();
+        self.stats.active_connections = self.connection_timers.len();
+        self.stats.wheel_stats = self.timing_wheel.stats();
+    }
+}
+
+/// 全局定时器任务的句柄，用于启动和管理定时器任务
+/// Handle for global timer task, used to start and manage timer task
+#[derive(Clone)]
+pub struct GlobalTimerTaskHandle {
+    /// 命令发送通道
+    /// Command sender channel
+    command_tx: mpsc::Sender<TimerTaskCommand>,
+}
+
+impl GlobalTimerTaskHandle {
+    /// 创建新的任务句柄
+    /// Create new task handle
+    pub fn new(command_tx: mpsc::Sender<TimerTaskCommand>) -> Self {
+        Self { command_tx }
+    }
+
+    /// 注册定时器
+    /// Register timer
+    pub async fn register_timer(
+        &self,
+        registration: TimerRegistration,
+    ) -> Result<TimerHandle, TimerError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        
+        let command = TimerTaskCommand::RegisterTimer {
+            registration,
+            response_tx,
+        };
+
+        self.command_tx
+            .send(command)
+            .await
+            .map_err(|_| TimerError::TaskShutdown)?;
+
+        response_rx
+            .await
+            .map_err(|_| TimerError::TaskShutdown)?
+    }
+
+    /// 清除连接的所有定时器
+    /// Clear all timers for a connection
+    pub async fn clear_connection_timers(&self, connection_id: ConnectionId) -> Result<usize, TimerError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        
+        let command = TimerTaskCommand::ClearConnectionTimers {
+            connection_id,
+            response_tx,
+        };
+
+        self.command_tx
+            .send(command)
+            .await
+            .map_err(|_| TimerError::TaskShutdown)?;
+
+        response_rx
+            .await
+            .map_err(|_| TimerError::TaskShutdown)
+    }
+
+    /// 获取统计信息
+    /// Get statistics
+    pub async fn get_stats(&self) -> Result<TimerTaskStats, TimerError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        
+        let command = TimerTaskCommand::GetStats { response_tx };
+
+        self.command_tx
+            .send(command)
+            .await
+            .map_err(|_| TimerError::TaskShutdown)?;
+
+        response_rx
+            .await
+            .map_err(|_| TimerError::TaskShutdown)
+    }
+
+    /// 关闭定时器任务
+    /// Shutdown timer task
+    pub async fn shutdown(&self) -> Result<(), TimerError> {
+        self.command_tx
+            .send(TimerTaskCommand::Shutdown)
+            .await
+            .map_err(|_| TimerError::TaskShutdown)
+    }
+}
+
+/// 启动全局定时器任务
+/// Start global timer task
+pub fn start_global_timer_task() -> GlobalTimerTaskHandle {
+    let (task, command_tx) = GlobalTimerTask::new_default();
+    let handle = GlobalTimerTaskHandle::new(command_tx.clone());
+    
+    tokio::spawn(async move {
+        task.run().await;
+    });
+    
+    info!("Global timer task started");
+    handle
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::endpoint::timing::TimeoutEvent;
+    use tokio::time::{sleep, Duration};
+
+    #[tokio::test]
+    async fn test_timer_task_creation() {
+        let (task, _command_tx) = GlobalTimerTask::new_default();
+        assert_eq!(task.timing_wheel.timer_count(), 0);
+        assert!(task.connection_timers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_register_and_cancel_timer() {
+        let handle = start_global_timer_task();
+        let (callback_tx, mut callback_rx) = mpsc::channel(1);
+        
+        // 注册定时器
+        let registration = TimerRegistration::new(
+            1,
+            Duration::from_millis(100),
+            TimeoutEvent::IdleTimeout,
+            callback_tx,
+        );
+        
+        let timer_handle = handle.register_timer(registration).await.unwrap();
+        
+        // 取消定时器
+        let cancelled = timer_handle.cancel().await.unwrap();
+        assert!(cancelled);
+        
+        // 等待一段时间，确保定时器不会触发
+        sleep(Duration::from_millis(200)).await;
+        assert!(callback_rx.try_recv().is_err());
+        
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_timer_expiration() {
+        let handle = start_global_timer_task();
+        let (callback_tx, mut callback_rx) = mpsc::channel(1);
+        
+        // 注册定时器
+        let registration = TimerRegistration::new(
+            1,
+            Duration::from_millis(100),
+            TimeoutEvent::IdleTimeout,
+            callback_tx,
+        );
+        
+        handle.register_timer(registration).await.unwrap();
+        
+        // 等待定时器到期
+        let event_data = callback_rx.recv().await.unwrap();
+        assert_eq!(event_data.connection_id, 1);
+        assert_eq!(event_data.timeout_event, TimeoutEvent::IdleTimeout);
+        
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_clear_connection_timers() {
+        let handle = start_global_timer_task();
+        let (callback_tx, _callback_rx) = mpsc::channel(1);
+        
+        // 为同一个连接注册多个定时器
+        for i in 0..3 {
+            let registration = TimerRegistration::new(
+                1,
+                Duration::from_millis(1000 + i * 100),
+                TimeoutEvent::IdleTimeout,
+                callback_tx.clone(),
+            );
+            handle.register_timer(registration).await.unwrap();
+        }
+        
+        // 清除连接的所有定时器
+        let cleared = handle.clear_connection_timers(1).await.unwrap();
+        assert_eq!(cleared, 3);
+        
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_timer_stats() {
+        let handle = start_global_timer_task();
+        let (callback_tx, _callback_rx) = mpsc::channel(1);
+        
+        // 注册几个定时器
+        for i in 1..=3 {
+            let registration = TimerRegistration::new(
+                i,
+                Duration::from_secs(10),
+                TimeoutEvent::IdleTimeout,
+                callback_tx.clone(),
+            );
+            handle.register_timer(registration).await.unwrap();
+        }
+        
+        // 获取统计信息
+        let stats = handle.get_stats().await.unwrap();
+        assert_eq!(stats.total_timers, 3);
+        assert_eq!(stats.active_connections, 3);
+        
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_multiple_timer_types() {
+        let handle = start_global_timer_task();
+        let (callback_tx, mut callback_rx) = mpsc::channel(10);
+        
+        // 注册不同类型的定时器，使用更短的延迟
+        let timeout_types = vec![
+            TimeoutEvent::IdleTimeout,
+            TimeoutEvent::RetransmissionTimeout,
+            TimeoutEvent::PathValidationTimeout,
+            TimeoutEvent::ConnectionTimeout,
+        ];
+        
+        for (i, timeout_type) in timeout_types.iter().enumerate() {
+            let registration = TimerRegistration::new(
+                i as u32 + 1,
+                Duration::from_millis(120 + i as u64 * 50), // 120ms, 170ms, 220ms, 270ms - 跨越多个槽位
+                timeout_type.clone(),
+                callback_tx.clone(),
+            );
+            handle.register_timer(registration).await.unwrap();
+        }
+        
+        // 等待所有定时器到期
+        let mut received_events = Vec::new();
+        for i in 0..timeout_types.len() {
+            match tokio::time::timeout(
+                Duration::from_millis(500), // 增加超时时间以适应更长的定时器延迟
+                callback_rx.recv()
+            ).await {
+                Ok(Some(event_data)) => {
+                    received_events.push(event_data.timeout_event);
+                }
+                Ok(None) => {
+                    panic!("Channel closed unexpectedly after {} events", i);
+                }
+                Err(_) => {
+                    panic!("Timeout waiting for event {} after receiving {} events", i, received_events.len());
+                }
+            }
+        }
+        
+        // 验证所有类型的定时器都被触发了
+        for timeout_type in &timeout_types {
+            assert!(received_events.contains(timeout_type), 
+                "Missing timeout event: {:?}, received: {:?}", timeout_type, received_events);
+        }
+        
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_timer_replacement() {
+        let handle = start_global_timer_task();
+        let (callback_tx, mut callback_rx) = mpsc::channel(10);
+        
+        // 注册一个长时间的定时器
+        let registration1 = TimerRegistration::new(
+            1,
+            Duration::from_secs(5),
+            TimeoutEvent::IdleTimeout,
+            callback_tx.clone(),
+        );
+        handle.register_timer(registration1).await.unwrap();
+        
+        // 立即注册一个短时间的同类型定时器（应该替换前一个）
+        let registration2 = TimerRegistration::new(
+            1,
+            Duration::from_millis(100),
+            TimeoutEvent::IdleTimeout,
+            callback_tx.clone(),
+        );
+        handle.register_timer(registration2).await.unwrap();
+        
+        // 等待短时间定时器到期
+        let event_data = tokio::time::timeout(
+            Duration::from_millis(200),
+            callback_rx.recv()
+        ).await.unwrap().unwrap();
+        
+        assert_eq!(event_data.connection_id, 1);
+        assert_eq!(event_data.timeout_event, TimeoutEvent::IdleTimeout);
+        
+        // 确保没有更多事件（长时间定时器应该被取消了）
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            callback_rx.recv()
+        ).await;
+        assert!(result.is_err());
+        
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_timer_performance() {
+        let handle = start_global_timer_task();
+        let (callback_tx, _callback_rx) = mpsc::channel(1000);
+        
+        // 注册大量定时器
+        let timer_count = 1000;
+        let start_time = tokio::time::Instant::now();
+        
+        for i in 0..timer_count {
+            let registration = TimerRegistration::new(
+                i,
+                Duration::from_secs(60), // 长时间定时器
+                TimeoutEvent::IdleTimeout,
+                callback_tx.clone(),
+            );
+            handle.register_timer(registration).await.unwrap();
+        }
+        
+        let registration_duration = start_time.elapsed();
+        println!("注册{}个定时器耗时: {:?}", timer_count, registration_duration);
+        
+        // 获取统计信息
+        let stats = handle.get_stats().await.unwrap();
+        assert_eq!(stats.total_timers, timer_count as usize);
+        
+        // 批量取消定时器
+        let start_time = tokio::time::Instant::now();
+        for i in 0..timer_count {
+            handle.clear_connection_timers(i).await.unwrap();
+        }
+        let cancellation_duration = start_time.elapsed();
+        println!("取消{}个定时器耗时: {:?}", timer_count, cancellation_duration);
+        
+        handle.shutdown().await.unwrap();
+    }
+}

@@ -19,7 +19,7 @@ async fn test_1rtt_handshake_with_server_data() {
 
     // 1. Setup a server harness. It will be in `SynReceived` state,
     //    waiting for the application to "accept" the connection.
-    let mut harness = setup_server_harness();
+    let mut harness = setup_server_harness().await;
     let server_cid = harness.server_cid;
     let client_addr = harness.client_addr;
     let client_cid = 12345; // A random CID chosen by the "client".
@@ -104,7 +104,7 @@ async fn test_0rtt_handshake_with_client_data() {
     // immediately with its initial SYN packet.
 
     // 1. Setup a server harness.
-    let mut harness = setup_server_harness();
+    let mut harness = setup_server_harness().await;
     let client_addr = harness.client_addr;
     let client_cid = 12345;
 

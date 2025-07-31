@@ -158,6 +158,10 @@ async fn test_core_multiple_clients_concurrently() {
         server_endpoint_senders.insert(client_addr, tx_to_endpoint_network.clone());
         let (sender_task_tx, server_sender_task_rx) = mpsc::channel(128);
         let (server_command_tx, _) = mpsc::channel(128);
+        // 启动测试用全局定时器任务
+        // Start global timer task for testing
+        let timer_handle = crate::timer::task::start_global_timer_task();
+
         let (server_endpoint, tx_to_server_user, rx_from_server_user) = Endpoint::new_server(
             Config::default(),
             client_addr,
@@ -166,7 +170,8 @@ async fn test_core_multiple_clients_concurrently() {
             rx_from_demux,
             sender_task_tx.clone(),
             server_command_tx,
-        ).unwrap();
+            timer_handle,
+        ).await.unwrap();
         server_handles.push((rx_from_server_user, tx_to_server_user.clone()));
 
         spawn_endpoint(
@@ -182,6 +187,10 @@ async fn test_core_multiple_clients_concurrently() {
             let (sender_task_tx, client_sender_task_rx) = mpsc::channel(128);
             let (client_command_tx, _) = mpsc::channel(128);
 
+            // 启动测试用全局定时器任务
+            // Start global timer task for testing
+            let timer_handle = crate::timer::task::start_global_timer_task();
+
             let (mut endpoint, tx_to_client_user, mut rx_from_client_user) = Endpoint::new_client(
                 Config::default(),
                 server_addr,
@@ -190,7 +199,8 @@ async fn test_core_multiple_clients_concurrently() {
                 sender_task_tx,
                 client_command_tx,
                 None,
-            ).unwrap();
+                timer_handle,
+            ).await.unwrap();
             endpoint.set_peer_cid(server_cid);
             spawn_endpoint(
                 endpoint,

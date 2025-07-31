@@ -12,7 +12,7 @@ use tokio::{sync::oneshot, time::timeout};
 #[tokio::test]
 async fn test_shutdown_when_established() {
     // Standard case: closing an established connection should send a FIN.
-    let (client, mut server) = setup_client_server_pair();
+    let (client, mut server) = setup_client_server_pair().await;
 
     // 1. Establish connection by having server send a SYN-ACK trigger
     client
@@ -65,6 +65,10 @@ async fn test_shutdown_when_connecting() {
         while sender_task_rx.recv().await.is_some() {}
     });
 
+    // 启动测试用全局定时器任务
+    // Start global timer task for testing
+    let timer_handle = crate::timer::task::start_global_timer_task();
+
     let (mut client_endpoint, tx_to_stream, _) =
         crate::core::endpoint::Endpoint::<MockTransport>::new_client(
             Default::default(),
@@ -74,7 +78,8 @@ async fn test_shutdown_when_connecting() {
             sender_task_tx,                   // real tx
             tokio::sync::mpsc::channel(32).0, // dummy tx
             None,
-        ).unwrap();
+            timer_handle,
+        ).await.unwrap();
 
     // Send a close command to the connecting client.
     tx_to_stream.send(StreamCommand::Close).await.unwrap();
@@ -97,7 +102,7 @@ async fn test_shutdown_when_connecting() {
 async fn test_shutdown_when_syn_received() {
     crate::core::test_utils::init_tracing();
     // Test closing a server connection before the app `accepts` it (i.e., sends data).
-    let mut harness = setup_server_harness();
+    let mut harness = setup_server_harness().await;
 
     // 1. Manually send a SYN to the server to put it in `SynReceived` state.
     let syn_frame = Frame::new_syn(
@@ -138,7 +143,7 @@ async fn test_shutdown_when_syn_received() {
 
 #[tokio::test]
 async fn test_shutdown_when_validating_path() {
-    let (client, mut server) = setup_client_server_pair();
+    let (client, mut server) = setup_client_server_pair().await;
 
     // 1. Establish connection
     client
@@ -199,7 +204,7 @@ async fn test_shutdown_when_validating_path() {
 async fn test_simultaneous_close() {
     // Both client and server initiate shutdown at the same time.
     // They should both go through Closing -> ClosingWait -> Closed.
-    let (mut client, mut server) = setup_client_server_pair();
+    let (mut client, mut server) = setup_client_server_pair().await;
 
     // 1. Establish connection
     client
@@ -261,7 +266,7 @@ async fn test_simultaneous_close() {
 async fn test_shutdown_from_fin_wait() {
     crate::core::test_utils::init_tracing();
     // Client closes, server enters FinWait, then server closes.
-    let (mut client, mut server) = setup_client_server_pair();
+    let (mut client, mut server) = setup_client_server_pair().await;
 
     // 1. Establish connection
     client
@@ -337,7 +342,7 @@ async fn test_data_is_fully_read_before_shutdown_eof() {
     // This test targets the race condition where a PUSH and FIN arrive in the
     // same batch. The receiver must process the PUSH data fully before the
     // user stream receives the EOF signal from the FIN.
-    let (client, mut server) = setup_client_server_pair();
+    let (client, mut server) = setup_client_server_pair().await;
 
     // 1. Establish connection (can be done implicitly by sending data)
     let test_data = Bytes::from("important data that must not be lost");
@@ -389,7 +394,7 @@ async fn test_retransmission_after_fin_is_ignored() {
     use crate::packet::{command::Command, header::ShortHeader};
 
     // 1. Setup a server harness, which allows us to manually inject frames.
-    let mut harness = setup_server_harness();
+    let mut harness = setup_server_harness().await;
 
     // 2. The server starts in `SynReceived`. Trigger a transition to `Established`
     // by having the "user" send data, which causes a SYN-ACK to be sent.

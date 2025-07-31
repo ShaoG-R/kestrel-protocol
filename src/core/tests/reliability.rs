@@ -19,7 +19,7 @@ use std::{
 
 #[tokio::test]
 async fn test_data_flow_with_acks() {
-    let (mut client, mut server) = setup_client_server_pair();
+    let (mut client, mut server) = setup_client_server_pair().await;
 
     // --- Establish Connection ---
     server
@@ -104,7 +104,7 @@ async fn test_endpoint_rto_retransmission() {
             client_tx_filter,
             server_tx_filter,
             None,
-        );
+        ).await;
 
     // Establish connection.
     server
@@ -168,7 +168,7 @@ async fn test_endpoint_rto_retransmission() {
 
 #[tokio::test]
 async fn test_server_0rtt_sends_data_correctly() {
-    let (mut client, server) = setup_client_server_pair();
+    let (mut client, server) = setup_client_server_pair().await;
 
     // 1. Server immediately sends two batches of data.
     // The first one triggers the SYN-ACK + PUSH (0-RTT) path.
@@ -233,7 +233,7 @@ async fn test_endpoint_fast_retransmission() {
         client_tx_filter,
         server_tx_filter,
         None,
-    );
+    ).await;
 
     // Establish connection.
     server

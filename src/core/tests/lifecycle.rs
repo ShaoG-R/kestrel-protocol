@@ -13,7 +13,7 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn test_connect_and_send_data() {
-    let (mut client, mut server) = setup_client_server_pair();
+    let (mut client, mut server) = setup_client_server_pair().await;
 
     // --- Establish Connection ---
     // The client sends SYN automatically. We trigger the server to send SYN-ACK
@@ -72,7 +72,7 @@ async fn test_connect_and_send_data() {
 #[tokio::test]
 async fn test_connection_migration() {
     init_tracing();
-    let mut harness = setup_server_harness();
+    let mut harness = setup_server_harness().await;
     let old_addr = harness.client_addr;
     let new_addr: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
 

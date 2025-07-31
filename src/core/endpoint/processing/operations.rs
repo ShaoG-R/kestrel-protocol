@@ -218,7 +218,7 @@ mod tests {
     };
     use tokio::{sync::mpsc, time::Instant};
 
-    fn create_test_endpoint() -> Endpoint<MockTransport> {
+    async fn create_test_endpoint() -> Endpoint<MockTransport> {
         let config = Config::default();
         let remote_addr = "127.0.0.1:8081".parse().unwrap();
         let local_cid = 1;
@@ -244,6 +244,10 @@ mod tests {
             }
         });
         
+        // 启动测试用全局定时器任务
+        // Start global timer task for testing
+        let timer_handle = crate::timer::task::start_global_timer_task();
+
         // 使用正确的构造函数创建 Endpoint
         let (endpoint, _stream_tx, _stream_rx) = Endpoint::new_client(
             config,
@@ -253,14 +257,15 @@ mod tests {
             sender_tx,
             command_tx,
             None, // 无初始数据
-        ).unwrap();
+            timer_handle,
+        ).await.unwrap();
             
         endpoint
     }
 
     #[tokio::test]
     async fn test_endpoint_operations_basic_info() {
-        let endpoint = create_test_endpoint();
+        let endpoint = create_test_endpoint().await;
         
         // 测试基础信息获取
         assert_eq!(endpoint.local_cid(), 1);
@@ -269,7 +274,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_endpoint_operations_state_management() {
-        let mut endpoint = create_test_endpoint();
+        let mut endpoint = create_test_endpoint().await;
         
         // 测试当前状态
         let _initial_state = endpoint.current_state();
@@ -283,7 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_endpoint_operations_reliability_layer() {
-        let endpoint = create_test_endpoint();
+        let endpoint = create_test_endpoint().await;
         
         // 测试可靠性层访问
         let _reliability = endpoint.reliability();
@@ -292,7 +297,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_processor_operations_ack_processing() {
-        let mut endpoint = create_test_endpoint();
+        let mut endpoint = create_test_endpoint().await;
         
         // 测试 ACK 处理
         let result = endpoint.process_ack_and_get_retx_frames(
@@ -309,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_processor_operations_fin_handling() {
-        let mut endpoint = create_test_endpoint();
+        let mut endpoint = create_test_endpoint().await;
         
         // 测试 FIN 处理
         let result = endpoint.receive_fin_and_ack(10).await;

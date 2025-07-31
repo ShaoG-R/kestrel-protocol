@@ -149,6 +149,11 @@ pub enum Error {
     #[error("Internal channel is broken")]
     ChannelClosed,
 
+    /// Timer operation failed.
+    /// 定时器操作失败。
+    #[error("Timer error: {0}")]
+    TimerError(String),
+
     /// The provided message is larger than the configured `max_payload_size`.
     /// 提供的消息大于配置的 `max_payload_size`。
     #[error("the message is too large to be sent")]
@@ -173,6 +178,7 @@ impl From<Error> for std::io::Error {
             Error::InvalidFrame(_) => ErrorKind::InvalidData.into(),
             Error::FrameTypeMismatch { .. } => ErrorKind::InvalidData.into(),
             Error::ChannelClosed => ErrorKind::BrokenPipe.into(),
+            Error::TimerError(_) => ErrorKind::Other.into(),
             Error::MessageTooLarge => ErrorKind::InvalidInput.into(),
             Error::NotConnected => ErrorKind::NotConnected.into(),
             Error::InitialDataTooLarge => ErrorKind::InvalidInput.into(),

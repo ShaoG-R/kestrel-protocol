@@ -161,7 +161,7 @@ pub fn spawn_endpoint(
 }
 
 /// Sets up a connected pair of (client, server) endpoints for integration testing.
-pub fn setup_client_server_pair() -> (EndpointHarness, EndpointHarness) {
+pub async fn setup_client_server_pair() -> (EndpointHarness, EndpointHarness) {
     let client_config = Config::default();
     let server_config = Config::default();
     let client_tx_filter = Arc::new(|_: &Frame| -> bool { true });
@@ -174,12 +174,12 @@ pub fn setup_client_server_pair() -> (EndpointHarness, EndpointHarness) {
         client_tx_filter,
         server_tx_filter,
         None,
-    );
+    ).await;
     (client_harness, server_harness)
 }
 
 /// Sets up a connected pair of (client, server) endpoints with network simulation filters.
-pub fn setup_client_server_with_filter(
+pub async fn setup_client_server_with_filter(
     client_config: Config,
     server_config: Config,
     client_tx_filter: Arc<dyn Fn(&Frame) -> bool + Send + Sync>,
@@ -225,6 +225,10 @@ pub fn setup_client_server_with_filter(
         let (sender_task_tx, sender_task_rx) = mpsc::channel(128);
         let (command_tx, _) = mpsc::channel::<SocketActorCommand>(128);
 
+        // 启动测试用全局定时器任务
+        // Start global timer task for testing
+        let timer_handle = crate::timer::task::start_global_timer_task();
+
         let (mut endpoint, tx_to_user, rx_from_user) = Endpoint::new_client(
             client_config,
             server_addr,
@@ -233,7 +237,8 @@ pub fn setup_client_server_with_filter(
             sender_task_tx.clone(),
             command_tx.clone(),
             initial_data,
-        ).unwrap();
+            timer_handle,
+        ).await.unwrap();
         endpoint.set_peer_cid(peer_cid);
 
         spawn_endpoint(
@@ -257,6 +262,10 @@ pub fn setup_client_server_with_filter(
         let (sender_task_tx, sender_task_rx) = mpsc::channel(128);
         let (command_tx, _) = mpsc::channel::<SocketActorCommand>(128);
 
+        // 启动测试用全局定时器任务
+        // Start global timer task for testing
+        let timer_handle = crate::timer::task::start_global_timer_task();
+
         let (endpoint, tx_to_user, rx_from_user) = Endpoint::new_server(
             server_config,
             client_addr,
@@ -265,7 +274,8 @@ pub fn setup_client_server_with_filter(
             rx_from_socket,
             sender_task_tx.clone(),
             command_tx,
-        ).unwrap();
+            timer_handle,
+        ).await.unwrap();
 
         spawn_endpoint(
             endpoint,
@@ -316,7 +326,7 @@ pub async fn new_stream_pair_with_filter<F>(
         client_tx_filter,
         server_tx_filter,
         None,
-    );
+    ).await;
 
     let client_stream = Stream::new(
         client_harness.tx_to_endpoint_user,
@@ -341,7 +351,7 @@ pub async fn new_stream_pair_with_filter<F>(
 /// 这个函数不会自动发送数据到 `tx_to_endpoint_network` 和 `rx_from_endpoint_network` 通道。
 /// 需要手动发送数据到 `tx_to_endpoint_network` 和 `rx_from_endpoint_network` 通道。
 /// 
-pub fn setup_server_harness() -> ServerTestHarness {
+pub async fn setup_server_harness() -> ServerTestHarness {
     let _server_addr: SocketAddr = "127.0.0.1:5678".parse().unwrap();
     let client_addr: SocketAddr = "127.0.0.1:1234".parse().unwrap(); // "old" client addr
     let config = Config::default();
@@ -353,6 +363,10 @@ pub fn setup_server_harness() -> ServerTestHarness {
     let server_cid = 2;
     let client_cid = 1;
 
+    // 启动测试用全局定时器任务
+    // Start global timer task for testing
+    let timer_handle = crate::timer::task::start_global_timer_task();
+
     let (mut endpoint, tx_to_user, rx_from_user) = Endpoint::new_server(
         config,
         client_addr,
@@ -361,7 +375,8 @@ pub fn setup_server_harness() -> ServerTestHarness {
         rx_from_socket,
         sender_task_tx,
         command_tx,
-    ).unwrap();
+        timer_handle,
+    ).await.unwrap();
 
     // Unlike other test setups, we only spawn the main endpoint task.
     // The test itself will drive the network channels.

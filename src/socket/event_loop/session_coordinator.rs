@@ -21,6 +21,7 @@ use crate::{
     },
     error::{Error, Result},
     packet::frame::Frame,
+    timer::task::GlobalTimerTaskHandle,
 };
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc;
@@ -66,6 +67,9 @@ pub(crate) struct SocketSessionCoordinator<T: BindableTransport> {
     /// 发送命令到上层的通道
     /// Channel for sending commands to upper layer
     command_tx: mpsc::Sender<SocketActorCommand>,
+    /// 全局定时器任务句柄
+    /// Global timer task handle
+    timer_handle: GlobalTimerTaskHandle,
 }
 
 impl<T: BindableTransport> SocketSessionCoordinator<T> {
@@ -77,6 +81,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         config: Arc<Config>,
         accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
         command_tx: mpsc::Sender<SocketActorCommand>,
+        timer_handle: GlobalTimerTaskHandle,
     ) -> Self {
         Self {
             transport_manager,
@@ -84,7 +89,14 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
             config,
             accept_tx,
             command_tx,
+            timer_handle,
         }
+    }
+
+    /// 获取全局定时器任务句柄的引用
+    /// Gets a reference to the global timer task handle
+    pub(crate) fn timer_handle(&self) -> &GlobalTimerTaskHandle {
+        &self.timer_handle
     }
 
     /// 获取传输管理器的引用
@@ -198,7 +210,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
     /// This method is responsible for creating a server-side connection endpoint,
     /// configuring related channels and parameters, and returning the endpoint
     /// instance along with its associated stream handle.
-    fn create_server_endpoint(
+    async fn create_server_endpoint(
         &self,
         local_cid: u32,
         peer_cid: u32,
@@ -215,7 +227,8 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
             rx_from_socket,
             transport_tx,
             self.command_tx.clone(),
-        )?;
+            self.timer_handle.clone(),
+        ).await?;
 
         let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
 
@@ -344,7 +357,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         // 创建服务器端连接端点
         // Create server-side connection endpoint
         let (mut endpoint, tx_to_endpoint, stream) = 
-            self.create_server_endpoint(local_cid, peer_cid, remote_addr)?;
+            self.create_server_endpoint(local_cid, peer_cid, remote_addr).await?;
 
         // 处理0-RTT数据帧（如果有的话）
         // Handle 0-RTT data frames (if any)
@@ -423,7 +436,8 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
             transport_tx,
             self.command_tx.clone(),
             initial_data,
-        )?;
+            self.timer_handle.clone(),
+        ).await?;
 
         // 生成端点任务
         // Spawn endpoint task

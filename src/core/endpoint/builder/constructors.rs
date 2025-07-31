@@ -7,6 +7,7 @@ use crate::{
     core::reliability::ReliabilityLayer,
     socket::SocketActorCommand,
     error::Result,
+    timer::task::GlobalTimerTaskHandle,
 };
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -23,7 +24,7 @@ use crate::core::reliability::congestion::vegas::Vegas;
 
 impl<T: Transport> Endpoint<T> {
     /// Creates a new `Endpoint` for the client-side.
-    pub fn new_client(
+    pub async fn new_client(
         config: Config,
         remote_addr: SocketAddr,
         local_cid: u32,
@@ -31,6 +32,7 @@ impl<T: Transport> Endpoint<T> {
         sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
         initial_data: Option<Bytes>,
+        timer_handle: GlobalTimerTaskHandle,
     ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
@@ -48,9 +50,18 @@ impl<T: Transport> Endpoint<T> {
         );
         lifecycle_manager.initialize(local_cid, remote_addr)?;
 
+        let mut timing = TimingManager::new();
+        timing.initialize_global_timer(local_cid, timer_handle);
+        
+        // 注册初始的空闲超时定时器
+        // Register initial idle timeout timer
+        if let Err(e) = timing.register_idle_timeout(&config).await {
+            return Err(crate::error::Error::TimerError(e));
+        }
+
         let endpoint = Self {
             identity: ConnectionIdentity::new(local_cid, 0, remote_addr),
-            timing: TimingManager::new(),
+            timing,
             transport: TransportManager::new(reliability),
             lifecycle_manager,
             config,
@@ -67,7 +78,7 @@ impl<T: Transport> Endpoint<T> {
     }
 
     /// Creates a new `Endpoint` for the server-side.
-    pub fn new_server(
+    pub async fn new_server(
         config: Config,
         remote_addr: SocketAddr,
         local_cid: u32,
@@ -75,6 +86,7 @@ impl<T: Transport> Endpoint<T> {
         receiver: mpsc::Receiver<(crate::packet::frame::Frame, SocketAddr)>,
         sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
+        timer_handle: GlobalTimerTaskHandle,
     ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
@@ -88,9 +100,18 @@ impl<T: Transport> Endpoint<T> {
         );
         lifecycle_manager.initialize(local_cid, remote_addr)?;
 
+        let mut timing = TimingManager::new();
+        timing.initialize_global_timer(local_cid, timer_handle);
+        
+        // 注册初始的空闲超时定时器
+        // Register initial idle timeout timer
+        if let Err(e) = timing.register_idle_timeout(&config).await {
+            return Err(crate::error::Error::TimerError(e));
+        }
+
         let endpoint = Self {
             identity: ConnectionIdentity::new(local_cid, peer_cid, remote_addr),
-            timing: TimingManager::new(),
+            timing,
             transport: TransportManager::new(reliability),
             lifecycle_manager,
             config,
