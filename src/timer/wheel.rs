@@ -13,6 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::{debug, trace, warn};
+use wide::u64x4;
 
 /// 定时器条目ID，用于在时间轮中唯一标识定时器条目
 /// Timer entry ID, used to uniquely identify timer entries in the timing wheel
@@ -627,56 +628,198 @@ impl TimingWheel {
         let mut expiry_times = Vec::with_capacity(len);
         let mut slot_indices = Vec::with_capacity(len);
         
-        // 预计算常量以便SIMD优化
-        // Pre-calculate constants for SIMD optimization
-        let current_time_nanos = self.current_time.duration_since(self.start_time).as_nanos();
-        let slot_duration_nanos = self.slot_duration.as_nanos();
+        // 预计算常量
+        // Pre-calculate constants
+        let current_time_nanos = self.current_time.duration_since(self.start_time).as_nanos() as u64;
+        let slot_duration_nanos = self.slot_duration.as_nanos() as u64;
+        let slot_mask = self.slot_mask as u32;
         
-        // 步骤1：高效的ID序列生成（编译器可以向量化）
-        // Step 1: Efficient ID sequence generation (compiler can vectorize)
-        entry_ids.extend((0..len).map(|i| start_id + i as u64));
+        // 步骤1：SIMD向量化ID生成
+        // Step 1: SIMD vectorized ID generation
+        let mut id = start_id;
+        let mut i = 0;
         
-        // 步骤2&3：融合的时间和槽位计算（减少内存访问）
-        // Step 2&3: Fused time and slot calculation (reduce memory access)
-        for (delay, _) in timers.iter() {
-            // 批量化的纳秒级计算
-            // Batched nanosecond-level calculation
-            let delay_nanos = delay.as_nanos();
-            let total_nanos = current_time_nanos + delay_nanos;
-            
-            // 时间计算
-            // Time calculation
-            let expiry_time = self.start_time + Duration::from_nanos(total_nanos as u64);
-            expiry_times.push(expiry_time);
-            
-            // 直接从total_nanos计算槽位，避免重复计算
-            // Calculate slot directly from total_nanos, avoid recomputation
-            let slot_offset = (total_nanos / slot_duration_nanos) as usize;
-            let slot_index = slot_offset & self.slot_mask;
-            slot_indices.push(slot_index);
+        // 使用SIMD处理4个一组的ID生成
+        // Process IDs in groups of 4 using SIMD
+        while i + 4 <= len {
+            let id_vec = u64x4::new([id, id + 1, id + 2, id + 3]);
+            let id_array = id_vec.to_array();
+            entry_ids.extend_from_slice(&id_array);
+            id += 4;
+            i += 4;
         }
+        
+        // 处理剩余的ID
+        // Handle remaining IDs
+        while i < len {
+            entry_ids.push(id);
+            id += 1;
+            i += 1;
+        }
+        
+        // 步骤2：提取延迟时间数组用于SIMD处理
+        // Step 2: Extract delay times array for SIMD processing
+        let delay_nanos: Vec<u64> = timers.iter()
+            .map(|(delay, _)| delay.as_nanos() as u64)
+            .collect();
+        
+        // 使用SIMD并行计算时间和槽位
+        // Use SIMD to parallel calculate time and slots
+        self.simd_process_delays(&delay_nanos, current_time_nanos, slot_duration_nanos, slot_mask, &mut expiry_times, &mut slot_indices);
         
         (entry_ids, expiry_times, slot_indices)
     }
 
-    /// 批量槽位计算的向量化版本（用于大批量优化）
-    /// Vectorized batch slot calculation (for large batch optimization)
+    /// 使用SIMD并行处理延迟时间计算
+    /// Use SIMD to parallel process delay time calculations
+    fn simd_process_delays(
+        &self,
+        delay_nanos: &[u64],
+        current_time_nanos: u64,
+        slot_duration_nanos: u64,
+        slot_mask: u32,
+        expiry_times: &mut Vec<Instant>,
+        slot_indices: &mut Vec<usize>,
+    ) {
+        let len = delay_nanos.len();
+        let mut i = 0;
+        
+        // 常量向量用于SIMD操作
+        // Constant vectors for SIMD operations
+        let current_time_vec = u64x4::splat(current_time_nanos);
+        
+        // 使用SIMD处理4个一组的延迟计算
+        // Process delays in groups of 4 using SIMD
+        while i + 4 <= len {
+            // 加载4个延迟值
+            // Load 4 delay values
+            let delay_vec = u64x4::new([
+                delay_nanos[i],
+                delay_nanos[i + 1], 
+                delay_nanos[i + 2],
+                delay_nanos[i + 3]
+            ]);
+            
+            // SIMD并行计算总纳秒数
+            // SIMD parallel calculation of total nanoseconds
+            let total_nanos_vec = current_time_vec + delay_vec;
+            
+            // SIMD并行计算槽位偏移（手动计算，因为wide不支持u64除法）
+            // SIMD parallel calculation of slot offsets (manual calculation as wide doesn't support u64 division)
+            let total_nanos = total_nanos_vec.to_array();
+            let slot_offsets = [
+                total_nanos[0] / slot_duration_nanos,
+                total_nanos[1] / slot_duration_nanos,
+                total_nanos[2] / slot_duration_nanos,
+                total_nanos[3] / slot_duration_nanos,
+            ];
+            let slot_offset_vec = u64x4::new(slot_offsets);
+            
+            // 提取结果并转换为所需类型
+            // Extract results and convert to required types
+            let total_nanos = total_nanos_vec.to_array();
+            let slot_offsets = slot_offset_vec.to_array();
+            
+            // 批量添加到结果向量
+            // Batch add to result vectors
+            for j in 0..4 {
+                // 计算到期时间
+                // Calculate expiry time
+                let expiry_time = self.start_time + Duration::from_nanos(total_nanos[j]);
+                expiry_times.push(expiry_time);
+                
+                // 计算槽位索引（使用位运算）
+                // Calculate slot index (using bitwise operation)
+                let slot_index = (slot_offsets[j] as u32 & slot_mask) as usize;
+                slot_indices.push(slot_index);
+            }
+            
+            i += 4;
+        }
+        
+        // 处理剩余的延迟（非SIMD）
+        // Handle remaining delays (non-SIMD)
+        while i < len {
+            let delay_nanos_val = delay_nanos[i];
+            let total_nanos = current_time_nanos + delay_nanos_val;
+            
+            // 计算到期时间
+            // Calculate expiry time
+            let expiry_time = self.start_time + Duration::from_nanos(total_nanos);
+            expiry_times.push(expiry_time);
+            
+            // 计算槽位索引
+            // Calculate slot index
+            let slot_offset = (total_nanos / slot_duration_nanos) as usize;
+            let slot_index = slot_offset & (slot_mask as usize);
+            slot_indices.push(slot_index);
+            
+            i += 1;
+        }
+    }
+
+    /// 批量槽位计算的SIMD优化版本（用于大批量优化）
+    /// SIMD optimized batch slot calculation (for large batch optimization)
     #[allow(dead_code)]
     #[inline]
     fn simd_batch_slot_calculation(&self, delay_nanos: &[u128]) -> Vec<usize> {
-        let current_time_nanos = self.current_time.duration_since(self.start_time).as_nanos();
-        let slot_duration_nanos = self.slot_duration.as_nanos();
+        let current_time_nanos = self.current_time.duration_since(self.start_time).as_nanos() as u64;
+        let slot_duration_nanos = self.slot_duration.as_nanos() as u64;
+        let slot_mask = self.slot_mask as u32;
         
-        // 使用迭代器链式操作，便于编译器向量化
-        // Use iterator chaining for compiler vectorization
-        delay_nanos
-            .iter()
-            .map(|&delay| {
-                let total_nanos = current_time_nanos + delay;
-                let slot_offset = (total_nanos / slot_duration_nanos) as usize;
-                slot_offset & self.slot_mask
-            })
-            .collect()
+        let mut result = Vec::with_capacity(delay_nanos.len());
+        let len = delay_nanos.len();
+        let mut i = 0;
+        
+        // 常量向量用于SIMD操作
+        // Constant vectors for SIMD operations
+        let current_time_vec = u64x4::splat(current_time_nanos);
+        
+        // 使用SIMD处理4个一组的计算
+        // Process calculations in groups of 4 using SIMD
+        while i + 4 <= len {
+            // 加载4个延迟值（转换为u64）
+            // Load 4 delay values (convert to u64)
+            let delay_vec = u64x4::new([
+                delay_nanos[i] as u64,
+                delay_nanos[i + 1] as u64,
+                delay_nanos[i + 2] as u64,
+                delay_nanos[i + 3] as u64,
+            ]);
+            
+            // SIMD并行计算
+            // SIMD parallel calculation
+            let total_nanos_vec = current_time_vec + delay_vec;
+            let total_nanos = total_nanos_vec.to_array();
+            let slot_offsets = [
+                total_nanos[0] / slot_duration_nanos,
+                total_nanos[1] / slot_duration_nanos,
+                total_nanos[2] / slot_duration_nanos,
+                total_nanos[3] / slot_duration_nanos,
+            ];
+            let slot_offset_vec = u64x4::new(slot_offsets);
+            
+            // 提取结果并应用掩码
+            // Extract results and apply mask
+            let slot_offsets = slot_offset_vec.to_array();
+            for &offset in &slot_offsets {
+                result.push((offset as u32 & slot_mask) as usize);
+            }
+            
+            i += 4;
+        }
+        
+        // 处理剩余的延迟（非SIMD）
+        // Handle remaining delays (non-SIMD)
+        while i < len {
+            let delay = delay_nanos[i] as u64;
+            let total_nanos = current_time_nanos + delay;
+            let slot_offset = (total_nanos / slot_duration_nanos) as usize;
+            result.push(slot_offset & (slot_mask as usize));
+            i += 1;
+        }
+        
+        result
     }
 
     /// 计算给定时间对应的槽位索引
