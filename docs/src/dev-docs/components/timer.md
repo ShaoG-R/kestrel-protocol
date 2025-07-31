@@ -295,6 +295,14 @@ let dispatched_count = zero_copy_dispatcher.batch_dispatch_events(events);
 
 ### 🎯 极限性能指标
 
+
+> **测试环境:**
+> - CPU: AMD Ryzen 9 7950X
+> - 内存: DDR5 6200 C32 32GB * 2
+> - 操作系统: Windows 11
+> - 编译器: rustc 1.88.0
+> - 测试工具: cargo test
+
 - **峰值吞吐量**: **16,657,991 ops/sec**
 - **内存峰值**: **<30MB** (零拷贝+栈分配+对象池)
 - **CPU利用率**: **<1.5%** (单核直通模式)
