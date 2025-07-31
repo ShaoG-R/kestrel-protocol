@@ -27,9 +27,6 @@ pub struct TimerEventData {
     /// 超时事件类型
     /// Timeout event type
     pub timeout_event: TimeoutEvent,
-    /// 定时器创建时的额外数据
-    /// Additional data when timer was created
-    pub extra_data: Option<Vec<u8>>,
 }
 
 impl TimerEventData {
@@ -39,21 +36,6 @@ impl TimerEventData {
         Self {
             connection_id,
             timeout_event,
-            extra_data: None,
-        }
-    }
-
-    /// 创建带额外数据的定时器事件数据
-    /// Create timer event data with extra data
-    pub fn with_extra_data(
-        connection_id: ConnectionId,
-        timeout_event: TimeoutEvent,
-        extra_data: Vec<u8>,
-    ) -> Self {
-        Self {
-            connection_id,
-            timeout_event,
-            extra_data: Some(extra_data),
         }
     }
 }

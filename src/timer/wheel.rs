@@ -49,9 +49,12 @@ impl TimerEntry {
 /// Timing wheel implementation
 #[derive(Debug)]
 pub struct TimingWheel {
-    /// 时间轮的槽位数量
-    /// Number of slots in the timing wheel
+    /// 时间轮的槽位数量（必须是2的幂以支持位运算优化）
+    /// Number of slots in the timing wheel (must be power of 2 for bitwise optimization)
     slot_count: usize,
+    /// 槽位数量的掩码，用于快速模运算 (slot_count - 1)
+    /// Slot count mask for fast modulo operation (slot_count - 1)
+    slot_mask: usize,
     /// 每个槽位的时间间隔
     /// Time interval per slot
     slot_duration: Duration,
@@ -73,6 +76,9 @@ pub struct TimingWheel {
     /// 下一个分配的定时器条目ID
     /// Next timer entry ID to allocate
     next_entry_id: TimerEntryId,
+    /// 缓存的下次到期时间，避免频繁计算
+    /// Cached next expiry time to avoid frequent calculation
+    cached_next_expiry: Option<Instant>,
 }
 
 impl TimingWheel {
@@ -80,13 +86,17 @@ impl TimingWheel {
     /// Create new timing wheel
     ///
     /// # Arguments
-    /// * `slot_count` - 槽位数量，建议是2的幂次方以优化取模运算
+    /// * `slot_count` - 槽位数量，必须是2的幂次方以优化取模运算
     /// * `slot_duration` - 每个槽位的时间间隔
     ///
     /// # Arguments (English)
-    /// * `slot_count` - Number of slots, recommended to be power of 2 for optimized modulo
+    /// * `slot_count` - Number of slots, must be power of 2 for optimized modulo
     /// * `slot_duration` - Time interval per slot
     pub fn new(slot_count: usize, slot_duration: Duration) -> Self {
+        // 确保槽位数量是2的幂
+        // Ensure slot count is power of 2
+        assert!(slot_count.is_power_of_two(), "slot_count must be a power of 2");
+        
         let now = Instant::now();
         let mut slots = Vec::with_capacity(slot_count);
         for _ in 0..slot_count {
@@ -95,6 +105,7 @@ impl TimingWheel {
 
         Self {
             slot_count,
+            slot_mask: slot_count - 1,  // 用于快速模运算的掩码
             slot_duration,
             current_slot: 0,
             start_time: now,
@@ -102,6 +113,7 @@ impl TimingWheel {
             slots,
             timer_map: HashMap::new(),
             next_entry_id: 1,
+            cached_next_expiry: None,
         }
     }
 
@@ -141,6 +153,17 @@ impl TimingWheel {
         // 记录定时器位置以便快速删除
         // Record timer position for fast deletion
         self.timer_map.insert(entry_id, (slot_index, position_in_slot));
+
+        // 更新缓存的下次到期时间
+        // Update cached next expiry time
+        match self.cached_next_expiry {
+            None => self.cached_next_expiry = Some(expiry_time),
+            Some(current_earliest) => {
+                if expiry_time < current_earliest {
+                    self.cached_next_expiry = Some(expiry_time);
+                }
+            }
+        }
 
         trace!(
             entry_id,
@@ -186,6 +209,14 @@ impl TimingWheel {
                     }
                 }
 
+                // 如果取消的是缓存的最早定时器，清除缓存
+                // If cancelling the cached earliest timer, clear cache
+                if self.cached_next_expiry.is_some() {
+                    // 简单策略：如果取消任何定时器，都清除缓存（避免复杂的比较逻辑）
+                    // Simple strategy: clear cache if any timer is cancelled (avoids complex comparison logic)
+                    self.cached_next_expiry = None;
+                }
+                
                 trace!(entry_id, "Timer cancelled successfully");
                 true
             } else {
@@ -232,9 +263,9 @@ impl TimingWheel {
         );
 
         for _ in 0..max_advance {
-            // 推进到下一个槽位
-            // Advance to next slot
-            self.current_slot = (self.current_slot + 1) % self.slot_count;
+            // 推进到下一个槽位，使用位运算优化
+            // Advance to next slot, using bitwise optimization
+            self.current_slot = (self.current_slot + 1) & self.slot_mask;
             self.current_time += self.slot_duration;
 
             // 处理当前槽位的所有定时器
@@ -279,7 +310,10 @@ impl TimingWheel {
             }
         }
 
+        // 如果有定时器到期，清除缓存
+        // If any timers expired, clear cache
         if !expired_timers.is_empty() {
+            self.cached_next_expiry = None;
             debug!(
                 expired_count = expired_timers.len(),
                 "Timing wheel advance completed"
@@ -295,7 +329,15 @@ impl TimingWheel {
     /// # Returns
     /// 返回最早的定时器到期时间，如果没有定时器则返回None
     /// Returns earliest timer expiration time, None if no timers
-    pub fn next_expiry_time(&self) -> Option<Instant> {
+    pub fn next_expiry_time(&mut self) -> Option<Instant> {
+        // 如果有缓存的到期时间，直接返回
+        // If there's cached expiry time, return it directly
+        if let Some(cached) = self.cached_next_expiry {
+            return Some(cached);
+        }
+        
+        // 如果没有缓存，计算并缓存最早的定时器到期时间
+        // If no cache, calculate and cache earliest timer expiry time
         let mut earliest_time: Option<Instant> = None;
 
         // 遍历所有槽位寻找最早的定时器
@@ -313,6 +355,9 @@ impl TimingWheel {
             }
         }
 
+        // 缓存结果
+        // Cache the result
+        self.cached_next_expiry = earliest_time;
         earliest_time
     }
 
@@ -335,6 +380,7 @@ impl TimingWheel {
             slot.clear();
         }
         self.timer_map.clear();
+        self.cached_next_expiry = None;
         debug!("All timers cleared from timing wheel");
     }
 
@@ -343,7 +389,9 @@ impl TimingWheel {
     fn calculate_slot_index(&self, expiry_time: Instant) -> usize {
         let elapsed_since_start = expiry_time.saturating_duration_since(self.start_time);
         let slot_offset = (elapsed_since_start.as_nanos() / self.slot_duration.as_nanos()) as usize;
-        slot_offset % self.slot_count
+        // 使用位运算替代模运算，提高性能
+        // Use bitwise operation instead of modulo for better performance
+        slot_offset & self.slot_mask
     }
 
     /// 获取时间轮统计信息

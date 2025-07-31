@@ -116,7 +116,7 @@ impl TimerManager {
                 self.active_timers.insert(timeout_event, handle);
                 Ok(())
             }
-            Err(err) => Err(format!("Failed to register timer: {:?}", err)),
+            Err(err) => Err(format!("Failed to register timer: {err:?}")),
         }
     }
 

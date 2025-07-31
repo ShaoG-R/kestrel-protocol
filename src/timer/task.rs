@@ -37,9 +37,6 @@ pub struct TimerRegistration {
     /// 回调通道，用于接收超时通知
     /// Callback channel for receiving timeout notifications
     pub callback_tx: mpsc::Sender<TimerEventData>,
-    /// 额外数据
-    /// Extra data
-    pub extra_data: Option<Vec<u8>>,
 }
 
 impl TimerRegistration {
@@ -56,25 +53,6 @@ impl TimerRegistration {
             delay,
             timeout_event,
             callback_tx,
-            extra_data: None,
-        }
-    }
-
-    /// 创建带额外数据的定时器注册请求
-    /// Create timer registration request with extra data
-    pub fn with_extra_data(
-        connection_id: ConnectionId,
-        delay: Duration,
-        timeout_event: TimeoutEvent,
-        callback_tx: mpsc::Sender<TimerEventData>,
-        extra_data: Vec<u8>,
-    ) -> Self {
-        Self {
-            connection_id,
-            delay,
-            timeout_event,
-            callback_tx,
-            extra_data: Some(extra_data),
         }
     }
 }
@@ -216,6 +194,9 @@ pub struct GlobalTimerTask {
     /// 连接到定时器条目的映射
     /// Connection to timer entries mapping
     connection_timers: HashMap<ConnectionId, Vec<TimerEntryId>>,
+    /// 定时器条目到连接的反向映射，用于O(1)查找
+    /// Reverse mapping from timer entry to connection for O(1) lookup
+    entry_to_connection: HashMap<TimerEntryId, ConnectionId>,
     /// 下一个分配的定时器事件ID
     /// Next timer event ID to allocate
     next_event_id: TimerEventId,
@@ -238,6 +219,7 @@ impl GlobalTimerTask {
             command_rx,
             command_tx: command_tx.clone(),
             connection_timers: HashMap::new(),
+            entry_to_connection: HashMap::new(),
             next_event_id: 1,
             stats: TimerTaskStats {
                 total_timers: 0,
@@ -262,16 +244,16 @@ impl GlobalTimerTask {
     pub async fn run(mut self) {
         info!("Global timer task started");
         
-        // 设置定期推进时间轮的间隔（50ms）
-        // Set interval for periodically advancing timing wheel (50ms)
-        let mut advance_interval = interval(Duration::from_millis(50));
+        // 动态推进间隔：根据定时器数量调整，最小10ms，最大100ms
+        // Dynamic advance interval: adjust based on timer count, min 10ms, max 100ms
+        let mut advance_interval = self.calculate_advance_interval();
+        let mut next_interval_update = Instant::now() + Duration::from_secs(1);
         
         loop {
-            // 计算下一次唤醒时间
-            // Calculate next wakeup time
-            let next_wakeup = self.timing_wheel
-                .next_expiry_time()
-                .unwrap_or_else(|| Instant::now() + Duration::from_secs(1));
+            // 智能计算下一次唤醒时间
+            // Intelligently calculate next wakeup time
+            let next_wakeup = self.get_next_wakeup_time();
+            let now = Instant::now();
 
             tokio::select! {
                 // 处理命令
@@ -280,10 +262,16 @@ impl GlobalTimerTask {
                     if !self.handle_command(command).await {
                         break; // 收到关闭命令
                     }
+                    // 命令处理后可能影响定时器，重新计算间隔
+                    // After command processing, timers might change, recalculate interval
+                    if now >= next_interval_update {
+                        advance_interval = self.calculate_advance_interval();
+                        next_interval_update = now + Duration::from_secs(1);
+                    }
                 }
                 
-                // 定期推进时间轮
-                // Periodically advance timing wheel
+                // 动态间隔推进时间轮
+                // Dynamic interval advance timing wheel
                 _ = advance_interval.tick() => {
                     self.advance_timing_wheel().await;
                 }
@@ -292,6 +280,13 @@ impl GlobalTimerTask {
                 // Precise wakeup based on earliest timer
                 _ = sleep_until(next_wakeup) => {
                     self.advance_timing_wheel().await;
+                }
+                
+                // 定期更新推进间隔
+                // Periodically update advance interval
+                _ = sleep_until(next_interval_update) => {
+                    advance_interval = self.calculate_advance_interval();
+                    next_interval_update = now + Duration::from_secs(1);
                 }
             }
         }
@@ -352,15 +347,10 @@ impl GlobalTimerTask {
 
         // 创建定时器事件数据
         // Create timer event data
-        let event_data = if let Some(extra_data) = registration.extra_data {
-            TimerEventData::with_extra_data(
-                registration.connection_id,
-                registration.timeout_event.clone(),
-                extra_data,
-            )
-        } else {
-            TimerEventData::new(registration.connection_id, registration.timeout_event.clone())
-        };
+        let event_data = TimerEventData::new(
+            registration.connection_id, 
+            registration.timeout_event.clone()
+        );
 
         let timeout_event_for_log = event_data.timeout_event.clone();
 
@@ -376,8 +366,12 @@ impl GlobalTimerTask {
         // Record connection association
         self.connection_timers
             .entry(registration.connection_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(entry_id);
+        
+        // 记录反向映射
+        // Record reverse mapping
+        self.entry_to_connection.insert(entry_id, registration.connection_id);
 
         // 创建定时器句柄
         // Create timer handle
@@ -401,10 +395,17 @@ impl GlobalTimerTask {
         let cancelled = self.timing_wheel.cancel_timer(entry_id);
         
         if cancelled {
-            // 从连接映射中移除
-            // Remove from connection mapping
-            for (_, entry_ids) in self.connection_timers.iter_mut() {
-                entry_ids.retain(|&id| id != entry_id);
+            // 使用反向映射快速定位连接并移除定时器条目
+            // Use reverse mapping to quickly locate connection and remove timer entry
+            if let Some(connection_id) = self.entry_to_connection.remove(&entry_id) {
+                if let Some(entry_ids) = self.connection_timers.get_mut(&connection_id) {
+                    entry_ids.retain(|&id| id != entry_id);
+                    // 如果该连接没有更多定时器，移除连接条目
+                    // If connection has no more timers, remove connection entry
+                    if entry_ids.is_empty() {
+                        self.connection_timers.remove(&connection_id);
+                    }
+                }
             }
             
             self.stats.cancelled_timers += 1;
@@ -422,6 +423,9 @@ impl GlobalTimerTask {
         if let Some(entry_ids) = self.connection_timers.remove(&connection_id) {
             for entry_id in &entry_ids {
                 if self.timing_wheel.cancel_timer(*entry_id) {
+                    // 从反向映射中移除
+                    // Remove from reverse mapping
+                    self.entry_to_connection.remove(entry_id);
                     count += 1;
                     self.stats.cancelled_timers += 1;
                 }
@@ -444,18 +448,25 @@ impl GlobalTimerTask {
         let expired_timers = self.timing_wheel.advance(now);
 
         for entry in expired_timers {
-            // 从连接映射中移除
-            // Remove from connection mapping
-            for (_, entry_ids) in self.connection_timers.iter_mut() {
-                entry_ids.retain(|&id| id != entry.id);
-            }
-
-            // 触发定时器事件
-            // Trigger timer event
             let entry_id = entry.id;
             let connection_id = entry.event.data.connection_id;
             let event_type = entry.event.data.timeout_event.clone();
             
+            // 使用反向映射快速移除定时器条目
+            // Use reverse mapping to quickly remove timer entry
+            if let Some(conn_id) = self.entry_to_connection.remove(&entry_id) {
+                if let Some(entry_ids) = self.connection_timers.get_mut(&conn_id) {
+                    entry_ids.retain(|&id| id != entry_id);
+                    // 如果该连接没有更多定时器，移除连接条目
+                    // If connection has no more timers, remove connection entry
+                    if entry_ids.is_empty() {
+                        self.connection_timers.remove(&conn_id);
+                    }
+                }
+            }
+
+            // 触发定时器事件
+            // Trigger timer event
             entry.event.trigger().await;
             self.stats.processed_timers += 1;
             
@@ -466,10 +477,6 @@ impl GlobalTimerTask {
                 "Timer event processed"
             );
         }
-
-        // 清理空的连接映射
-        // Clean up empty connection mappings
-        self.connection_timers.retain(|_, entry_ids| !entry_ids.is_empty());
     }
 
     /// 更新统计信息
@@ -478,6 +485,54 @@ impl GlobalTimerTask {
         self.stats.total_timers = self.timing_wheel.timer_count();
         self.stats.active_connections = self.connection_timers.len();
         self.stats.wheel_stats = self.timing_wheel.stats();
+    }
+
+    /// 根据当前定时器数量计算动态推进间隔
+    /// Calculate dynamic advance interval based on current timer count
+    fn calculate_advance_interval(&self) -> tokio::time::Interval {
+        let timer_count = self.timing_wheel.timer_count();
+        
+        // 根据定时器数量动态调整间隔：
+        // - 少于100个定时器：100ms间隔
+        // - 100-1000个定时器：50ms间隔  
+        // - 1000-5000个定时器：20ms间隔
+        // - 超过5000个定时器：10ms间隔
+        // Dynamically adjust interval based on timer count:
+        // - Less than 100 timers: 100ms interval
+        // - 100-1000 timers: 50ms interval
+        // - 1000-5000 timers: 20ms interval
+        // - More than 5000 timers: 10ms interval
+        let interval_ms = if timer_count < 100 {
+            100
+        } else if timer_count < 1000 {
+            50
+        } else if timer_count < 5000 {
+            20
+        } else {
+            10
+        };
+        
+        interval(Duration::from_millis(interval_ms))
+    }
+
+    /// 智能获取下次唤醒时间
+    /// Intelligently get next wakeup time
+    fn get_next_wakeup_time(&mut self) -> Instant {
+        match self.timing_wheel.next_expiry_time() {
+            Some(expiry) => {
+                let now = Instant::now();
+                // 如果下次到期时间太近（小于5ms），使用当前时间+5ms避免忙等待
+                // If next expiry is too soon (less than 5ms), use current time + 5ms to avoid busy waiting
+                if expiry <= now + Duration::from_millis(5) {
+                    now + Duration::from_millis(5)
+                } else {
+                    expiry
+                }
+            }
+            // 如果没有定时器，使用较长的默认间隔
+            // If no timers, use longer default interval
+            None => Instant::now() + Duration::from_secs(1),
+        }
     }
 }
 
