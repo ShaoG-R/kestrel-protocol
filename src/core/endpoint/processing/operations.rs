@@ -154,10 +154,16 @@ impl<T: Transport> ProcessorOperations for Endpoint<T> {
             .into_iter()
             .map(|(start, end)| SackRange { start, end })
             .collect();
+        let peer_recv_window = self.transport.peer_recv_window() as u16;
         let frames_to_retx = self.transport.reliability_mut().handle_ack(
             recv_next_seq,
             sack_ranges_converted,
             now,
+            self.timing.start_time(),
+            self.identity.peer_cid(),
+            self.config.protocol_version,
+            self.identity.local_cid(),
+            peer_recv_window,
         );
         Ok(frames_to_retx)
     }

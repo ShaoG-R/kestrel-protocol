@@ -13,14 +13,15 @@ use crate::packet::frame::{Frame, ReliabilityMode};
 use std::collections::BTreeMap;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, trace};
+use super::sack_manager::{RetransmissionFrameInfo, FrameType};
 
-/// Represents a packet managed by simple retransmission.
-/// 表示由简单重传管理的数据包。
+/// Represents a packet managed by simple retransmission with frame reconstruction.
+/// 表示由简单重传管理的数据包，支持帧重构。
 #[derive(Debug, Clone)]
 pub struct SimpleInFlightPacket {
-    /// The frame to be retransmitted.
-    /// 要重传的帧。
-    pub frame: Frame,
+    /// Essential frame information for reconstruction.
+    /// 用于重构的基本帧信息。
+    pub frame_info: RetransmissionFrameInfo,
     /// When this packet was last sent.
     /// 此数据包最后发送的时间。
     pub last_sent_at: Instant,
@@ -65,7 +66,7 @@ impl SimpleRetransmissionManager {
             } = reliability_mode
             {
                 let packet = SimpleInFlightPacket {
-                    frame,
+                    frame_info: RetransmissionFrameInfo::from_frame(&frame),
                     last_sent_at: now,
                     retry_count: 0,
                     max_retries,
@@ -127,20 +128,36 @@ impl SimpleRetransmissionManager {
         acked_sequences
     }
 
-    /// Checks for packets that need retransmission and returns them with updated connection ID.
-    /// 检查需要重传的数据包并返回它们，同时更新连接ID。
-    pub fn check_for_retransmissions(&mut self, now: Instant, current_peer_cid: u32) -> Vec<Frame> {
+    /// Checks for packets that need retransmission and returns them with frame reconstruction.
+    /// 检查需要重传的数据包并返回它们，使用帧重构。
+    pub fn check_for_retransmissions(
+        &mut self, 
+        now: Instant, 
+        start_time: Instant,
+        current_peer_cid: u32,
+        protocol_version: u8,
+        local_cid: u32,
+        recv_next_sequence: u32,
+        recv_window_size: u16
+    ) -> Vec<Frame> {
         let mut frames_to_retx = Vec::new();
         let mut expired_sequences = Vec::new();
+        let current_timestamp = now.duration_since(start_time).as_millis() as u32;
 
         for (&seq, packet) in self.in_flight_simple.iter_mut() {
             if now.duration_since(packet.last_sent_at) >= packet.retry_interval {
                 if packet.retry_count < packet.max_retries {
-                    // Retransmit the packet with updated connection ID
-                    // 重传数据包，同时更新连接ID
-                    let mut frame_to_retx = packet.frame.clone();
-                    frame_to_retx.update_connection_id(current_peer_cid);
-                    frames_to_retx.push(frame_to_retx);
+                    // Reconstruct frame with fresh header information
+                    // 使用新鲜的header信息重构帧
+                    let reconstructed_frame = packet.frame_info.reconstruct_frame(
+                        current_peer_cid,
+                        protocol_version,
+                        local_cid,
+                        recv_next_sequence,
+                        recv_window_size,
+                        current_timestamp,
+                    );
+                    frames_to_retx.push(reconstructed_frame);
                     packet.last_sent_at = now;
                     packet.retry_count += 1;
 
@@ -148,9 +165,9 @@ impl SimpleRetransmissionManager {
                         seq,
                         retry_count = packet.retry_count,
                         max_retries = packet.max_retries,
-                        original_cid = packet.frame.destination_cid(),
+                        frame_type = ?packet.frame_info.frame_type,
                         updated_cid = current_peer_cid,
-                        "Simple retransmission triggered with updated connection ID"
+                        "Simple retransmission triggered with frame reconstruction"
                     );
                 } else {
                     // Max retries reached, give up
@@ -197,13 +214,10 @@ impl SimpleRetransmissionManager {
 
     /// Checks if a specific frame type is in flight.
     /// 检查特定帧类型是否在途。
-    pub fn has_frame_type_in_flight<F>(&self, predicate: F) -> bool
-    where
-        F: Fn(&Frame) -> bool,
-    {
+    pub fn has_frame_type_in_flight(&self, frame_type: FrameType) -> bool {
         self.in_flight_simple
             .values()
-            .any(|packet| predicate(&packet.frame))
+            .any(|packet| packet.frame_info.frame_type == frame_type)
     }
 
     /// Removes all packets from tracking (used for connection cleanup).
@@ -217,6 +231,20 @@ impl SimpleRetransmissionManager {
 mod tests {
     use super::*;
     use crate::packet::frame::Frame;
+    
+    // Helper function for testing simple retransmissions
+    fn test_check_retransmissions(manager: &mut SimpleRetransmissionManager, now: Instant, peer_cid: u32) -> Vec<Frame> {
+        let start_time = Instant::now(); // Use current time as start_time for tests
+        manager.check_for_retransmissions(
+            now,
+            start_time,
+            peer_cid,
+            1, // protocol_version
+            1, // local_cid
+            0, // recv_next_sequence
+            1024, // recv_window_size
+        )
+    }
 
     fn create_test_fin_frame(seq: u32) -> Frame {
         Frame::new_fin(1, seq, 0, 0, 0)
@@ -251,12 +279,12 @@ mod tests {
         assert_eq!(manager.in_flight_count(), 1);
 
         // No retransmission needed immediately
-        let frames = manager.check_for_retransmissions(now, 12345);
+        let frames = test_check_retransmissions(&mut manager, now, 12345);
         assert!(frames.is_empty());
 
         // After retry interval, should trigger retransmission
         let later = now + Duration::from_millis(600); // > 500ms retry interval
-        let frames = manager.check_for_retransmissions(later, 12345);
+        let frames = test_check_retransmissions(&mut manager, later, 12345);
         assert_eq!(frames.len(), 1);
 
         // Check that retry count was incremented
@@ -281,13 +309,13 @@ mod tests {
         let mut current_time = now;
         for i in 1..=5 {
             current_time = current_time + Duration::from_millis(600);
-            let frames = manager.check_for_retransmissions(current_time, 12345);
+            let frames = test_check_retransmissions(&mut manager, current_time, 12345);
             assert_eq!(frames.len(), 1, "Retry {}", i);
         }
 
         // After max retries, should give up
         current_time = current_time + Duration::from_millis(600);
-        let frames = manager.check_for_retransmissions(current_time, 12345);
+        let frames = test_check_retransmissions(&mut manager, current_time, 12345);
         assert!(frames.is_empty());
         assert_eq!(manager.in_flight_count(), 0);
     }

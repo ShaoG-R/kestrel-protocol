@@ -227,9 +227,15 @@ impl<T: Transport> Endpoint<T> {
         // Check connection-level timeouts
         let connection_timeout_events = self.timing.check_connection_timeouts(&self.config, now);
         
-        // 2. 检查可靠性超时
-        // Check reliability timeouts  
-        let reliability_timeout_result = self.transport.reliability_mut().check_reliability_timeouts(now, self.identity.peer_cid());
+        // 2. 检查可靠性超时，使用帧重构
+        // Check reliability timeouts with frame reconstruction
+        let reliability_timeout_result = self.transport.reliability_mut().check_reliability_timeouts(
+            now,
+            self.timing.start_time(),
+            self.identity.peer_cid(),
+            self.config.protocol_version,
+            self.identity.local_cid(),
+        );
         
         // 3. 处理超时事件
         // Handle timeout events

@@ -11,7 +11,7 @@ pub mod rtt;
 mod sack_manager;
 mod simple_retx_manager;
 
-use self::{sack_manager::SackManager, simple_retx_manager::SimpleRetransmissionManager};
+use self::{sack_manager::{SackManager, FrameType}, simple_retx_manager::SimpleRetransmissionManager};
 
 use crate::{
     config::Config,
@@ -109,12 +109,24 @@ impl RetransmissionManager {
         recv_next_seq: u32,
         sack_ranges: &[SackRange],
         now: Instant,
+        start_time: Instant,
+        current_peer_cid: u32,
+        protocol_version: u8,
+        local_cid: u32,
+        recv_window_size: u16,
     ) -> RetransmissionProcessResult {
         // Process SACK-managed packets
         // 处理SACK管理的数据包
-        let sack_result = self
-            .sack_manager
-            .process_ack(recv_next_seq, sack_ranges, now);
+        let sack_result = self.sack_manager.process_ack(
+            recv_next_seq,
+            sack_ranges,
+            now,
+            start_time,
+            current_peer_cid,
+            protocol_version,
+            local_cid,
+            recv_window_size,
+        );
 
         // Process simple retransmission packets
         // 处理简单重传数据包
@@ -148,26 +160,53 @@ impl RetransmissionManager {
         }
     }
 
-    /// Checks for retransmissions in both SACK and simple managers with updated connection ID.
-    /// 检查SACK和简单管理器中的重传，并更新连接ID。
-    pub fn check_for_retransmissions(&mut self, rto: Duration, now: Instant, current_peer_cid: u32) -> Vec<Frame> {
+    /// Checks for retransmissions in both SACK and simple managers with frame reconstruction.
+    /// 检查SACK和简单管理器中的重传，并重构帧。
+    pub fn check_for_retransmissions(
+        &mut self, 
+        rto: Duration, 
+        now: Instant, 
+        start_time: Instant,
+        current_peer_cid: u32,
+        protocol_version: u8,
+        local_cid: u32,
+        recv_next_sequence: u32,
+        recv_window_size: u16
+    ) -> Vec<Frame> {
         let mut frames_to_retx = Vec::new();
 
-        // Check SACK-based retransmissions
-        // 检查基于SACK的重传
-        let sack_retx = self.sack_manager.check_for_rto(rto, now, current_peer_cid);
+        // Check SACK-based retransmissions with frame reconstruction
+        // 检查基于SACK的重传并重构帧
+        let sack_retx = self.sack_manager.check_for_rto(
+            rto, 
+            now, 
+            start_time,
+            current_peer_cid,
+            protocol_version,
+            local_cid,
+            recv_next_sequence,
+            recv_window_size
+        );
         frames_to_retx.extend(sack_retx);
 
-        // Check simple retransmissions
-        // 检查简单重传
-        let simple_retx = self.simple_retx_manager.check_for_retransmissions(now, current_peer_cid);
+        // Check simple retransmissions with frame reconstruction
+        // 检查简单重传并使用帧重构
+        let simple_retx = self.simple_retx_manager.check_for_retransmissions(
+            now, 
+            start_time,
+            current_peer_cid,
+            protocol_version,
+            local_cid,
+            recv_next_sequence,
+            recv_window_size
+        );
         frames_to_retx.extend(simple_retx);
 
         if !frames_to_retx.is_empty() {
             debug!(
                 retx_count = frames_to_retx.len(),
                 current_peer_cid = current_peer_cid,
-                "Retransmissions triggered by unified manager with updated connection ID"
+                "Retransmissions triggered by unified manager with frame reconstruction"
             );
         }
 
@@ -218,7 +257,7 @@ impl RetransmissionManager {
         self.sack_manager.has_fin_in_flight()
             || self
                 .simple_retx_manager
-                .has_frame_type_in_flight(|frame| matches!(frame, Frame::Fin { .. }))
+                .has_frame_type_in_flight(FrameType::Fin)
     }
 
     /// Increments the ACK-eliciting packet counter (delegated to SACK manager).
@@ -276,19 +315,41 @@ impl RetransmissionManager {
         &mut self,
         rto: Duration,
         now: Instant,
+        start_time: Instant,
         current_peer_cid: u32,
+        protocol_version: u8,
+        local_cid: u32,
+        recv_next_sequence: u32,
+        recv_window_size: u16,
     ) -> (Vec<TimeoutEvent>, Vec<Frame>) {
         let mut events = Vec::new();
         let mut frames_to_retx = Vec::new();
 
-        // 检查SACK-based重传
-        // Check SACK-based retransmissions
-        let sack_retx = self.sack_manager.check_for_rto(rto, now, current_peer_cid);
+        // 检查SACK-based重传并重构帧
+        // Check SACK-based retransmissions with frame reconstruction
+        let sack_retx = self.sack_manager.check_for_rto(
+            rto, 
+            now, 
+            start_time,
+            current_peer_cid,
+            protocol_version,
+            local_cid,
+            recv_next_sequence,
+            recv_window_size
+        );
         frames_to_retx.extend(sack_retx);
 
-        // 检查简单重传
-        // Check simple retransmissions
-        let simple_retx = self.simple_retx_manager.check_for_retransmissions(now, current_peer_cid);
+        // 检查简单重传并使用帧重构
+        // Check simple retransmissions with frame reconstruction
+        let simple_retx = self.simple_retx_manager.check_for_retransmissions(
+            now, 
+            start_time,
+            current_peer_cid,
+            protocol_version,
+            local_cid,
+            recv_next_sequence,
+            recv_window_size
+        );
         frames_to_retx.extend(simple_retx);
 
         // 如果有需要重传的帧，添加重传超时事件
@@ -298,7 +359,7 @@ impl RetransmissionManager {
             debug!(
                 retx_count = frames_to_retx.len(),
                 current_peer_cid = current_peer_cid,
-                "Retransmission timeout detected by unified manager with updated connection ID"
+                "Retransmission timeout detected by unified manager with frame reconstruction"
             );
         }
 
@@ -326,6 +387,36 @@ mod tests {
     use super::*;
     use crate::packet::frame::Frame;
     use bytes::Bytes;
+    
+    // Helper function for testing retransmissions
+    fn test_check_retransmissions(manager: &mut RetransmissionManager, rto: Duration, now: Instant, peer_cid: u32) -> Vec<Frame> {
+        let start_time = Instant::now(); // Use current time as start_time for tests
+        manager.check_for_retransmissions(
+            rto,
+            now,
+            start_time,
+            peer_cid,
+            1, // protocol_version
+            1, // local_cid
+            0, // recv_next_sequence
+            1024, // recv_window_size
+        )
+    }
+    
+    // Helper function for testing timeout events
+    fn test_check_retransmission_timeouts(manager: &mut RetransmissionManager, rto: Duration, now: Instant, peer_cid: u32) -> (Vec<TimeoutEvent>, Vec<Frame>) {
+        let start_time = Instant::now(); // Use current time as start_time for tests
+        manager.check_retransmission_timeouts(
+            rto,
+            now,
+            start_time,
+            peer_cid,
+            1, // protocol_version
+            1, // local_cid
+            0, // recv_next_sequence
+            1024, // recv_window_size
+        )
+    }
 
     fn create_test_config() -> Config {
         Config::default()
@@ -387,7 +478,8 @@ mod tests {
         manager.add_in_flight_packet(create_regular_push_frame(10), now);
 
         // Process ACK that acknowledges both
-        let result = manager.process_ack(11, &[], now);
+        let start_time = now;
+        let result = manager.process_ack(11, &[], now, start_time, 12345, 1, 1, 1024);
 
         // Should acknowledge both frames
         assert!(result.newly_acked_sequences.contains(&0)); // Handshake frame
@@ -405,12 +497,12 @@ mod tests {
         manager.add_in_flight_packet(create_regular_push_frame(10), now);
 
         // Check immediately - no retransmissions yet
-        let frames = manager.check_for_retransmissions(Duration::from_secs(1), now, 12345);
+        let frames = test_check_retransmissions(&mut manager, Duration::from_secs(1), now, 12345);
         assert!(frames.is_empty());
 
         // Check after timeout - should trigger retransmissions
         let later = now + Duration::from_secs(2);
-        let frames = manager.check_for_retransmissions(Duration::from_secs(1), later, 12345);
+        let frames = test_check_retransmissions(&mut manager, Duration::from_secs(1), later, 12345);
         assert_eq!(frames.len(), 2); // Both frames should be retransmitted
     }
 
@@ -480,7 +572,7 @@ mod tests {
         manager.add_in_flight_packet(create_regular_push_frame(10), now);
 
         // Check immediately - no timeouts yet
-        let (events, frames) = manager.check_retransmission_timeouts(Duration::from_secs(1), now, 12345);
+        let (events, frames) = test_check_retransmission_timeouts(&mut manager, Duration::from_secs(1), now, 12345);
         assert!(events.is_empty());
         assert!(frames.is_empty());
     }
@@ -496,7 +588,7 @@ mod tests {
 
         // Check after timeout period
         let later = now + Duration::from_secs(2);
-        let (events, frames) = manager.check_retransmission_timeouts(Duration::from_secs(1), later, 12345);
+        let (events, frames) = test_check_retransmission_timeouts(&mut manager, Duration::from_secs(1), later, 12345);
 
         // Should have retransmission timeout event
         assert_eq!(events.len(), 1);
@@ -542,7 +634,7 @@ mod tests {
         let later = now + Duration::from_secs(2);
 
         // Using layered interface
-        let (events, layered_frames) = manager.check_retransmission_timeouts(rto, later, 12345);
+        let (events, layered_frames) = test_check_retransmission_timeouts(&mut manager, rto, later, 12345);
 
         // Reset state for comparison
         manager.clear();
@@ -550,7 +642,7 @@ mod tests {
         manager.add_in_flight_packet(create_regular_push_frame(10), now);
 
         // Using direct interface
-        let direct_frames = manager.check_for_retransmissions(rto, later, 12345);
+        let direct_frames = test_check_retransmissions(&mut manager, rto, later, 12345);
 
         // Results should be consistent
         if !direct_frames.is_empty() {
