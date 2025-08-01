@@ -144,7 +144,7 @@ pub mod single_thread_bypass {
                 self.inline_buffer.push(ProcessedTimerData {
                     entry_id: entry.id,
                     connection_id: entry.event.data.connection_id,
-                    timeout_event: entry.event.data.timeout_event,
+                    timeout_event: entry.event.data.timeout_event.clone(),
                     expiry_time: entry.expiry_time,
                     slot_index: i,
                 });
@@ -167,7 +167,7 @@ pub mod single_thread_bypass {
             // 构建事件引用数组，避免克隆
             // Build event reference array, avoiding clones
             let event_refs: Vec<TimerEventData<E>> = processed_data.iter()
-                .map(|data| TimerEventData::new(data.connection_id, data.timeout_event))
+                .map(|data| TimerEventData::new(data.connection_id, data.timeout_event.clone()))
                 .collect();
             
             let event_ref_ptrs: Vec<&TimerEventData<E>> = event_refs.iter().collect();
@@ -312,7 +312,7 @@ pub mod memory_optimization {
                     self.stack_buffer[i] = ProcessedTimerData {
                         entry_id: entry.id,
                         connection_id: entry.event.data.connection_id,
-                        timeout_event: entry.event.data.timeout_event,
+                        timeout_event: entry.event.data.timeout_event.clone(),
                         expiry_time: entry.expiry_time,
                         slot_index: i,
                     };
@@ -334,7 +334,7 @@ pub mod memory_optimization {
                 buffer.push(ProcessedTimerData {
                     entry_id: entry.id,
                     connection_id: entry.event.data.connection_id,
-                    timeout_event: entry.event.data.timeout_event,
+                    timeout_event: entry.event.data.timeout_event.clone(),
                     expiry_time: entry.expiry_time,
                     slot_index: i,
                 });
@@ -612,7 +612,7 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
         // 优先使用零拷贝分发器，失败时fallback到异步分发器
         // Prefer zero-copy dispatcher, fallback to async dispatcher on failure
         let events: Vec<TimerEventData<E>> = processed_data.iter()
-            .map(|data| TimerEventData::new(data.connection_id, data.timeout_event))
+            .map(|data| TimerEventData::new(data.connection_id, data.timeout_event.clone()))
             .collect();
         
         let dispatch_count = self.zero_copy_dispatcher.batch_dispatch_events(events.clone());
@@ -651,7 +651,7 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
         // 优先使用零拷贝批量分发，失败时fallback到异步分发器
         // Prefer zero-copy batch dispatch, fallback to async dispatcher on failure
         let events: Vec<TimerEventData<E>> = processed_data.iter()
-            .map(|data| TimerEventData::new(data.connection_id, data.timeout_event))
+            .map(|data| TimerEventData::new(data.connection_id, data.timeout_event.clone()))
             .collect();
         
         let dispatch_count = self.zero_copy_dispatcher.batch_dispatch_events(events.clone());
@@ -707,7 +707,7 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
         // 步骤2: 优先使用零拷贝批量分发，失败时fallback到异步分发器
         // Step 2: Prefer zero-copy batch dispatch, fallback to async dispatcher on failure
         let events: Vec<TimerEventData<E>> = processed_data.iter()
-            .map(|data| TimerEventData::new(data.connection_id, data.timeout_event))
+            .map(|data| TimerEventData::new(data.connection_id, data.timeout_event.clone()))
             .collect();
         
         let dispatch_count = self.zero_copy_dispatcher.batch_dispatch_events(events.clone());
@@ -834,7 +834,7 @@ impl<E: EventDataTrait> SIMDTimerProcessor<E> {
             self.result_cache.push(ProcessedTimerData {
                 entry_id: entry.id,
                 connection_id: entry.event.data.connection_id,
-                timeout_event: entry.event.data.timeout_event,
+                timeout_event: entry.event.data.timeout_event.clone(),
                 expiry_time: entry.expiry_time,
                 slot_index: i, // 简化的槽位索引
             });

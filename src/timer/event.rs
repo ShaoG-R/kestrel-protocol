@@ -55,7 +55,7 @@ impl<E: EventDataTrait> Clone for TimerEventData<E> {
     }
 }
 
-impl<E: EventDataTrait> Copy for TimerEventData<E> {}
+
 
 impl<E: EventDataTrait> TimerEventData<E> {
     /// 创建新的定时器事件数据
@@ -173,7 +173,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
     pub async fn trigger(self, pool: &TimerEventPool<E>) {
         let timer_id = self.id;
         let connection_id = self.data.connection_id;
-        let event_type = self.data.timeout_event;
+        let event_type = self.data.timeout_event.clone();
         
         // 克隆数据用于发送，原对象将被回收到池中
         // Clone data for sending, original object will be recycled to pool
@@ -189,7 +189,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
             tracing::trace!(
                 timer_id,
                 connection_id,
-                event_type = ?event_type,
+                event_type = ?self.data.timeout_event,
                 "Timer event triggered successfully"
             );
         }

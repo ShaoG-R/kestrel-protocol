@@ -100,7 +100,7 @@ impl<E: EventDataTrait> TimerEventPool<E> {
     pub fn batch_acquire(&self, requests: &[(ConnectionId, E)]) -> Vec<TimerEventData<E>> {
         if !self.config.enable_batch_optimization || requests.is_empty() {
             return requests.iter()
-                .map(|(conn_id, event)| self.acquire(*conn_id, *event))
+                .map(|(conn_id, event)| self.acquire(*conn_id, event.clone()))
                 .collect();
         }
 
@@ -160,7 +160,7 @@ impl<E: EventDataTrait> TimerEventPool<E> {
         // 标量更新剩余的已获取对象
         // Scalar update for remaining acquired objects
         while i < acquired_count {
-            let (conn_id, timeout_event) = requests[i];
+            let (conn_id, timeout_event) = requests[i].clone();
             result[i].connection_id = conn_id;
             result[i].timeout_event = timeout_event;
             i += 1;
@@ -182,7 +182,7 @@ impl<E: EventDataTrait> TimerEventPool<E> {
         // 标量创建最后剩余的对象
         // Scalar create for the final remaining objects
         while j < total_requests {
-            let (conn_id, timeout_event) = requests[j];
+            let (conn_id, timeout_event) = requests[j].clone();
             new_creations.push(TimerEventData::new(conn_id, timeout_event));
             j += 1;
         }
@@ -203,7 +203,7 @@ impl<E: EventDataTrait> TimerEventPool<E> {
         
         for k in 0..8 {
             chunk[k].connection_id = processed_ids[k];
-            chunk[k].timeout_event = requests[start_index + k].1;
+            chunk[k].timeout_event = requests[start_index + k].1.clone();
         }
     }
 
@@ -218,7 +218,7 @@ impl<E: EventDataTrait> TimerEventPool<E> {
         
         for k in 0..4 {
             chunk[k].connection_id = processed_ids[k];
-            chunk[k].timeout_event = requests[start_index + k].1;
+            chunk[k].timeout_event = requests[start_index + k].1.clone();
         }
     }
 
@@ -234,7 +234,7 @@ impl<E: EventDataTrait> TimerEventPool<E> {
         let processed_ids = conn_id_vec.to_array();
         
         for k in 0..8 {
-            target_vec.push(TimerEventData::new(processed_ids[k], requests[start_index + k].1));
+            target_vec.push(TimerEventData::new(processed_ids[k], requests[start_index + k].1.clone()));
         }
     }
 
@@ -248,7 +248,7 @@ impl<E: EventDataTrait> TimerEventPool<E> {
         let processed_ids = conn_id_vec.to_array();
         
         for k in 0..4 {
-            target_vec.push(TimerEventData::new(processed_ids[k], requests[start_index + k].1));
+            target_vec.push(TimerEventData::new(processed_ids[k], requests[start_index + k].1.clone()));
         }
     }
 

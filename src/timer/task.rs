@@ -621,7 +621,7 @@ impl<E: EventDataTrait> GlobalTimerTask<E> {
         // 为批量对象池API准备数据
         // Prepare data for batch object pool API
         let pool_requests: Vec<_> = registrations.iter()
-            .map(|reg| (reg.connection_id, reg.timeout_event))
+            .map(|reg| (reg.connection_id, reg.timeout_event.clone()))
             .collect();
         let callback_txs: Vec<_> = registrations.iter()
             .map(|reg| reg.callback_tx.clone())
@@ -839,7 +839,7 @@ impl<E: EventDataTrait> GlobalTimerTask<E> {
             .map(|entry| {
                 let entry_id = entry.id;
                 let connection_id = entry.event.data.connection_id;
-                let event_type = entry.event.data.timeout_event;
+                let event_type = entry.event.data.timeout_event.clone();
                 let pool = pool_ref.clone_ref(); // 每个任务都需要自己的池引用
                 
                 async move {
