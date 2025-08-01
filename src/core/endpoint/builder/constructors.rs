@@ -13,7 +13,7 @@ use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use crate::core::endpoint::lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
-use crate::core::endpoint::timing::TimingManager;
+use crate::core::endpoint::timing::{TimeoutEvent, TimingManager};
 use crate::core::endpoint::types::{
     channels::ChannelManager,
     identity::ConnectionIdentity,
@@ -32,7 +32,7 @@ impl<T: Transport> Endpoint<T> {
         sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
         initial_data: Option<Bytes>,
-        timer_handle: GlobalTimerTaskHandle,
+        timer_handle: GlobalTimerTaskHandle<TimeoutEvent>,
     ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
@@ -92,7 +92,7 @@ impl<T: Transport> Endpoint<T> {
         receiver: mpsc::Receiver<(crate::packet::frame::Frame, SocketAddr)>,
         sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
-        timer_handle: GlobalTimerTaskHandle,
+        timer_handle: GlobalTimerTaskHandle<TimeoutEvent>,
     ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);

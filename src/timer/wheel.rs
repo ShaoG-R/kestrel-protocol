@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use tracing::{debug, trace, warn};
 use wide::{u64x4, u32x8};
 use crate::timer::event::ConnectionId;
+use crate::timer::event::traits::EventDataTrait;
 /// 定时器条目ID，用于在时间轮中唯一标识定时器条目
 /// Timer entry ID, used to uniquely identify timer entries in the timing wheel
 pub type TimerEntryId = u64;
@@ -22,7 +23,7 @@ pub type TimerEntryId = u64;
 /// 时间轮中的定时器条目
 /// Timer entry in the timing wheel
 #[derive(Debug)]
-pub struct TimerEntry {
+pub struct TimerEntry<E: EventDataTrait> {
     /// 条目ID
     /// Entry ID
     pub id: TimerEntryId,
@@ -31,13 +32,13 @@ pub struct TimerEntry {
     pub expiry_time: Instant,
     /// 定时器事件
     /// Timer event
-    pub event: TimerEvent,
+    pub event: TimerEvent<E>,
 }
 
-impl TimerEntry {
+impl<E: EventDataTrait> TimerEntry<E> {
     /// 创建新的定时器条目
     /// Create new timer entry
-    pub fn new(id: TimerEntryId, expiry_time: Instant, event: TimerEvent) -> Self {
+    pub fn new(id: TimerEntryId, expiry_time: Instant, event: TimerEvent<E>) -> Self {
         Self {
             id,
             expiry_time,
@@ -49,7 +50,7 @@ impl TimerEntry {
 /// 时间轮实现
 /// Timing wheel implementation
 #[derive(Debug)]
-pub struct TimingWheel {
+pub struct TimingWheel<E: EventDataTrait> {
     /// 时间轮的槽位数量（必须是2的幂以支持位运算优化）
     /// Number of slots in the timing wheel (must be power of 2 for bitwise optimization)
     slot_count: usize,
@@ -70,7 +71,7 @@ pub struct TimingWheel {
     current_time: Instant,
     /// 槽位数组，每个槽位包含该时间点到期的定时器
     /// Slot array, each slot contains timers that expire at that time
-    slots: Vec<VecDeque<TimerEntry>>,
+    slots: Vec<VecDeque<TimerEntry<E>>>,
     /// 定时器ID映射，用于快速查找和删除定时器
     /// Timer ID mapping for fast lookup and deletion
     timer_map: HashMap<TimerEntryId, (usize, usize)>, // (slot_index, position_in_slot)
@@ -82,7 +83,7 @@ pub struct TimingWheel {
     cached_next_expiry: Option<Instant>,
 }
 
-impl TimingWheel {
+impl<E: EventDataTrait> TimingWheel<E> {
     /// 创建新的时间轮
     /// Create new timing wheel
     ///
@@ -136,7 +137,7 @@ impl TimingWheel {
     /// # Returns
     /// 返回定时器条目ID列表
     /// Returns list of timer entry IDs
-    pub fn batch_add_timers(&mut self, timers: Vec<(Duration, TimerEvent)>) -> Vec<TimerEntryId> {
+    pub fn batch_add_timers(&mut self, timers: Vec<(Duration, TimerEvent<E>)>) -> Vec<TimerEntryId> {
         if timers.is_empty() {
             return Vec::new();
         }
@@ -156,7 +157,7 @@ impl TimingWheel {
         
         // 按槽位分组定时器，减少散列访问
         // Group timers by slot to reduce scattered access
-        let mut slot_groups: HashMap<usize, Vec<(TimerEntryId, Instant, TimerEvent)>> = HashMap::new();
+        let mut slot_groups: HashMap<usize, Vec<(TimerEntryId, Instant, TimerEvent<E>)>> = HashMap::new();
         
         // SIMD优化：批量分析槽位分布，减少HashMap查找
         // SIMD optimization: batch analyze slot distribution to reduce HashMap lookups
@@ -318,7 +319,7 @@ impl TimingWheel {
     /// # Returns
     /// 返回定时器条目ID，可用于取消定时器
     /// Returns timer entry ID that can be used to cancel the timer
-    pub fn add_timer(&mut self, delay: Duration, event: TimerEvent) -> TimerEntryId {
+    pub fn add_timer(&mut self, delay: Duration, event: TimerEvent<E>) -> TimerEntryId {
         let entry_id = self.next_entry_id;
         self.next_entry_id += 1;
 
@@ -429,7 +430,7 @@ impl TimingWheel {
     /// # Returns
     /// 返回已到期的定时器列表
     /// Returns list of expired timers
-    pub fn advance(&mut self, now: Instant) -> Vec<TimerEntry> {
+    pub fn advance(&mut self, now: Instant) -> Vec<TimerEntry<E>> {
         let mut expired_timers = Vec::new();
         
         // 计算需要推进多少个槽位
@@ -621,7 +622,7 @@ impl TimingWheel {
     /// Use vectorization-friendly operations and memory layout optimization for automatic SIMD
     fn simd_calculate_batch_metadata(
         &self,
-        timers: &[(Duration, TimerEvent)],
+        timers: &[(Duration, TimerEvent<E>)],
         start_id: TimerEntryId,
     ) -> (Vec<TimerEntryId>, Vec<Instant>, Vec<usize>) {
         let len = timers.len();
@@ -1071,7 +1072,7 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::{sleep, Duration};
 
-    fn create_test_timer_event(id: u64) -> TimerEvent {
+    fn create_test_timer_event(id: u64) -> TimerEvent<TimeoutEvent> {
         let (tx, _rx) = mpsc::channel(1);
         let data = TimerEventData::new(id as u32, TimeoutEvent::IdleTimeout);
         TimerEvent::new(id, data, tx)
@@ -1079,7 +1080,7 @@ mod tests {
 
     #[test]
     fn test_timing_wheel_creation() {
-        let wheel = TimingWheel::new(8, Duration::from_millis(100));
+        let wheel: TimingWheel<TimeoutEvent> = TimingWheel::new(8, Duration::from_millis(100));
         assert_eq!(wheel.slot_count, 8);
         assert_eq!(wheel.slot_duration, Duration::from_millis(100));
         assert_eq!(wheel.current_slot, 0);

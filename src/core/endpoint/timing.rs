@@ -37,6 +37,12 @@ pub enum TimeoutEvent {
     ConnectionTimeout,
 }
 
+impl Default for TimeoutEvent {
+    fn default() -> Self {
+        Self::IdleTimeout
+    }
+}
+
 /// 定时器管理器 - 封装全局定时器相关逻辑
 /// Timer manager - encapsulates global timer related logic
 pub struct TimerManager {
@@ -46,25 +52,25 @@ pub struct TimerManager {
 
     /// 全局定时器任务句柄
     /// Global timer task handle
-    timer_handle: GlobalTimerTaskHandle,
+    timer_handle: GlobalTimerTaskHandle<TimeoutEvent>,
 
     /// 接收超时事件的通道
     /// Channel for receiving timeout events
-    timeout_rx: mpsc::Receiver<TimerEventData>,
+    timeout_rx: mpsc::Receiver<TimerEventData<TimeoutEvent>>,
 
     /// 发送超时事件的通道（用于注册定时器）
     /// Channel for sending timeout events (used for timer registration)
-    timeout_tx: mpsc::Sender<TimerEventData>,
+    timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,
 
     /// 活跃定时器句柄映射
     /// Active timer handles mapping
-    active_timers: HashMap<TimeoutEvent, TimerHandle>,
+    active_timers: HashMap<TimeoutEvent, TimerHandle<TimeoutEvent>>,
 }
 
 impl TimerManager {
     /// 创建新的定时器管理器
     /// Create new timer manager
-    pub fn new(connection_id: ConnectionId, timer_handle: GlobalTimerTaskHandle) -> Self {
+    pub fn new(connection_id: ConnectionId, timer_handle: GlobalTimerTaskHandle<TimeoutEvent>) -> Self {
         let (timeout_tx, timeout_rx) = mpsc::channel(32);
         
         Self {
@@ -204,7 +210,7 @@ pub struct TimingManager {
 impl TimingManager {
     /// 创建新的时间管理器
     /// Create new timing manager
-    pub fn new(connection_id: ConnectionId, timer_handle: GlobalTimerTaskHandle) -> Self {
+    pub fn new(connection_id: ConnectionId, timer_handle: GlobalTimerTaskHandle<TimeoutEvent>) -> Self {
         let now = Instant::now();
         let timer_manager = TimerManager::new(connection_id, timer_handle);
 
@@ -222,7 +228,7 @@ impl TimingManager {
     pub fn with_start_time(
         start_time: Instant,
         connection_id: ConnectionId,
-        timer_handle: GlobalTimerTaskHandle,
+        timer_handle: GlobalTimerTaskHandle<TimeoutEvent>,
     ) -> Self {
         let timer_manager = TimerManager::new(connection_id, timer_handle);
 
@@ -642,7 +648,7 @@ mod tests {
     use crate::timer::task::{GlobalTimerTaskHandle, start_global_timer_task};
 
     // 创建测试用的定时器句柄
-    fn create_test_timer_handle() -> GlobalTimerTaskHandle {
+    fn create_test_timer_handle() -> GlobalTimerTaskHandle<TimeoutEvent> {
         // 为测试创建真实的全局定时器任务
         crate::timer::task::start_global_timer_task()
     }

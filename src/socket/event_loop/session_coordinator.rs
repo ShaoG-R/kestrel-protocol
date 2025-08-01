@@ -8,6 +8,7 @@
 //! frame routing management, and connection lifecycle management. It handles new connection creation,
 //! handshake negotiation, 0-RTT data processing, and connection ID generation with conflict detection.
 
+use crate::core::endpoint::timing::TimeoutEvent;
 use crate::socket::event_loop::routing::FrameRouter;
 use crate::socket::{
     command::SocketActorCommand,
@@ -62,7 +63,7 @@ pub(crate) struct SocketSessionCoordinator<T: BindableTransport> {
     command_tx: mpsc::Sender<SocketActorCommand>,
     /// 全局定时器任务句柄
     /// Global timer task handle
-    timer_handle: GlobalTimerTaskHandle,
+    timer_handle: GlobalTimerTaskHandle<TimeoutEvent>,
 }
 
 impl<T: BindableTransport> SocketSessionCoordinator<T> {
@@ -74,7 +75,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         config: Arc<Config>,
         accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
         command_tx: mpsc::Sender<SocketActorCommand>,
-        timer_handle: GlobalTimerTaskHandle,
+        timer_handle: GlobalTimerTaskHandle<TimeoutEvent>,
     ) -> Self {
         Self {
             transport_manager,

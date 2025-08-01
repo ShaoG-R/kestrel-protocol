@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use wide::{u32x8, u64x4};
 use crate::core::endpoint::timing::TimeoutEvent;
 use tracing;
+use crate::timer::event::traits::EventDataTrait;
 
 /// 单线程直通优化模块 - 绕过异步调度的同步路径
 /// Single-thread bypass optimization module - synchronous path bypassing async scheduling
@@ -106,22 +107,22 @@ pub mod single_thread_bypass {
     
     /// 直通式定时器处理器（零异步开销）
     /// Bypass timer processor (zero async overhead)
-    pub struct BypassTimerProcessor {
+    pub struct BypassTimerProcessor<E: EventDataTrait> {
         /// 内联处理缓冲区（栈分配）
         /// Inline processing buffer (stack allocated)
-        inline_buffer: Vec<ProcessedTimerData>,
+        inline_buffer: Vec<ProcessedTimerData<E>>,
         /// 处理统计
         /// Processing statistics
         processed_count: usize,
     }
 
-    impl Default for BypassTimerProcessor {
+    impl<E: EventDataTrait> Default for BypassTimerProcessor<E> {
         fn default() -> Self {
             Self::new()
         }
     }
     
-    impl BypassTimerProcessor {
+    impl<E: EventDataTrait> BypassTimerProcessor<E> {
         pub fn new() -> Self {
             Self {
                 inline_buffer: Vec::with_capacity(256), // 预分配避免运行时分配
@@ -133,8 +134,8 @@ pub mod single_thread_bypass {
         /// Bypass batch processing (synchronous, zero async overhead)
         pub fn process_batch_bypass(
             &mut self,
-            timer_entries: &[TimerEntry],
-        ) -> &[ProcessedTimerData] {
+            timer_entries: &[TimerEntry<E>],
+        ) -> &[ProcessedTimerData<E>] {
             self.inline_buffer.clear();
             self.inline_buffer.reserve(timer_entries.len());
             
@@ -158,19 +159,19 @@ pub mod single_thread_bypass {
         /// Bypass event dispatch (synchronous, using reference passing)
         pub fn dispatch_events_bypass<H>(
             &self,
-            processed_data: &[ProcessedTimerData],
+            processed_data: &[ProcessedTimerData<E>],
             handler: &H,
         ) -> usize
         where
-            H: ZeroCopyEventDelivery,
+            H: ZeroCopyEventDelivery<E>,
         {
             // 构建事件引用数组，避免克隆
             // Build event reference array, avoiding clones
-            let event_refs: Vec<TimerEventData> = processed_data.iter()
+            let event_refs: Vec<TimerEventData<E>> = processed_data.iter()
                 .map(|data| TimerEventData::new(data.connection_id, data.timeout_event))
                 .collect();
             
-            let event_ref_ptrs: Vec<&TimerEventData> = event_refs.iter().collect();
+            let event_ref_ptrs: Vec<&TimerEventData<E>> = event_refs.iter().collect();
             
             // 批量传递引用，零拷贝
             // Batch deliver references, zero-copy
@@ -192,10 +193,10 @@ pub mod memory_optimization {
     
     /// 预分配内存池
     /// Pre-allocated memory pool  
-    pub struct MemoryPool {
+    pub struct MemoryPool<E: EventDataTrait> {
         /// 预分配的数据缓冲区
         /// Pre-allocated data buffers
-        data_buffers: Vec<Vec<ProcessedTimerData>>,
+        data_buffers: Vec<Vec<ProcessedTimerData<E>>>,
         /// 预分配的ID缓冲区  
         /// Pre-allocated ID buffers
         id_buffers: Vec<Vec<u32>>,
@@ -210,7 +211,7 @@ pub mod memory_optimization {
         buffer_count: usize,
     }
     
-    impl MemoryPool {
+    impl<E: EventDataTrait> MemoryPool<E> {
         pub fn new(buffer_count: usize, buffer_capacity: usize) -> Self {
             let mut data_buffers = Vec::with_capacity(buffer_count);
             let mut id_buffers = Vec::with_capacity(buffer_count);
@@ -233,7 +234,7 @@ pub mod memory_optimization {
         
         /// 获取下一个可用的数据缓冲区
         /// Get next available data buffer
-        pub fn get_data_buffer(&mut self) -> &mut Vec<ProcessedTimerData> {
+        pub fn get_data_buffer(&mut self) -> &mut Vec<ProcessedTimerData<E>> {
             let index = self.current_buffer_index.fetch_add(1, Ordering::Relaxed) % self.buffer_count;
             let buffer = &mut self.data_buffers[index];
             buffer.clear();
@@ -263,34 +264,34 @@ pub mod memory_optimization {
     
     /// 零分配处理器 - 最小化内存分配
     /// Zero-allocation processor - minimizing memory allocations
-    pub struct ZeroAllocProcessor {
+    pub struct ZeroAllocProcessor<E: EventDataTrait> {
         /// 内存池
         /// Memory pool
-        memory_pool: MemoryPool,
+        memory_pool: MemoryPool<E>,
         /// 栈分配缓冲区（用于小批量）
         /// Stack-allocated buffer (for small batches)
-        stack_buffer: [ProcessedTimerData; 64],
+        stack_buffer: [ProcessedTimerData<E>; 64],
         /// 栈缓冲区使用计数
         /// Stack buffer usage count
         stack_usage: usize,
     }
 
-    impl Default for ZeroAllocProcessor {
+    impl<E: EventDataTrait> Default for ZeroAllocProcessor<E> {
         fn default() -> Self {
             Self::new()
         }
     }
     
-    impl ZeroAllocProcessor {
+    impl<E: EventDataTrait> ZeroAllocProcessor<E> {
         pub fn new() -> Self {
             // 创建默认时间戳
             let default_instant = tokio::time::Instant::now();
             
             // 使用数组映射来初始化栈缓冲区
-            let stack_buffer: [ProcessedTimerData; 64] = std::array::from_fn(|_| ProcessedTimerData {
+            let stack_buffer: [ProcessedTimerData<E>; 64] = std::array::from_fn(|_| ProcessedTimerData {
                 entry_id: 0,
                 connection_id: 0,
-                timeout_event: TimeoutEvent::IdleTimeout,
+                timeout_event: E::default(),
                 expiry_time: default_instant,
                 slot_index: 0,
             });
@@ -304,7 +305,7 @@ pub mod memory_optimization {
         
         /// 处理小批量（使用栈分配）
         /// Process small batch (using stack allocation)
-        pub fn process_small_batch(&mut self, timer_entries: &[TimerEntry]) -> &[ProcessedTimerData] {
+        pub fn process_small_batch(&mut self, timer_entries: &[TimerEntry<E>]) -> &[ProcessedTimerData<E>] {
             if timer_entries.len() <= 64 {
                 self.stack_usage = timer_entries.len();
                 
@@ -326,7 +327,7 @@ pub mod memory_optimization {
         
         /// 处理大批量（使用内存池）
         /// Process large batch (using memory pool)
-        pub fn process_large_batch(&mut self, timer_entries: &[TimerEntry]) -> &[ProcessedTimerData] {
+        pub fn process_large_batch(&mut self, timer_entries: &[TimerEntry<E>]) -> &[ProcessedTimerData<E>] {
             let buffer = self.memory_pool.get_data_buffer();
             buffer.reserve(timer_entries.len());
             
@@ -367,23 +368,23 @@ pub enum OptimalParallelStrategy {
 /// 1. 优先使用零拷贝分发器获得最佳性能
 /// 2. 当零拷贝分发失败时，自动fallback到异步分发器确保可靠性
 /// 3. 通过智能策略选择器自适应选择最优执行路径
-pub struct HybridParallelTimerSystem {
+pub struct HybridParallelTimerSystem<E: EventDataTrait> {
     /// SIMD处理器
-    simd_processor: SIMDTimerProcessor,
+    simd_processor: SIMDTimerProcessor<E>,
     /// Rayon批量执行器
     rayon_executor: RayonBatchExecutor,
     /// 异步事件分发器 (用作零拷贝分发的fallback机制)
     /// Async event dispatcher (used as fallback for zero-copy dispatch)
-    async_dispatcher: Arc<AsyncEventDispatcher>,
+    async_dispatcher: Arc<AsyncEventDispatcher<E>>,
     /// 零拷贝事件分发器 (主要的事件分发策略)
     /// Zero-copy event dispatcher (primary event dispatch strategy)
-    zero_copy_dispatcher: crate::timer::event::zero_copy::ZeroCopyBatchDispatcher,
+    zero_copy_dispatcher: crate::timer::event::zero_copy::ZeroCopyBatchDispatcher<E>,
     /// 单线程直通处理器
-    bypass_processor: single_thread_bypass::BypassTimerProcessor,
+    bypass_processor: single_thread_bypass::BypassTimerProcessor<E>,
     /// 执行模式选择器
     mode_selector: single_thread_bypass::ExecutionModeSelector,
     /// 零分配处理器
-    zero_alloc_processor: memory_optimization::ZeroAllocProcessor,
+    zero_alloc_processor: memory_optimization::ZeroAllocProcessor<E>,
     /// 性能统计
     stats: ParallelProcessingStats,
     /// CPU核心数，用于策略选择
@@ -392,12 +393,12 @@ pub struct HybridParallelTimerSystem {
 
 /// SIMD定时器处理器
 /// SIMD Timer Processor
-pub struct SIMDTimerProcessor {
+pub struct SIMDTimerProcessor<E: EventDataTrait> {
     /// 批量计算缓冲区
     #[allow(dead_code)] // 预留用于未来的计算优化
     computation_buffer: Vec<u64>,
     /// 结果缓存
-    result_cache: Vec<ProcessedTimerData>,
+    result_cache: Vec<ProcessedTimerData<E>>,
 }
 
 /// Rayon批量执行器
@@ -411,9 +412,9 @@ pub struct RayonBatchExecutor {
 
 /// 异步事件分发器
 /// Async Event Dispatcher
-pub struct AsyncEventDispatcher {
+pub struct AsyncEventDispatcher<E: EventDataTrait> {
     /// 事件发送通道池
-    event_channels: Vec<mpsc::Sender<TimerEventData>>,
+    event_channels: Vec<mpsc::Sender<TimerEventData<E>>>,
     /// 负载均衡索引 (使用原子类型)
     /// Load balancing index (using an atomic type)
     round_robin_index: AtomicUsize,
@@ -422,10 +423,10 @@ pub struct AsyncEventDispatcher {
 /// 处理后的定时器数据
 /// Processed timer data
 #[derive(Debug, Clone)]
-pub struct ProcessedTimerData {
+pub struct ProcessedTimerData<E: EventDataTrait> {
     pub entry_id: TimerEntryId,
     pub connection_id: ConnectionId,
-    pub timeout_event: TimeoutEvent,
+    pub timeout_event: E,
     pub expiry_time: tokio::time::Instant,
     pub slot_index: usize,
 }
@@ -467,7 +468,7 @@ pub struct ParallelProcessingStats {
     pub peak_throughput_ops_per_sec: f64,
 }
 
-impl HybridParallelTimerSystem {
+impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
     /// 创建新的混合并行定时器系统
     /// Create a new hybrid parallel timer system
     pub fn new() -> Self {
@@ -518,7 +519,7 @@ impl HybridParallelTimerSystem {
     /// Process timer batch in parallel (optimized version)
     pub async fn process_timer_batch(
         &mut self,
-        timer_entries: Vec<TimerEntry>,
+        timer_entries: Vec<TimerEntry<E>>,
     ) -> Result<ParallelProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         let batch_size = timer_entries.len();
         let start_time = Instant::now();
@@ -561,7 +562,7 @@ impl HybridParallelTimerSystem {
     /// Single-thread bypass mode processing (zero async overhead)
     async fn process_bypass_mode(
         &mut self,
-        timer_entries: Vec<TimerEntry>,
+        timer_entries: Vec<TimerEntry<E>>,
         start_time: Instant,
     ) -> Result<ParallelProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         let batch_size = timer_entries.len();
@@ -580,7 +581,7 @@ impl HybridParallelTimerSystem {
 
         // 直通式事件分发（同步，使用零拷贝）
         // Bypass event dispatch (synchronous, using zero-copy)
-        let dummy_handler = crate::timer::event::zero_copy::RefEventHandler::new(|_event_ref: &TimerEventData| true);
+        let dummy_handler = crate::timer::event::zero_copy::RefEventHandler::new(|_event_ref: &TimerEventData<E>| true);
         let dispatch_count = self.bypass_processor.dispatch_events_bypass(processed_data, &dummy_handler);
 
         let processing_duration = start_time.elapsed();
@@ -605,13 +606,13 @@ impl HybridParallelTimerSystem {
     /// Process using SIMD only (optimized version)
     async fn process_simd_only_optimized(
         &mut self,
-        timer_entries: Vec<TimerEntry>,
+        timer_entries: Vec<TimerEntry<E>>,
     ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         let processed_data = self.simd_processor.process_batch(&timer_entries)?;
         
         // 优先使用零拷贝分发器，失败时fallback到异步分发器
         // Prefer zero-copy dispatcher, fallback to async dispatcher on failure
-        let events: Vec<TimerEventData> = processed_data.iter()
+        let events: Vec<TimerEventData<E>> = processed_data.iter()
             .map(|data| TimerEventData::new(data.connection_id, data.timeout_event))
             .collect();
         
@@ -641,7 +642,7 @@ impl HybridParallelTimerSystem {
     /// Process using SIMD + Rayon (optimized version)
     async fn process_simd_with_rayon_optimized(
         &mut self,
-        timer_entries: Vec<TimerEntry>,
+        timer_entries: Vec<TimerEntry<E>>,
     ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         // 使用Rayon并行处理数据
         let processed_data = self.rayon_executor
@@ -650,7 +651,7 @@ impl HybridParallelTimerSystem {
 
         // 优先使用零拷贝批量分发，失败时fallback到异步分发器
         // Prefer zero-copy batch dispatch, fallback to async dispatcher on failure
-        let events: Vec<TimerEventData> = processed_data.iter()
+        let events: Vec<TimerEventData<E>> = processed_data.iter()
             .map(|data| TimerEventData::new(data.connection_id, data.timeout_event))
             .collect();
         
@@ -681,7 +682,7 @@ impl HybridParallelTimerSystem {
     /// Process using full hybrid strategy (optimized version)
     async fn process_full_hybrid_optimized(
         &mut self,
-        timer_entries: Vec<TimerEntry>,
+        timer_entries: Vec<TimerEntry<E>>,
     ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         let batch_size = timer_entries.len();
         
@@ -697,7 +698,7 @@ impl HybridParallelTimerSystem {
             tokio::task::spawn_blocking({
                 let mut rayon_executor = self.rayon_executor.clone();
                 let mut simd_processor = self.simd_processor.clone();
-                move || -> Result<Vec<ProcessedTimerData>, Box<dyn std::error::Error + Send + Sync>> {
+                move || -> Result<Vec<ProcessedTimerData<E>>, Box<dyn std::error::Error + Send + Sync>> {
                     let result = rayon_executor.parallel_process_with_simd_sync(timer_entries, &mut simd_processor)?;
                     Ok(result)
                 }
@@ -706,7 +707,7 @@ impl HybridParallelTimerSystem {
 
         // 步骤2: 优先使用零拷贝批量分发，失败时fallback到异步分发器
         // Step 2: Prefer zero-copy batch dispatch, fallback to async dispatcher on failure
-        let events: Vec<TimerEventData> = processed_data.iter()
+        let events: Vec<TimerEventData<E>> = processed_data.iter()
             .map(|data| TimerEventData::new(data.connection_id, data.timeout_event))
             .collect();
         
@@ -766,14 +767,14 @@ impl HybridParallelTimerSystem {
     /// Directly use async dispatcher for events (for special scenarios or testing)
     pub async fn dispatch_events_async(
         &self,
-        processed_data: Vec<ProcessedTimerData>,
+        processed_data: Vec<ProcessedTimerData<E>>,
     ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
         self.async_dispatcher.dispatch_timer_events(processed_data).await
     }
 
     /// 获取异步分发器的引用（用于高级用途）
     /// Get async dispatcher reference (for advanced usage)
-    pub fn get_async_dispatcher(&self) -> &Arc<AsyncEventDispatcher> {
+    pub fn get_async_dispatcher(&self) -> &Arc<AsyncEventDispatcher<E>> {
         &self.async_dispatcher
     }
 }
@@ -785,13 +786,13 @@ struct ProcessingResult {
     detailed_stats: DetailedProcessingStats,
 }
 
-impl Default for SIMDTimerProcessor {
+impl<E: EventDataTrait> Default for SIMDTimerProcessor<E> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SIMDTimerProcessor {
+impl<E: EventDataTrait> SIMDTimerProcessor<E> {
     pub fn new() -> Self {
         Self {
             computation_buffer: Vec::with_capacity(8192),
@@ -803,8 +804,8 @@ impl SIMDTimerProcessor {
     /// Process timers in batch using SIMD
     pub fn process_batch(
         &mut self,
-        timer_entries: &[TimerEntry],
-    ) -> Result<Vec<ProcessedTimerData>, Box<dyn std::error::Error + Send + Sync>> {
+        timer_entries: &[TimerEntry<E>],
+    ) -> Result<Vec<ProcessedTimerData<E>>, Box<dyn std::error::Error + Send + Sync>> {
         self.result_cache.clear();
         self.result_cache.reserve(timer_entries.len());
 
@@ -920,7 +921,7 @@ impl SIMDTimerProcessor {
 }
 /// 克隆处理器（用于多线程）
 /// Clone processor (for multi-thread)
-impl Clone for SIMDTimerProcessor {
+impl<E: EventDataTrait> Clone for SIMDTimerProcessor<E> {
     fn clone(&self) -> Self {
         Self::new()
     }
@@ -936,23 +937,23 @@ impl RayonBatchExecutor {
 
     /// 使用Rayon + SIMD并行处理 (异步版本)
     /// Parallel processing using Rayon + SIMD (async version)
-    pub async fn parallel_process_with_simd(
+    pub async fn parallel_process_with_simd<E: EventDataTrait>(
         &mut self,
-        timer_entries: Vec<TimerEntry>,
-        simd_processor: &mut SIMDTimerProcessor,
-    ) -> Result<Vec<ProcessedTimerData>, Box<dyn std::error::Error + Send + Sync>> {
+        timer_entries: Vec<TimerEntry<E>>,
+        simd_processor: &mut SIMDTimerProcessor<E>,
+    ) -> Result<Vec<ProcessedTimerData<E>>, Box<dyn std::error::Error + Send + Sync>> {
         self.parallel_process_with_simd_sync(timer_entries, simd_processor)
     }
 
     /// 使用Rayon + SIMD并行处理 (同步版本)
     /// Parallel processing using Rayon + SIMD (sync version)
-    pub fn parallel_process_with_simd_sync(
+    pub fn parallel_process_with_simd_sync<E: EventDataTrait>(
         &mut self,
-        timer_entries: Vec<TimerEntry>,
-        simd_processor: &mut SIMDTimerProcessor,
-    ) -> Result<Vec<ProcessedTimerData>, Box<dyn std::error::Error + Send + Sync>> {
+        timer_entries: Vec<TimerEntry<E>>,
+        simd_processor: &mut SIMDTimerProcessor<E>,
+    ) -> Result<Vec<ProcessedTimerData<E>>, Box<dyn std::error::Error + Send + Sync>> {
         // 使用Rayon并行处理多个块
-        let results: Vec<Vec<ProcessedTimerData>> = timer_entries
+        let results: Vec<Vec<ProcessedTimerData<E>>> = timer_entries
             .par_chunks(self.chunk_size)
             .map(|chunk| {
                 // 每个线程都有自己的SIMD处理器实例
@@ -981,13 +982,13 @@ impl Clone for RayonBatchExecutor {
     }
 }
 
-impl Default for AsyncEventDispatcher {
+impl<E: EventDataTrait> Default for AsyncEventDispatcher<E> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl AsyncEventDispatcher {
+impl<E: EventDataTrait> AsyncEventDispatcher<E> {
     pub fn new() -> Self {
         // 创建多个事件通道用于负载均衡
         let channel_count = num_cpus::get().max(4);
@@ -1008,7 +1009,7 @@ impl AsyncEventDispatcher {
     /// Asynchronously dispatch timer events
     pub async fn dispatch_timer_events(
         &self,
-        processed_data: Vec<ProcessedTimerData>,
+        processed_data: Vec<ProcessedTimerData<E>>,
     ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
         let mut dispatch_count = 0;
 
@@ -1048,7 +1049,7 @@ impl AsyncEventDispatcher {
     }
 }
 
-impl Default for HybridParallelTimerSystem {
+impl<E: EventDataTrait> Default for HybridParallelTimerSystem<E> {
     fn default() -> Self {
         Self::new()
     }
@@ -1063,14 +1064,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_hybrid_parallel_system_creation() {
-        let system = HybridParallelTimerSystem::new();
+        let system = HybridParallelTimerSystem::<TimeoutEvent>::new();
         assert!(system.cpu_cores > 0);
         assert_eq!(system.stats.total_batches_processed, 0);
     }
 
     #[tokio::test]
     async fn test_strategy_selection() {
-        let system = HybridParallelTimerSystem::new();
+        let system = HybridParallelTimerSystem::<TimeoutEvent>::new();
         
         assert_eq!(system.choose_optimal_strategy(100), OptimalParallelStrategy::SIMDOnly);
         assert_eq!(system.choose_optimal_strategy(1000), OptimalParallelStrategy::SIMDOnly);
@@ -1079,7 +1080,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simd_processor() {
-        let mut processor = SIMDTimerProcessor::new();
+        let mut processor = SIMDTimerProcessor::<TimeoutEvent>::new();
         
         // 创建测试数据 - 简化版本，不依赖TimerEvent结构
         let test_entries = vec![];  // 空测试，避免复杂的依赖关系
@@ -1091,7 +1092,7 @@ mod tests {
     }
 
     /// 创建测试用的定时器条目
-    fn create_test_timer_entries(count: usize) -> Vec<TimerEntry> {
+    fn create_test_timer_entries<E: EventDataTrait>(count: usize) -> Vec<TimerEntry<E>> {
         let (tx, _rx) = mpsc::channel(1);
         let mut entries = Vec::with_capacity(count);
         
@@ -1099,7 +1100,7 @@ mod tests {
             let timer_event = TimerEvent::from_pool(
                 i as u64, // id
                 (i % 10000) as u32, // connection_id
-                TimeoutEvent::IdleTimeout,
+                E::default(),
                 tx.clone(),
             );
             
@@ -1121,7 +1122,7 @@ mod tests {
         println!("该测试验证零拷贝通道、单线程直通和内存优化的效果");
         println!();
 
-        let mut optimized_system = HybridParallelTimerSystem::new();
+        let mut optimized_system = HybridParallelTimerSystem::<TimeoutEvent>::new();
         
         // 测试不同批量大小下的优化效果
         let optimization_test_cases = vec![
@@ -1247,7 +1248,7 @@ mod tests {
         println!("对比传统异步模式 vs 优化模式的性能差异");
         println!();
 
-        let mut optimized_system = HybridParallelTimerSystem::new();
+        let mut optimized_system = HybridParallelTimerSystem::<TimeoutEvent>::new();
         
         // 测试场景：不同批量大小下的性能对比 (已扩展至 8192)
         let benchmark_cases = vec![

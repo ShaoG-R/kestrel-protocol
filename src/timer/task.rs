@@ -12,7 +12,7 @@ use crate::timer::{
     event::{TimerEvent, TimerEventData, TimerEventId, ConnectionId},
     wheel::{TimingWheel, TimerEntryId},
 };
-use crate::core::endpoint::timing::TimeoutEvent;
+use crate::timer::event::traits::EventDataTrait;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -49,7 +49,7 @@ impl BatchProcessingBuffers {
 /// 定时器注册请求
 /// Timer registration request
 #[derive(Debug, Clone)]
-pub struct TimerRegistration {
+pub struct TimerRegistration<E: EventDataTrait> {
     /// 连接ID
     /// Connection ID
     pub connection_id: ConnectionId,
@@ -58,25 +58,25 @@ pub struct TimerRegistration {
     pub delay: Duration,
     /// 超时事件类型
     /// Timeout event type
-    pub timeout_event: TimeoutEvent,
+    pub timeout_event: E,
     /// 回调通道，用于接收超时通知
     /// Callback channel for receiving timeout notifications
-    pub callback_tx: mpsc::Sender<TimerEventData>,
+    pub callback_tx: mpsc::Sender<TimerEventData<E>>,
 }
 
 /// 批量定时器注册请求
 /// Batch timer registration request
 #[derive(Debug, Clone)]
-pub struct BatchTimerRegistration {
+pub struct BatchTimerRegistration<E: EventDataTrait> {
     /// 批量注册列表
     /// Batch registration list
-    pub registrations: Vec<TimerRegistration>,
+    pub registrations: Vec<TimerRegistration<E>>,
 }
 
-impl BatchTimerRegistration {
+impl<E: EventDataTrait> BatchTimerRegistration<E> {
     /// 创建新的批量注册请求
     /// Create new batch registration request
-    pub fn new(registrations: Vec<TimerRegistration>) -> Self {
+    pub fn new(registrations: Vec<TimerRegistration<E>>) -> Self {
         Self { registrations }
     }
 
@@ -90,7 +90,7 @@ impl BatchTimerRegistration {
 
     /// 添加注册请求
     /// Add registration request
-    pub fn add(&mut self, registration: TimerRegistration) {
+    pub fn add(&mut self, registration: TimerRegistration<E>) {
         self.registrations.push(registration);
     }
 }
@@ -138,7 +138,7 @@ pub struct BatchTimerResult<T> {
     pub failures: Vec<(usize, TimerError)>, // (index, error)
 }
 
-impl Default for BatchTimerResult<TimerHandle> {
+impl<E: EventDataTrait> Default for BatchTimerResult<TimerHandle<E>> {
     fn default() -> Self {
         Self::new()
     }
@@ -182,14 +182,14 @@ impl<T> BatchTimerResult<T> {
     }
 }
 
-impl TimerRegistration {
+impl<E: EventDataTrait> TimerRegistration<E> {
     /// 创建新的定时器注册请求
     /// Create new timer registration request
     pub fn new(
         connection_id: ConnectionId,
         delay: Duration,
-        timeout_event: TimeoutEvent,
-        callback_tx: mpsc::Sender<TimerEventData>,
+        timeout_event: E,
+        callback_tx: mpsc::Sender<TimerEventData<E>>,
     ) -> Self {
         Self {
             connection_id,
@@ -203,19 +203,19 @@ impl TimerRegistration {
 /// 定时器句柄，用于取消定时器
 /// Timer handle for canceling timers
 #[derive(Debug, Clone)]
-pub struct TimerHandle {
+pub struct TimerHandle<E: EventDataTrait> {
     /// 定时器条目ID
     /// Timer entry ID
     pub entry_id: TimerEntryId,
     /// 向定时器任务发送取消请求的通道
     /// Channel for sending cancel requests to timer task
-    cancel_tx: mpsc::Sender<TimerTaskCommand>,
+    cancel_tx: mpsc::Sender<TimerTaskCommand<E>>,
 }
 
-impl TimerHandle {
+impl<E: EventDataTrait> TimerHandle<E> {
     /// 创建新的定时器句柄
     /// Create new timer handle
-    pub fn new(entry_id: TimerEntryId, cancel_tx: mpsc::Sender<TimerTaskCommand>) -> Self {
+    pub fn new(entry_id: TimerEntryId, cancel_tx: mpsc::Sender<TimerTaskCommand<E>>) -> Self {
         Self {
             entry_id,
             cancel_tx,
@@ -246,18 +246,18 @@ impl TimerHandle {
 /// 定时器任务命令
 /// Timer task commands
 #[derive(Debug)]
-pub enum TimerTaskCommand {
+pub enum TimerTaskCommand<E: EventDataTrait> {
     /// 注册定时器
     /// Register timer
     RegisterTimer {
-        registration: TimerRegistration,
-        response_tx: oneshot::Sender<Result<TimerHandle, TimerError>>,
+        registration: TimerRegistration<E>,
+        response_tx: oneshot::Sender<Result<TimerHandle<E>, TimerError>>,
     },
     /// 批量注册定时器
     /// Batch register timers
     BatchRegisterTimers {
-        batch_registration: BatchTimerRegistration,
-        response_tx: oneshot::Sender<BatchTimerResult<TimerHandle>>,
+        batch_registration: BatchTimerRegistration<E>,
+        response_tx: oneshot::Sender<BatchTimerResult<TimerHandle<E>>>,
     },
     /// 取消定时器
     /// Cancel timer
@@ -336,16 +336,16 @@ impl std::fmt::Display for TimerTaskStats {
 
 /// 全局定时器任务
 /// Global timer task
-pub struct GlobalTimerTask {
+pub struct GlobalTimerTask<E: EventDataTrait> {
     /// 时间轮
     /// Timing wheel
-    timing_wheel: TimingWheel,
+    timing_wheel: TimingWheel<E>,
     /// 命令接收通道
     /// Command receiver channel
-    command_rx: mpsc::Receiver<TimerTaskCommand>,
+    command_rx: mpsc::Receiver<TimerTaskCommand<E>>,
     /// 命令发送通道（用于创建句柄）
     /// Command sender channel (for creating handles)
-    command_tx: mpsc::Sender<TimerTaskCommand>,
+    command_tx: mpsc::Sender<TimerTaskCommand<E>>,
     /// 连接到定时器条目的映射（使用HashSet实现O(1)删除）
     /// Connection to timer entries mapping (using HashSet for O(1) deletion)
     connection_timers: HashMap<ConnectionId, HashSet<TimerEntryId>>,
@@ -363,10 +363,10 @@ pub struct GlobalTimerTask {
     batch_processing_buffers: BatchProcessingBuffers,
 }
 
-impl GlobalTimerTask {
+impl<E: EventDataTrait> GlobalTimerTask<E> {
     /// 创建新的全局定时器任务
     /// Create new global timer task
-    pub fn new(command_buffer_size: usize) -> (Self, mpsc::Sender<TimerTaskCommand>) {
+    pub fn new(command_buffer_size: usize) -> (Self, mpsc::Sender<TimerTaskCommand<E>>) {
         let (command_tx, command_rx) = mpsc::channel(command_buffer_size);
         // 使用更小的槽位持续时间以支持更精确的定时器
         let timing_wheel = TimingWheel::new(512, Duration::from_millis(10));
@@ -394,7 +394,7 @@ impl GlobalTimerTask {
 
     /// 创建默认配置的全局定时器任务
     /// Create global timer task with default configuration
-    pub fn new_default() -> (Self, mpsc::Sender<TimerTaskCommand>) {
+    pub fn new_default() -> (Self, mpsc::Sender<TimerTaskCommand<E>>) {
         Self::new(1024)
     }
 
@@ -459,7 +459,7 @@ impl GlobalTimerTask {
     /// # Returns
     /// 返回false表示应该关闭任务
     /// Returns false if task should shutdown
-    async fn handle_command(&mut self, command: TimerTaskCommand) -> bool {
+    async fn handle_command(&mut self, command: TimerTaskCommand<E>) -> bool {
         match command {
             TimerTaskCommand::RegisterTimer { registration, response_tx } => {
                 let result = self.register_timer(registration).await;
@@ -514,7 +514,7 @@ impl GlobalTimerTask {
 
     /// 注册定时器
     /// Register timer
-    async fn register_timer(&mut self, registration: TimerRegistration) -> Result<TimerHandle, TimerError> {
+    async fn register_timer(&mut self, registration: TimerRegistration<E>) -> Result<TimerHandle<E>, TimerError> {
         let event_id = self.next_event_id;
         self.next_event_id += 1;
 
@@ -561,7 +561,7 @@ impl GlobalTimerTask {
 
     /// 批量注册定时器（高性能版本）
     /// Batch register timers (high-performance version)
-    async fn batch_register_timers(&mut self, batch_registration: BatchTimerRegistration) -> BatchTimerResult<TimerHandle> {
+    async fn batch_register_timers(&mut self, batch_registration: BatchTimerRegistration<E>) -> BatchTimerResult<TimerHandle<E>> {
         let registrations = batch_registration.registrations;
         let total_count = registrations.len();
         
@@ -889,16 +889,16 @@ impl GlobalTimerTask {
 /// 全局定时器任务的句柄，用于启动和管理定时器任务
 /// Handle for global timer task, used to start and manage timer task
 #[derive(Clone)]
-pub struct GlobalTimerTaskHandle {
+pub struct GlobalTimerTaskHandle<E: EventDataTrait> {
     /// 命令发送通道
     /// Command sender channel
-    command_tx: mpsc::Sender<TimerTaskCommand>,
+    command_tx: mpsc::Sender<TimerTaskCommand<E>>,
 }
 
-impl GlobalTimerTaskHandle {
+impl<E: EventDataTrait> GlobalTimerTaskHandle<E> {
     /// 创建新的任务句柄
     /// Create new task handle
-    pub fn new(command_tx: mpsc::Sender<TimerTaskCommand>) -> Self {
+    pub fn new(command_tx: mpsc::Sender<TimerTaskCommand<E>>) -> Self {
         Self { command_tx }
     }
 
@@ -906,8 +906,8 @@ impl GlobalTimerTaskHandle {
     /// Register timer
     pub async fn register_timer(
         &self,
-        registration: TimerRegistration,
-    ) -> Result<TimerHandle, TimerError> {
+        registration: TimerRegistration<E>,
+    ) -> Result<TimerHandle<E>, TimerError> {
         let (response_tx, response_rx) = oneshot::channel();
         
         let command = TimerTaskCommand::RegisterTimer {
@@ -929,8 +929,8 @@ impl GlobalTimerTaskHandle {
     /// Batch register timers (high-performance version)
     pub async fn batch_register_timers(
         &self,
-        batch_registration: BatchTimerRegistration,
-    ) -> Result<BatchTimerResult<TimerHandle>, TimerError> {
+        batch_registration: BatchTimerRegistration<E>,
+    ) -> Result<BatchTimerResult<TimerHandle<E>>, TimerError> {
         let (response_tx, response_rx) = oneshot::channel();
         
         let command = TimerTaskCommand::BatchRegisterTimers {
@@ -1020,7 +1020,7 @@ impl GlobalTimerTaskHandle {
 
 /// 启动全局定时器任务
 /// Start global timer task
-pub fn start_global_timer_task() -> GlobalTimerTaskHandle {
+pub fn start_global_timer_task<E: EventDataTrait>() -> GlobalTimerTaskHandle<E> {
     let (task, command_tx) = GlobalTimerTask::new_default();
     let handle = GlobalTimerTaskHandle::new(command_tx.clone());
     
@@ -1040,7 +1040,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_timer_task_creation() {
-        let (task, _command_tx) = GlobalTimerTask::new_default();
+        let (task, _command_tx) = GlobalTimerTask::<TimeoutEvent>::new_default();
         assert_eq!(task.timing_wheel.timer_count(), 0);
         assert!(task.connection_timers.is_empty());
     }
