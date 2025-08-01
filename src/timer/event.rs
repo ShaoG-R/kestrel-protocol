@@ -13,7 +13,7 @@ use std::fmt;
 use std::fmt::Debug;
 use tokio::sync::mpsc;
 use crate::timer::event::traits::EventDataTrait;
-use crate::timer::event::pool_manager::get_pool;
+use crate::timer::event::pool_manager::TimerEventPool;
 
 /// 定时器事件ID，用于唯一标识一个定时器
 /// Timer event ID, used to uniquely identify a timer
@@ -69,29 +69,25 @@ impl<E: EventDataTrait> TimerEventData<E> {
 
     /// 使用对象池高效创建定时器事件数据
     /// Efficiently create timer event data using object pool
-    pub fn from_pool(connection_id: ConnectionId, timeout_event: E) -> Self {
-        let pool = get_pool::<E>();
+    pub fn from_pool(pool: &TimerEventPool<E>, connection_id: ConnectionId, timeout_event: E) -> Self {
         pool.acquire(connection_id, timeout_event)
     }
 
     /// 批量创建定时器事件数据（高性能版本）
     /// Batch create timer event data (high-performance version)
-    pub fn batch_from_pool(requests: &[(ConnectionId, E)]) -> Vec<Self> {
-        let pool = get_pool::<E>();
+    pub fn batch_from_pool(pool: &TimerEventPool<E>, requests: &[(ConnectionId, E)]) -> Vec<Self> {
         pool.batch_acquire(requests)
     }
 
     /// 将对象返回到对象池中
     /// Return object to object pool
-    pub fn return_to_pool(self) {
-        let pool = get_pool::<E>();
+    pub fn return_to_pool(self, pool: &TimerEventPool<E>) {
         pool.release(self);
     }
 
     /// 批量将对象返回到对象池中
     /// Batch return objects to object pool
-    pub fn batch_return_to_pool(objects: Vec<Self>) {
-        let pool = get_pool::<E>();
+    pub fn batch_return_to_pool(objects: Vec<Self>, pool: &TimerEventPool<E>) {
         pool.batch_release(objects);
     }
 }
@@ -129,6 +125,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
     /// 使用对象池高效创建定时器事件
     /// Efficiently create timer event using object pool
     pub fn from_pool(
+        pool: &TimerEventPool<E>,
         id: TimerEventId,
         connection_id: ConnectionId,
         timeout_event: E,
@@ -136,7 +133,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
     ) -> Self {
         Self {
             id,
-            data: TimerEventData::from_pool(connection_id, timeout_event),
+            data: TimerEventData::from_pool(pool, connection_id, timeout_event),
             callback_tx,
         }
     }
@@ -144,6 +141,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
     /// 批量创建定时器事件（高性能版本）
     /// Batch create timer events (high-performance version)
     pub fn batch_from_pool(
+        pool: &TimerEventPool<E>,
         start_id: TimerEventId,
         requests: &[(ConnectionId, E)],
         callback_txs: &[mpsc::Sender<TimerEventData<E>>],
@@ -154,7 +152,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
 
         // 批量获取数据对象
         // Batch acquire data objects
-        let data_objects = TimerEventData::batch_from_pool(requests);
+        let data_objects = TimerEventData::batch_from_pool(pool, requests);
         
         // 构建定时器事件
         // Build timer events
@@ -172,7 +170,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
 
     /// 触发定时器事件，向注册者发送超时通知（优化版本）
     /// Trigger timer event, send timeout notification to registrant (optimized version)
-    pub async fn trigger(self) {
+    pub async fn trigger(self, pool: &TimerEventPool<E>) {
         let timer_id = self.id;
         let connection_id = self.data.connection_id;
         let event_type = self.data.timeout_event;
@@ -198,7 +196,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
         
         // 将数据对象返回到对象池中以供重用
         // Return data object to object pool for reuse
-        self.data.return_to_pool();
+        self.data.return_to_pool(pool);
     }
 }
 

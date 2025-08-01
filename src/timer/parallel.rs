@@ -23,7 +23,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use wide::{u32x8, u64x4};
-use crate::core::endpoint::timing::TimeoutEvent;
 use tracing;
 use crate::timer::event::traits::EventDataTrait;
 
@@ -1059,8 +1058,10 @@ impl<E: EventDataTrait> Default for HybridParallelTimerSystem<E> {
 mod tests {
     use super::*;
     use crate::timer::event::TimerEvent;
+    use crate::timer::event::pool_manager::TimerEventPool;
     use tokio::sync::mpsc;
     use std::time::Instant;
+    use crate::core::endpoint::timing::TimeoutEvent;
 
     #[tokio::test]
     async fn test_hybrid_parallel_system_creation() {
@@ -1095,9 +1096,11 @@ mod tests {
     fn create_test_timer_entries<E: EventDataTrait>(count: usize) -> Vec<TimerEntry<E>> {
         let (tx, _rx) = mpsc::channel(1);
         let mut entries = Vec::with_capacity(count);
+        let pool = TimerEventPool::<E>::new_default(); // 为测试创建临时池
         
         for i in 0..count {
             let timer_event = TimerEvent::from_pool(
+                &pool,
                 i as u64, // id
                 (i % 10000) as u32, // connection_id
                 E::default(),

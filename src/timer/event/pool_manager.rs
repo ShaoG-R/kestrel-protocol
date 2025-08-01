@@ -1,13 +1,10 @@
-//! 定时器事件数据池管理器
-//! Timer Event Data Pool Manager
+//! 定时器事件数据对象池
+//! Timer Event Data Object Pool
 //!
-//! 提供局部手动管理的对象池，支持不同类型的定时器事件数据复用
-//! Provides locally managed object pools for different types of timer event data reuse
+//! 提供局部管理的高性能对象池，直接在使用组件中持有和管理
+//! Provides locally managed high-performance object pools, held and managed directly in using components
 
-use std::sync::OnceLock;
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use std::any::TypeId;
+use std::sync::Arc;
 use crossbeam_queue::SegQueue;
 use wide::{u32x4, u32x8};
 use crate::timer::event::traits::EventDataTrait;
@@ -38,16 +35,16 @@ impl Default for PoolConfig {
     }
 }
 
-/// 类型化对象池
-/// Typed object pool
-pub struct TypedPool<E: EventDataTrait> {
+/// 定时器事件数据对象池
+/// Timer event data object pool
+pub struct TimerEventPool<E: EventDataTrait> {
     pool: Arc<SegQueue<TimerEventData<E>>>,
     config: PoolConfig,
 }
 
-impl<E: EventDataTrait> TypedPool<E> {
-    /// 创建新的类型化池
-    /// Create new typed pool
+impl<E: EventDataTrait> TimerEventPool<E> {
+    /// 创建新的对象池
+    /// Create new object pool
     pub fn new(config: PoolConfig) -> Self {
         let pool = Arc::new(SegQueue::new());
         
@@ -59,6 +56,22 @@ impl<E: EventDataTrait> TypedPool<E> {
         }
         
         Self { pool, config }
+    }
+
+    /// 使用默认配置创建对象池
+    /// Create object pool with default configuration
+    pub fn new_default() -> Self {
+        Self::new(PoolConfig::default())
+    }
+
+    /// 使用指定容量创建对象池
+    /// Create object pool with specified capacity
+    pub fn with_capacity(max_size: usize) -> Self {
+        Self::new(PoolConfig {
+            max_size,
+            initial_size: (max_size / 16).max(4).min(64), // 合理的初始大小
+            enable_batch_optimization: true,
+        })
     }
 
     /// 从池中获取对象
@@ -248,6 +261,21 @@ impl<E: EventDataTrait> TypedPool<E> {
             initial_size: self.config.initial_size,
         }
     }
+
+    /// 克隆池引用（用于在多个地方共享同一个池）
+    /// Clone pool reference (for sharing the same pool across multiple places)
+    pub fn clone_ref(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            config: self.config.clone(),
+        }
+    }
+
+    /// 获取池配置
+    /// Get pool configuration
+    pub fn config(&self) -> &PoolConfig {
+        &self.config
+    }
 }
 
 /// 池统计信息
@@ -259,82 +287,6 @@ pub struct PoolStats {
     pub initial_size: usize,
 }
 
-/// 池管理器，支持多种类型的对象池
-/// Pool manager, supporting multiple types of object pools
-pub struct PoolManager {
-    pools: RwLock<HashMap<TypeId, Box<dyn std::any::Any + Send + Sync>>>,
-    default_config: PoolConfig,
-}
-
-impl PoolManager {
-    /// 创建新的池管理器
-    /// Create new pool manager
-    pub fn new(default_config: PoolConfig) -> Self {
-        Self {
-            pools: RwLock::new(HashMap::new()),
-            default_config,
-        }
-    }
-
-    /// 获取或创建指定类型的池
-    /// Get or create pool for specified type
-    pub fn get_or_create_pool<E: EventDataTrait>(&self) -> Arc<TypedPool<E>> {
-        let type_id = TypeId::of::<E>();
-        
-        // 尝试从已有池中获取
-        // Try to get from existing pools
-        {
-            let pools = self.pools.read().unwrap();
-            if let Some(pool_any) = pools.get(&type_id) {
-                if let Some(pool) = pool_any.downcast_ref::<Arc<TypedPool<E>>>() {
-                    return pool.clone();
-                }
-            }
-        }
-
-        // 创建新池
-        // Create new pool
-        let new_pool = Arc::new(TypedPool::new(self.default_config.clone()));
-        let pool_clone = new_pool.clone();
-        
-        {
-            let mut pools = self.pools.write().unwrap();
-            pools.insert(type_id, Box::new(new_pool));
-        }
-        
-        pool_clone
-    }
-
-    /// 获取指定类型池的统计信息
-    /// Get statistics for specified type pool
-    pub fn get_pool_stats<E: EventDataTrait>(&self) -> Option<PoolStats> {
-        let type_id = TypeId::of::<E>();
-        let pools = self.pools.read().unwrap();
-        
-        pools.get(&type_id)
-            .and_then(|pool_any| pool_any.downcast_ref::<Arc<TypedPool<E>>>())
-            .map(|pool| pool.stats())
-    }
-}
-
-/// 全局池管理器实例
-/// Global pool manager instance
-static GLOBAL_POOL_MANAGER: OnceLock<PoolManager> = OnceLock::new();
-
-/// 获取全局池管理器
-/// Get global pool manager
-pub fn global_pool_manager() -> &'static PoolManager {
-    GLOBAL_POOL_MANAGER.get_or_init(|| {
-        PoolManager::new(PoolConfig::default())
-    })
-}
-
-/// 获取指定类型的对象池
-/// Get object pool for specified type
-pub fn get_pool<E: EventDataTrait>() -> Arc<TypedPool<E>> {
-    global_pool_manager().get_or_create_pool::<E>()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,8 +295,8 @@ mod tests {
     struct TestEvent(u32);
     
     #[test]
-    fn test_typed_pool_basic_operations() {
-        let pool = TypedPool::new(PoolConfig::default());
+    fn test_timer_event_pool_basic_operations() {
+        let pool = TimerEventPool::new(PoolConfig::default());
         
         // 测试获取和释放
         let data = pool.acquire(123, TestEvent(456));
@@ -356,23 +308,46 @@ mod tests {
     }
     
     #[test]
-    fn test_pool_manager() {
-        let manager = PoolManager::new(PoolConfig::default());
+    fn test_pool_with_capacity() {
+        let pool = TimerEventPool::<TestEvent>::with_capacity(512);
         
-        // 获取不同类型的池
-        let pool1 = manager.get_or_create_pool::<TestEvent>();
-        let pool2 = manager.get_or_create_pool::<TestEvent>();
-        
-        // 应该是同一个池的引用
-        assert!(Arc::ptr_eq(&pool1, &pool2));
+        assert_eq!(pool.config().max_size, 512);
+        assert!(pool.config().initial_size > 0);
+        assert!(pool.config().enable_batch_optimization);
     }
     
     #[test]
-    fn test_global_pool_manager() {
-        let pool1 = get_pool::<TestEvent>();
-        let pool2 = get_pool::<TestEvent>();
+    fn test_pool_clone_ref() {
+        let pool1 = TimerEventPool::<TestEvent>::new_default();
+        let pool2 = pool1.clone_ref();
         
-        // 全局管理器应该返回同一个池
-        assert!(Arc::ptr_eq(&pool1, &pool2));
+        // 应该共享同一个底层队列
+        let data = pool1.acquire(123, TestEvent(456));
+        pool2.release(data);
+        
+        // 从 pool1 获取，应该能获取到刚刚 pool2 释放的对象
+        assert!(pool1.stats().current_size > 0);
+    }
+    
+    #[test]
+    fn test_batch_operations() {
+        let pool = TimerEventPool::<TestEvent>::new_default();
+        
+        let requests = vec![
+            (1, TestEvent(100)),
+            (2, TestEvent(200)),
+            (3, TestEvent(300)),
+        ];
+        
+        let objects = pool.batch_acquire(&requests);
+        assert_eq!(objects.len(), 3);
+        
+        for (i, obj) in objects.iter().enumerate() {
+            assert_eq!(obj.connection_id, requests[i].0);
+            assert_eq!(obj.timeout_event, requests[i].1);
+        }
+        
+        pool.batch_release(objects);
+        assert!(pool.stats().current_size > 0);
     }
 }
