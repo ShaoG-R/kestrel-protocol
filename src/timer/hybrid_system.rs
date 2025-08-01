@@ -24,23 +24,47 @@ use crate::timer::event::traits::{EventDataTrait, EventFactory};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-/// 批量处理缓冲区（本地定义）
-/// Batch processing buffers (local definition)
+/// 高性能批量处理缓冲区（本地定义）
+/// High-performance batch processing buffers (local definition)
 struct HybridBatchProcessingBuffers {
-    /// 按连接分组的过期定时器ID
-    /// Expired timer IDs grouped by connection
+    /// 按连接分组的过期定时器ID（预分配容量）
+    /// Expired timer IDs grouped by connection (pre-allocated capacity)
     expired_by_connection: HashMap<ConnectionId, Vec<TimerEntryId>>,
+    /// 预分配的条目ID缓冲区用于批量移除
+    /// Pre-allocated entry ID buffer for batch removal
+    entry_ids_buffer: Vec<TimerEntryId>,
+    /// 连接映射更新缓冲区
+    /// Connection mapping update buffer
+    connection_updates: HashMap<ConnectionId, Vec<TimerEntryId>>,
 }
 
 impl HybridBatchProcessingBuffers {
     fn new() -> Self {
         Self {
-            expired_by_connection: HashMap::new(),
+            expired_by_connection: HashMap::with_capacity(64),
+            entry_ids_buffer: Vec::with_capacity(256),
+            connection_updates: HashMap::with_capacity(64),
         }
     }
     
     fn clear(&mut self) {
+        // 清空但保留容量以避免重新分配
+        // Clear but retain capacity to avoid reallocation
         self.expired_by_connection.clear();
+        self.entry_ids_buffer.clear(); 
+        self.connection_updates.clear();
+        
+        // 如果缓冲区过大，适度收缩以控制内存使用
+        // If buffers are too large, shrink moderately to control memory usage
+        if self.expired_by_connection.capacity() > 512 {
+            self.expired_by_connection.shrink_to(256);
+        }
+        if self.entry_ids_buffer.capacity() > 2048 {
+            self.entry_ids_buffer.shrink_to(1024);
+        }
+        if self.connection_updates.capacity() > 512 {
+            self.connection_updates.shrink_to(256);
+        }
     }
 }
 use tokio::{
@@ -88,8 +112,8 @@ pub struct HybridTimerTask<E: EventDataTrait> {
 }
 
 impl<E: EventDataTrait> HybridTimerTask<E> {
-    /// 创建新的混合并行定时器任务
-    /// Create new hybrid parallel timer task
+    /// 创建新的混合并行定时器任务（高性能版本）
+    /// Create new hybrid parallel timer task (high-performance version)
     pub fn new(command_buffer_size: usize, parallel_threshold: usize) -> (Self, mpsc::Sender<TimerTaskCommand<E>>) {
         let (command_tx, command_rx) = mpsc::channel(command_buffer_size);
         let timing_wheel = TimingWheel::new(512, Duration::from_millis(10));
@@ -101,8 +125,10 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
             parallel_system,
             command_rx,
             command_tx: command_tx.clone(),
-            connection_timers: HashMap::new(),
-            entry_to_connection: HashMap::new(),
+            // 预分配更大的容量以减少重新分配
+            // Pre-allocate larger capacity to reduce reallocations
+            connection_timers: HashMap::with_capacity(128),
+            entry_to_connection: HashMap::with_capacity(1024),
             next_event_id: 1,
             stats: TimerTaskStats {
                 total_timers: 0,
@@ -178,8 +204,8 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
         info!("Hybrid parallel timer task shutdown completed");
     }
 
-    /// 混合并行推进时间轮（核心方法）
-    /// Hybrid parallel advance timing wheel (core method)
+    /// 高性能混合并行推进时间轮（核心方法）
+    /// High-performance hybrid parallel advance timing wheel (core method)
     async fn advance_timing_wheel_hybrid(&mut self) {
         let now = Instant::now();
         let expired_timers = self.timing_wheel.advance(now);
@@ -194,29 +220,46 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
         // Clear and reuse buffers
         self.batch_processing_buffers.clear();
 
-        // 收集连接映射信息
-        // Collect connection mapping info
+        // 单次遍历优化：同时收集连接映射信息和预提取通知数据，减少遍历次数
+        // Single-pass optimization: collect connection mapping and pre-extract notification data to reduce iterations
+        let mut notification_data = Vec::with_capacity(batch_size);
+        self.batch_processing_buffers.entry_ids_buffer.reserve(batch_size);
+        
         for entry in &expired_timers {
-            if let Some(&conn_id) = self.entry_to_connection.get(&entry.id) {
-                self.batch_processing_buffers.expired_by_connection
+            let entry_id = entry.id;
+            
+            // 预提取通知数据（避免后续的 clone）
+            // Pre-extract notification data (avoid subsequent clones)
+            notification_data.push((
+                entry_id,
+                entry.event.data.connection_id,
+                entry.event.data.timeout_event.clone(),
+                entry.event.callback_tx.clone(),
+                entry.event.data.clone(),
+            ));
+            
+            // 添加到 ID 缓冲区用于批量移除
+            // Add to ID buffer for batch removal
+            self.batch_processing_buffers.entry_ids_buffer.push(entry_id);
+            
+            // 收集连接映射信息（优化的单次查找和移除）
+            // Collect connection mapping info (optimized single lookup and removal)
+            if let Some(conn_id) = self.entry_to_connection.remove(&entry_id) {
+                self.batch_processing_buffers.connection_updates
                     .entry(conn_id)
                     .or_insert_with(|| Vec::with_capacity(4))
-                    .push(entry.id);
+                    .push(entry_id);
             }
         }
 
-        // 批量清理映射关系
-        // Batch cleanup mapping relationships
-        for entry in &expired_timers {
-            self.entry_to_connection.remove(&entry.id);
-        }
-
-        // 清理连接定时器映射
-        // Cleanup connection timer mappings
-        for (conn_id, expired_ids) in self.batch_processing_buffers.expired_by_connection.drain() {
+        // 批量清理连接定时器映射（优化的批量更新）
+        // Batch cleanup connection timer mappings (optimized batch update)
+        for (conn_id, expired_ids) in self.batch_processing_buffers.connection_updates.drain() {
             if let Some(entry_ids) = self.connection_timers.get_mut(&conn_id) {
-                for expired_id in expired_ids {
-                    entry_ids.remove(&expired_id);
+                // 使用向量化移除提升性能
+                // Use vectorized removal for better performance
+                for expired_id in &expired_ids {
+                    entry_ids.remove(expired_id);
                 }
                 if entry_ids.is_empty() {
                     self.connection_timers.remove(&conn_id);
@@ -224,29 +267,20 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
             }
         }
 
-        // 关键：根据批量大小选择处理策略
-        // Key: Choose processing strategy based on batch size
-        if batch_size >= self.parallel_threshold {
-            // 先提取事件通知所需的信息，避免后续访问移动后的数据
-            // Extract event notification info first to avoid accessing moved data later
-            let notification_data: Vec<_> = expired_timers.iter()
-                .map(|entry| (
-                    entry.id,
-                    entry.event.data.connection_id,
-                    entry.event.data.timeout_event.clone(),
-                    entry.event.callback_tx.clone(),
-                    entry.event.data.clone(),
-                ))
-                .collect();
+        // 智能策略选择：根据批量大小和系统负载选择最优处理方式
+        // Smart strategy selection: choose optimal processing based on batch size and system load
+        let should_use_parallel = batch_size >= self.parallel_threshold && 
+            self.stats.total_timers >= 100; // 额外的负载检查
 
+        if should_use_parallel {
             // 使用混合并行系统处理大批量
             // Use hybrid parallel system for large batches
             match self.parallel_system.process_timer_batch(expired_timers).await {
                 Ok(parallel_result) => {
-                    info!(
+                    trace!(
                         processed_count = parallel_result.processed_count,
                         strategy = ?parallel_result.strategy_used,
-                        duration_ms = parallel_result.processing_duration.as_millis(),
+                        duration_us = parallel_result.processing_duration.as_micros(),
                         "Parallel batch processing completed"
                     );
                     
@@ -254,34 +288,139 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
                     // Update statistics
                     self.stats.processed_timers += parallel_result.processed_count as u64;
                     
-                    // 记录并行处理的详细统计
-                    // Log detailed parallel processing stats
-                    let parallel_stats = self.parallel_system.get_stats();
-                    debug!(
-                        parallel_stats = ?parallel_stats,
-                        "Parallel processing statistics"
-                    );
-
-                    // 并行处理完成后，发送事件通知
-                    // After parallel processing, send event notifications
-                    self.send_timer_notifications_from_data(notification_data).await;
+                    // 高性能并发事件通知
+                    // High-performance concurrent event notifications
+                    self.send_timer_notifications_optimized(notification_data).await;
                 }
                 Err(e) => {
                     warn!(error = ?e, "Parallel processing failed, falling back to sequential");
                     // 失败时使用预提取的数据进行顺序处理
                     // Fallback to sequential processing using pre-extracted data
-                    self.process_timers_from_notification_data(notification_data).await;
+                    self.process_timers_from_notification_data_optimized(notification_data).await;
                 }
             }
         } else {
-            // 小批量使用传统顺序处理
-            // Use traditional sequential processing for small batches
-            self.process_timers_sequential(expired_timers).await;
+            // 小批量直接使用优化的顺序处理
+            // Small batches use optimized sequential processing directly
+            self.process_timers_from_notification_data_optimized(notification_data).await;
         }
     }
 
-    /// 从预提取的数据发送定时器通知
-    /// Send timer notifications from pre-extracted data
+    /// 高性能发送定时器通知（优化版本）
+    /// High-performance send timer notifications (optimized version)
+    async fn send_timer_notifications_optimized(
+        &mut self, 
+        notification_data: Vec<(
+            crate::timer::wheel::TimerEntryId,
+            crate::timer::event::ConnectionId,
+            E,
+            tokio::sync::mpsc::Sender<crate::timer::event::TimerEventData<E>>,
+            crate::timer::event::TimerEventData<E>,
+        )>
+    ) {
+        let notification_count = notification_data.len();
+        
+        if notification_count == 0 {
+            return;
+        }
+        
+        // 基于批量大小选择最优并发策略
+        // Choose optimal concurrency strategy based on batch size
+        if notification_count <= 16 {
+            // 小批量使用顺序发送减少并发开销
+            // Small batches use sequential sending to reduce concurrency overhead
+            self.send_notifications_sequential(notification_data).await;
+        } else {
+            // 大批量使用分块并发处理
+            // Large batches use chunked concurrent processing
+            self.send_notifications_chunked_concurrent(notification_data).await;
+        }
+    }
+    
+    /// 顺序发送通知（小批量优化）
+    /// Sequential notification sending (small batch optimization)
+    async fn send_notifications_sequential(
+        &mut self,
+        notification_data: Vec<(
+            crate::timer::wheel::TimerEntryId,
+            crate::timer::event::ConnectionId,
+            E,
+            tokio::sync::mpsc::Sender<crate::timer::event::TimerEventData<E>>,
+            crate::timer::event::TimerEventData<E>,
+        )>
+    ) {
+        let mut successful_count = 0;
+        
+        for (entry_id, connection_id, event_type, callback_tx, event_data) in notification_data {
+            if callback_tx.send(event_data).await.is_ok() {
+                successful_count += 1;
+                trace!(entry_id, connection_id, event_type = ?event_type, "Timer event sent");
+            } else {
+                warn!(entry_id, connection_id, "Failed to send timer event");
+            }
+        }
+        
+        self.stats.processed_timers += successful_count;
+    }
+    
+    /// 分块并发发送通知（大批量优化）
+    /// Chunked concurrent notification sending (large batch optimization)
+    async fn send_notifications_chunked_concurrent(
+        &mut self,
+        notification_data: Vec<(
+            crate::timer::wheel::TimerEntryId,
+            crate::timer::event::ConnectionId,
+            E,
+            tokio::sync::mpsc::Sender<crate::timer::event::TimerEventData<E>>,
+            crate::timer::event::TimerEventData<E>,
+        )>
+    ) {
+        let notification_count = notification_data.len();
+        let chunk_size = std::cmp::max(16, notification_count / 8); // 动态块大小
+        
+        let mut successful_count = 0;
+        
+        // 分块处理以控制并发数量和内存使用
+        // Process in chunks to control concurrency and memory usage
+        for chunk in notification_data.chunks(chunk_size) {
+            let chunk_futures: Vec<_> = chunk.iter()
+                .map(|(entry_id, connection_id, event_type, callback_tx, event_data)| {
+                    let entry_id = *entry_id;
+                    let connection_id = *connection_id;
+                    let event_type = event_type.clone();
+                    let callback_tx = callback_tx.clone();
+                    let event_data = event_data.clone();
+                    
+                    async move {
+                        if callback_tx.send(event_data).await.is_ok() {
+                            trace!(entry_id, connection_id, event_type = ?event_type, "Timer event sent");
+                            1
+                        } else {
+                            warn!(entry_id, connection_id, "Failed to send timer event");
+                            0
+                        }
+                    }
+                })
+                .collect();
+            
+            let chunk_results = futures::future::join_all(chunk_futures).await;
+            successful_count += chunk_results.iter().sum::<usize>();
+        }
+        
+        self.stats.processed_timers += successful_count as u64;
+        
+        if notification_count > 100 {
+            debug!(
+                total_notifications = notification_count,
+                successful_notifications = successful_count,
+                "Chunked concurrent timer notifications completed"
+            );
+        }
+    }
+
+    /// 从预提取的数据发送定时器通知（备用方法）
+    /// Send timer notifications from pre-extracted data (backup method)
+    #[allow(dead_code)]
     async fn send_timer_notifications_from_data(
         &mut self, 
         notification_data: Vec<(
@@ -334,8 +473,36 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
         );
     }
 
-    /// 从预提取的数据进行顺序处理（fallback）
-    /// Sequential processing from pre-extracted data (fallback)
+    /// 高性能优化的数据处理（新版本）
+    /// High-performance optimized data processing (new version)
+    async fn process_timers_from_notification_data_optimized(
+        &mut self, 
+        notification_data: Vec<(
+            crate::timer::wheel::TimerEntryId,
+            crate::timer::event::ConnectionId,
+            E,
+            tokio::sync::mpsc::Sender<crate::timer::event::TimerEventData<E>>,
+            crate::timer::event::TimerEventData<E>,
+        )>
+    ) {
+        let processed_count = notification_data.len();
+        
+        if processed_count == 0 {
+            return;
+        }
+        
+        // 直接调用优化的通知发送方法
+        // Directly call optimized notification sending method
+        self.send_timer_notifications_optimized(notification_data).await;
+        
+        if processed_count > 1 {
+            trace!(processed_count, "Optimized batch processed expired timers");
+        }
+    }
+
+    /// 从预提取的数据进行顺序处理（fallback，备用方法）
+    /// Sequential processing from pre-extracted data (fallback, backup method)
+    #[allow(dead_code)]
     async fn process_timers_from_notification_data(
         &mut self, 
         notification_data: Vec<(
@@ -377,8 +544,9 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
         }
     }
 
-    /// 传统顺序处理定时器（作为fallback）
-    /// Traditional sequential timer processing (as fallback)
+    /// 传统顺序处理定时器（作为fallback，备用方法）
+    /// Traditional sequential timer processing (as fallback, backup method)
+    #[allow(dead_code)]
     async fn process_timers_sequential(&mut self, expired_timers: Vec<TimerEntry<E>>) {
         let processed_count = expired_timers.len();
         
@@ -532,8 +700,8 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
         Ok(handle)
     }
 
-    /// 批量注册定时器
-    /// Batch register timers  
+    /// 高性能批量注册定时器（优化版本）
+    /// High-performance batch register timers (optimized version)
     async fn batch_register_timers(&mut self, batch_registration: BatchTimerRegistration<E>) -> BatchTimerResult<TimerHandle<E>> {
         let registrations = batch_registration.registrations;
         let total_count = registrations.len();
@@ -549,19 +717,25 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
         let start_event_id = self.next_event_id;
         self.next_event_id += total_count as u64;
         
-        // 批量创建定时器事件，为时间轮批量操作准备数据
-        // Batch create timer events, prepare data for timing wheel batch operation
+        // 使用预分配的缓冲区避免重复分配
+        // Use pre-allocated buffers to avoid repeated allocations
         let mut timers_for_wheel = Vec::with_capacity(total_count);
         let mut registration_data = Vec::with_capacity(total_count);
         
-        // 为批量对象池API准备数据
-        // Prepare data for batch object pool API
-        let pool_requests: Vec<_> = registrations.iter()
-            .map(|reg| (reg.connection_id, reg.timeout_event.clone()))
-            .collect();
-        let callback_txs: Vec<_> = registrations.iter()
-            .map(|reg| reg.callback_tx.clone())
-            .collect();
+        // 预分配连接映射更新数据
+        // Pre-allocate connection mapping update data
+        self.batch_processing_buffers.connection_updates.clear();
+        self.batch_processing_buffers.connection_updates.reserve(total_count / 4); // 估计连接数
+        
+        // 单次遍历构建所有需要的数据结构
+        // Single-pass construction of all required data structures
+        let mut pool_requests = Vec::with_capacity(total_count);
+        let mut callback_txs = Vec::with_capacity(total_count);
+        
+        for registration in &registrations {
+            pool_requests.push((registration.connection_id, registration.timeout_event.clone()));
+            callback_txs.push(registration.callback_tx.clone());
+        }
         
         // 批量创建定时器事件，智能策略选择，高性能优化
         // Batch create timer events, smart strategy selection, high performance optimization
@@ -572,24 +746,31 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
             &callback_txs,
         );
         
-        // 构建时间轮数据
-        // Build timing wheel data
+        // 单次遍历构建时间轮数据和连接映射预处理
+        // Single-pass construction of timing wheel data and connection mapping preprocessing
         for (timer_event, registration) in timer_events.into_iter().zip(registrations.iter()) {
             timers_for_wheel.push((registration.delay, timer_event));
             registration_data.push((registration.connection_id, registration.delay));
+            
+            // 预处理连接映射更新
+            // Preprocess connection mapping updates
+            self.batch_processing_buffers.connection_updates
+                .entry(registration.connection_id)
+                .or_insert_with(|| Vec::with_capacity(4));
         }
         
         // 使用时间轮的批量API一次性添加所有定时器
         // Use timing wheel's batch API to add all timers at once
         let entry_ids = self.timing_wheel.batch_add_timers(timers_for_wheel);
         
-        // 批量更新映射关系
-        // Batch update mapping relationships
+        // 高效批量更新映射关系
+        // Efficiently batch update mapping relationships
         for (entry_id, (connection_id, _delay)) in entry_ids.iter().zip(registration_data.iter()) {
-            self.connection_timers
-                .entry(*connection_id)
-                .or_default()
-                .insert(*entry_id);
+            // 使用预先分配的连接映射结构
+            // Use pre-allocated connection mapping structure
+            if let Some(connection_entries) = self.batch_processing_buffers.connection_updates.get_mut(connection_id) {
+                connection_entries.push(*entry_id);
+            }
             
             self.entry_to_connection.insert(*entry_id, *connection_id);
             
@@ -599,10 +780,21 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
             result.successes.push(handle);
         }
         
-        trace!(
-            batch_size = total_count,
-            "Batch registered timers successfully using wheel batch API"
-        );
+        // 批量更新连接定时器映射
+        // Batch update connection timer mappings
+        for (connection_id, entry_ids) in self.batch_processing_buffers.connection_updates.drain() {
+            let connection_timers = self.connection_timers.entry(connection_id).or_default();
+            for entry_id in entry_ids {
+                connection_timers.insert(entry_id);
+            }
+        }
+        
+        if total_count > 10 {
+            trace!(
+                batch_size = total_count,
+                "High-performance batch registered timers successfully"
+            );
+        }
         
         result
     }

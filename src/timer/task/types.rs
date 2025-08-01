@@ -13,36 +13,12 @@ use crate::timer::{
     wheel::TimerEntryId,
 };
 use crate::timer::event::traits::EventDataTrait;
-use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::commands::{TimerTaskCommand, TimerError};
 
-/// 批量处理缓冲区，用于减少内存分配
-/// Batch processing buffers for reducing memory allocation
-#[derive(Debug)]
-pub(super) struct BatchProcessingBuffers {
-    /// 连接到过期定时器ID的映射缓冲区
-    /// Buffer for connection to expired timer IDs mapping
-    pub(super) expired_by_connection: HashMap<u32, Vec<u64>>,
-}
-
-impl BatchProcessingBuffers {
-    /// 创建新的批量处理缓冲区
-    /// Create new batch processing buffers
-    pub(super) fn new() -> Self {
-        Self {
-            expired_by_connection: HashMap::with_capacity(64),
-        }
-    }
-
-    /// 清空所有缓冲区以供重用
-    /// Clear all buffers for reuse
-    pub(super) fn clear(&mut self) {
-        self.expired_by_connection.clear();
-    }
-}
+// BatchProcessingBuffers removed - now using HybridBatchProcessingBuffers in hybrid_system.rs
 
 /// 定时器注册请求
 /// Timer registration request
