@@ -1,7 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::matches;
+use std::marker::PhantomData;
 use crate::timer::event::traits::EventDataTrait;
-use crate::timer::{ProcessedTimerData, TimerEntry, TimerEventData};
+use crate::timer::{ProcessedTimerData, TimerEventData};
 use crate::timer::event::zero_copy::ZeroCopyEventDelivery;
 
 /// 单线程执行模式判断
@@ -80,12 +81,7 @@ impl ExecutionModeSelector {
 /// 直通式定时器处理器（零异步开销）
 /// Bypass timer processor (zero async overhead)
 pub struct BypassTimerProcessor<E: EventDataTrait> {
-    /// 内联处理缓冲区（栈分配）
-    /// Inline processing buffer (stack allocated)
-    inline_buffer: Vec<ProcessedTimerData<E>>,
-    /// 处理统计
-    /// Processing statistics
-    processed_count: usize,
+    _marker: PhantomData<E>,
 }
 
 impl<E: EventDataTrait> Default for BypassTimerProcessor<E> {
@@ -97,35 +93,11 @@ impl<E: EventDataTrait> Default for BypassTimerProcessor<E> {
 impl<E: EventDataTrait> BypassTimerProcessor<E> {
     pub fn new() -> Self {
         Self {
-            inline_buffer: Vec::with_capacity(256), // 预分配避免运行时分配
-            processed_count: 0,
+            _marker: PhantomData,
         }
     }
     
-    /// 直通式批量处理（同步，零异步开销）
-    /// Bypass batch processing (synchronous, zero async overhead)
-    pub fn process_batch_bypass(
-        &mut self,
-        timer_entries: &[TimerEntry<E>],
-    ) -> &[ProcessedTimerData<E>] {
-        self.inline_buffer.clear();
-        self.inline_buffer.reserve(timer_entries.len());
-        
-        // 直接同步处理，无异步调度开销
-        // Direct synchronous processing, no async scheduling overhead
-        for (i, entry) in timer_entries.iter().enumerate() {
-            self.inline_buffer.push(ProcessedTimerData {
-                entry_id: entry.id,
-                connection_id: entry.event.data.connection_id,
-                timeout_event: entry.event.data.timeout_event.clone(),
-                expiry_time: entry.expiry_time,
-                slot_index: i,
-            });
-        }
-        
-        self.processed_count += timer_entries.len();
-        &self.inline_buffer
-    }
+
     
     /// 直通式事件分发（同步，使用引用传递）
     /// Bypass event dispatch (synchronous, using reference passing)
@@ -150,9 +122,5 @@ impl<E: EventDataTrait> BypassTimerProcessor<E> {
         handler.batch_deliver_event_refs(&event_ref_ptrs)
     }
     
-    /// 获取处理统计
-    /// Get processing statistics
-    pub fn get_processed_count(&self) -> usize {
-        self.processed_count
-    }
+
 }

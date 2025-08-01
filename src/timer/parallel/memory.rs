@@ -8,12 +8,6 @@ pub struct MemoryPool<E: EventDataTrait> {
     /// 预分配的数据缓冲区
     /// Pre-allocated data buffers
     data_buffers: Vec<Vec<ProcessedTimerData<E>>>,
-    /// 预分配的ID缓冲区  
-    /// Pre-allocated ID buffers
-    id_buffers: Vec<Vec<u32>>,
-    /// 预分配的时间戳缓冲区
-    /// Pre-allocated timestamp buffers
-    timestamp_buffers: Vec<Vec<u64>>,
     /// 当前缓冲区索引
     /// Current buffer index
     current_buffer_index: AtomicUsize,
@@ -25,19 +19,13 @@ pub struct MemoryPool<E: EventDataTrait> {
 impl<E: EventDataTrait> MemoryPool<E> {
     pub fn new(buffer_count: usize, buffer_capacity: usize) -> Self {
         let mut data_buffers = Vec::with_capacity(buffer_count);
-        let mut id_buffers = Vec::with_capacity(buffer_count);
-        let mut timestamp_buffers = Vec::with_capacity(buffer_count);
         
         for _ in 0..buffer_count {
             data_buffers.push(Vec::with_capacity(buffer_capacity));
-            id_buffers.push(Vec::with_capacity(buffer_capacity));
-            timestamp_buffers.push(Vec::with_capacity(buffer_capacity));
         }
         
         Self {
             data_buffers,
-            id_buffers,
-            timestamp_buffers,
             current_buffer_index: AtomicUsize::new(0),
             buffer_count,
         }
@@ -52,25 +40,7 @@ impl<E: EventDataTrait> MemoryPool<E> {
         buffer
     }
     
-    /// 获取ID缓冲区和时间戳缓冲区
-    /// Get ID buffer and timestamp buffer
-    pub fn get_work_buffers(&mut self) -> (&mut Vec<u32>, &mut Vec<u64>) {
-        let index = self.current_buffer_index.load(Ordering::Relaxed) % self.buffer_count;
-        let id_buffer = &mut self.id_buffers[index];
-        let timestamp_buffer = &mut self.timestamp_buffers[index];
-        
-        id_buffer.clear();
-        timestamp_buffer.clear();
-        
-        (id_buffer, timestamp_buffer)
-    }
-    
-    /// 返回缓冲区（标记为可重用）
-    /// Return buffer (mark as reusable)
-    pub fn return_buffers(&self) {
-        // 在这个实现中，缓冲区会在下次获取时自动清理
-        // In this implementation, buffers are automatically cleaned on next acquisition
-    }
+
 }
 
 /// 零分配处理器 - 最小化内存分配
