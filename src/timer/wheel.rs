@@ -251,6 +251,28 @@ mod tests {
     }
 
     // ========== 边界条件测试 ==========
+
+    #[test]
+    fn test_zero_duration_timer() {
+        let mut wheel = TimingWheel::new(8, Duration::from_millis(100));
+        let event = create_test_timer_event(1);
+        
+        let timer_id = wheel.add_timer(Duration::ZERO, event);
+        assert_eq!(timer_id, 1);
+        
+        // 调试信息：查看定时器的具体位置和时间
+        println!("Current time: {:?}", wheel.current_time);
+        println!("Timer count: {}", wheel.timer_count());
+        println!("Next expiry: {:?}", wheel.next_expiry_time());
+        
+        // 获取一个稍微未来的时间点来确保时间差
+        let future_now = tokio::time::Instant::now() + Duration::from_nanos(1);
+        
+        // 立即推进应该触发定时器
+        let expired = wheel.advance(future_now);
+        println!("Expired timers: {}", expired.len());
+        assert_eq!(expired.len(), 1);
+    }
     
     #[test]
     fn test_immediate_timer_basic() {

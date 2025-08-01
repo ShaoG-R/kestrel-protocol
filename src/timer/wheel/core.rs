@@ -396,6 +396,10 @@ impl<E: EventDataTrait> TimingWheel<E> {
     pub fn advance(&mut self, now: Instant) -> Vec<TimerEntry<E>> {
         let mut expired_timers = Vec::new();
         
+        // 首先检查当前槽位是否有已到期的定时器（处理零持续时间和立即到期的情况）
+        // First check current slot for already expired timers (handle zero duration and immediate expiry)
+        self.check_current_slot_for_expired_timers(now, &mut expired_timers);
+        
         // 计算需要推进多少个槽位
         // Calculate how many slots to advance
         let elapsed = now.saturating_duration_since(self.current_time);
@@ -586,6 +590,50 @@ impl<E: EventDataTrait> TimingWheel<E> {
         // 使用位运算替代模运算，提高性能
         // Use bitwise operation instead of modulo for better performance
         slot_offset & self.slot_mask
+    }
+
+    /// 检查当前槽位中的已到期定时器（处理零持续时间等边界情况）
+    /// Check current slot for expired timers (handle zero duration and edge cases)
+    fn check_current_slot_for_expired_timers(&mut self, now: Instant, expired_timers: &mut Vec<TimerEntry<E>>) {
+        let current_slot = &mut self.slots[self.current_slot];
+        let mut i = 0;
+        
+        // 逆向遍历槽位，避免在移除元素时位置偏移
+        // Traverse slot in reverse to avoid position shifts when removing elements
+        while i < current_slot.len() {
+            if let Some(entry) = current_slot.get(i) {
+                if entry.expiry_time <= now {
+                    // 定时器已到期，移除并添加到结果中
+                    // Timer expired, remove and add to results
+                    let expired_entry = current_slot.remove(i).unwrap();
+                    let entry_id = expired_entry.id;
+                    
+                    // 从映射中移除
+                    // Remove from mapping
+                    self.timer_map.remove(&entry_id);
+                    
+                    trace!(
+                        entry_id,
+                        expiry_time = ?expired_entry.expiry_time,
+                        "Timer expired in current slot"
+                    );
+                    
+                    expired_timers.push(expired_entry);
+                    
+                    // 更新后续元素的位置映射
+                    // Update position mapping for subsequent elements
+                    for j in i..current_slot.len() {
+                        if let Some(remaining_entry) = current_slot.get(j) {
+                            self.timer_map.insert(remaining_entry.id, (self.current_slot, j));
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+            } else {
+                break;
+            }
+        }
     }
 
     /// 获取时间轮统计信息

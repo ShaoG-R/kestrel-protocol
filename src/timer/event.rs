@@ -9,6 +9,9 @@ pub(super) mod zero_copy;
 pub mod traits;
 pub mod pool;
 
+#[cfg(test)]
+mod zero_copy_tests;
+
 use std::fmt;
 use std::fmt::Debug;
 use tokio::sync::mpsc;
