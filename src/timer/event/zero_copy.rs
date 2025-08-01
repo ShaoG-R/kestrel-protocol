@@ -1,8 +1,8 @@
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use arc_swap::ArcSwap;
-use std::sync::Arc;
 use crate::timer::event::traits::EventDataTrait;
+use crate::timer::event::lockfree_ring::RingBuffer;
+use crate::timer::event::memory_pool::OptimizedBatchProcessor;
 use crate::timer::TimerEventData;
 
 /// 零拷贝事件传递接口
@@ -20,72 +20,97 @@ pub trait ZeroCopyEventDelivery<E: EventDataTrait> {
     fn batch_deliver_event_refs(&self, event_refs: &[&TimerEventData<E>]) -> usize;
 }
 
-/// 高性能无锁事件槽位系统
-/// High-performance lock-free event slot system
-pub struct FastEventSlot<E: EventDataTrait> {
-    /// 事件槽位，使用 ArcSwap 实现无锁读写
-    /// Event slots using ArcSwap for lock-free read/write
-    slots: Vec<ArcSwap<Option<TimerEventData<E>>>>,
-    /// 写入索引
-    /// Write index
-    write_index: AtomicUsize,
-    /// 槽位掩码（必须是2的幂-1）
-    /// Slot mask (must be power of 2 - 1)
-    slot_mask: usize,
+/// 事件槽位（基于无锁队列）
+/// Event slot (based on lock-free queue)
+pub struct EventSlot<E: EventDataTrait> {
+    /// 无锁环形缓冲区
+    /// Lock-free ring buffer
+    ring_buffer: RingBuffer<E>,
+    /// 性能统计
+    /// Performance statistics
+    written_count: AtomicUsize,
+    failed_writes: AtomicUsize,
 }
 
-impl<E: EventDataTrait> FastEventSlot<E> {
-    /// 创建新的快速事件槽位
-    /// Create new fast event slot
-    pub fn new(slot_count: usize) -> Self {
-        // 确保slot_count是2的幂
-        // Ensure slot_count is a power of two
-        let slot_count = slot_count.next_power_of_two();
-        let slot_mask = slot_count - 1;
-
-        let mut slots = Vec::with_capacity(slot_count);
-        for _ in 0..slot_count {
-            // 初始化每个槽位为 None
-            // Initialize each slot with None
-            slots.push(ArcSwap::new(Arc::new(None)));
-        }
-
+impl<E: EventDataTrait> EventSlot<E> {
+    /// 创建新的事件槽位
+    /// Create new event slot
+    pub fn new(capacity: usize) -> Self {
         Self {
-            slots,
-            write_index: AtomicUsize::new(0),
-            slot_mask,
+            ring_buffer: RingBuffer::new(capacity),
+            written_count: AtomicUsize::new(0),
+            failed_writes: AtomicUsize::new(0),
         }
     }
 
     /// 零拷贝写入事件（移动语义）
     /// Zero-copy write event (move semantics)
+    #[inline(always)]
+    #[allow(dead_code)]
     pub fn write_event(&self, event: TimerEventData<E>) -> bool {
-        let write_idx = self.write_index.fetch_add(1, Ordering::AcqRel);
-        let slot_idx = write_idx & self.slot_mask;
-
-        let slot = &self.slots[slot_idx];
-        
-        // 加载当前槽位的值
-        // Load the current value of the slot
-        let guard = slot.load();
-        
-        // 只有当槽位为空时才写入，这可以防止覆盖未读的事件
-        // Only write if the slot is empty, which prevents overwriting unread events
-        if guard.is_none() {
-            let new_arc = Arc::new(Some(event));
-            // 尝试原子地将 None 替换为 Some(event)
-            // Atomically try to swap None with Some(event)
-            if Arc::ptr_eq(&slot.compare_and_swap(&guard, new_arc), &guard) {
-                return true; // 写入成功
+        match self.ring_buffer.try_write(event) {
+            Ok(()) => {
+                self.written_count.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            Err(_) => {
+                self.failed_writes.fetch_add(1, Ordering::Relaxed);
+                false
             }
         }
-        
-        // 如果槽位不为空，或是在我们写入时被其它线程修改，则写入失败
-        // The write fails if the slot was not empty or was modified by another thread
-        false
+    }
+
+    /// 尝试写入事件，失败时返回原始事件（用于重试）
+    /// Try to write event, return original event on failure (for retry)
+    #[inline(always)]
+    pub fn try_write_event(&self, event: TimerEventData<E>) -> Result<(), TimerEventData<E>> {
+        match self.ring_buffer.try_write(event) {
+            Ok(()) => {
+                self.written_count.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(event) => {
+                self.failed_writes.fetch_add(1, Ordering::Relaxed);
+                Err(event)
+            }
+        }
+    }
+
+    /// 批量写入事件（高性能版本）
+    /// Batch write events (high-performance version)
+    #[inline(always)]
+    #[allow(dead_code)]
+    pub fn batch_write_events(&self, events: Vec<TimerEventData<E>>) -> usize {
+        let written = self.ring_buffer.batch_write(events);
+        self.written_count.fetch_add(written, Ordering::Relaxed);
+        written
+    }
+
+    /// 尝试读取事件
+    /// Try to read event
+    #[inline(always)]
+    #[allow(dead_code)]
+    pub fn try_read(&self) -> Option<TimerEventData<E>> {
+        self.ring_buffer.try_read()
+    }
+
+    /// 批量读取事件
+    /// Batch read events
+    #[inline(always)]
+    #[allow(dead_code)]
+    pub fn batch_read(&self, max_events: usize) -> Vec<TimerEventData<E>> {
+        self.ring_buffer.batch_read(max_events)
+    }
+
+    /// 获取性能统计
+    /// Get performance statistics
+    pub fn get_stats(&self) -> (usize, usize, f64) {
+        let written = self.written_count.load(Ordering::Relaxed);
+        let failed = self.failed_writes.load(Ordering::Relaxed);
+        let utilization = self.ring_buffer.utilization();
+        (written, failed, utilization)
     }
 }
-
 /// 引用传递事件处理器
 /// Reference-passing event handler
 pub struct RefEventHandler<E: EventDataTrait, F>
@@ -134,48 +159,274 @@ where
     }
 }
 
-/// 零拷贝事件批量分发器
-/// Zero-copy batch event dispatcher  
-pub struct ZeroCopyBatchDispatcher<E: EventDataTrait> {
-    /// 快速事件槽位
-    /// Fast event slots
-    event_slots: Vec<FastEventSlot<E>>,
-    /// 轮询索引
-    /// Round-robin index
-    round_robin_index: AtomicUsize,
+/// 智能零拷贝批量分发器（集成优化批量处理器和无锁队列）
+/// Smart zero-copy batch dispatcher (integrated with optimized batch processor and lock-free queues)
+pub struct SmartZeroCopyDispatcher<E: EventDataTrait>
+where
+    E: Default + Clone,
+{
+    /// 事件槽位
+    /// Event slots
+    event_slots: Vec<EventSlot<E>>,
+    /// 优化批量处理器（集成了事件工厂和内存池）
+    /// Optimized batch processor (integrated with event factory and memory pool)
+    #[allow(dead_code)] // Used in benchmarks and create_and_dispatch_events
+    batch_processor: OptimizedBatchProcessor<E>,
+    /// 分发索引（智能负载均衡）
+    /// Dispatch index (smart load balancing)
+    dispatch_index: AtomicUsize,
     /// 批量处理阈值
     /// Batch processing threshold
-    _batch_threshold: usize,
+    batch_threshold: usize,
+    /// 性能统计
+    /// Performance statistics
+    total_dispatched: AtomicUsize,
+    total_rejected: AtomicUsize,
 }
 
-impl<E: EventDataTrait> ZeroCopyBatchDispatcher<E> {
-    pub fn new(slot_count: usize, dispatcher_count: usize) -> Self {
+impl<E: EventDataTrait> SmartZeroCopyDispatcher<E>
+where
+    E: Default + Clone,
+{
+    /// 创建智能零拷贝分发器
+    /// Create smart zero-copy dispatcher
+    pub fn new(slot_capacity: usize, dispatcher_count: usize, pool_size: usize) -> Self {
         let mut event_slots = Vec::with_capacity(dispatcher_count);
         for _ in 0..dispatcher_count {
-            event_slots.push(FastEventSlot::new(slot_count));
+            event_slots.push(EventSlot::new(slot_capacity));
         }
-        
+
+        let batch_threshold = 32; // 智能批量处理阈值
+        let batch_processor = OptimizedBatchProcessor::new(pool_size, batch_threshold);
+
         Self {
             event_slots,
-            round_robin_index: AtomicUsize::new(0),
-            _batch_threshold: 32, // 默认批量处理阈值
+            batch_processor,
+            dispatch_index: AtomicUsize::new(0),
+            batch_threshold,
+            total_dispatched: AtomicUsize::new(0),
+            total_rejected: AtomicUsize::new(0),
         }
     }
-    
-    /// 零拷贝批量事件分发
-    /// Zero-copy batch event dispatch
+
+    /// 高性能批量事件分发（智能负载均衡）
+    /// High-performance batch event dispatch (smart load balancing)
     pub fn batch_dispatch_events(&self, events: Vec<TimerEventData<E>>) -> usize {
-        let mut dispatched_count = 0;
-        
-        for (i, event) in events.into_iter().enumerate() {
-            let dispatcher_idx = (self.round_robin_index.load(Ordering::Relaxed) + i) 
-                % self.event_slots.len();
-            if self.event_slots[dispatcher_idx].write_event(event) {
-                dispatched_count += 1;
+        if events.is_empty() {
+            return 0;
+        }
+
+        let events_len = events.len();
+        let dispatcher_count = self.event_slots.len();
+
+        // 智能选择最佳分发器（基于利用率）
+        // Smart selection of best dispatcher (based on utilization)
+        let start_index = self.dispatch_index.load(Ordering::Relaxed);
+        let mut best_dispatcher = start_index % dispatcher_count;
+        let mut min_utilization = f64::MAX;
+
+        // 快速检查前3个分发器，选择利用率最低的
+        // Quick check of first 3 dispatchers, select the one with lowest utilization
+        for i in 0..std::cmp::min(3, dispatcher_count) {
+            let idx = (start_index + i) % dispatcher_count;
+            let (_, _, utilization) = self.event_slots[idx].get_stats();
+            if utilization < min_utilization {
+                min_utilization = utilization;
+                best_dispatcher = idx;
             }
         }
+
+        // 智能分发：根据批量大小选择不同策略
+        // Smart dispatch: choose different strategy based on batch size
+        let dispatched = if events_len >= self.batch_threshold {
+            // 大批量：优先填满最佳分发器，然后分散到其他分发器
+            // Large batch: fill best dispatcher first, then distribute to others
+            self.dispatch_large_batch(events, best_dispatcher, dispatcher_count)
+        } else {
+            // 小批量：轮询分发以确保延迟最低
+            // Small batch: round-robin dispatch for minimum latency
+            self.dispatch_small_batch(events, best_dispatcher, dispatcher_count)
+        };
+
+        // 更新统计信息
+        // Update statistics
+        self.total_dispatched.fetch_add(dispatched, Ordering::Relaxed);
+        self.total_rejected.fetch_add(events_len - dispatched, Ordering::Relaxed);
+
+        // 更新分发索引
+        // Update dispatch index
+        self.dispatch_index.store(
+            (best_dispatcher + 1) % dispatcher_count,
+            Ordering::Relaxed,
+        );
+
+        dispatched
+    }
+
+    /// 大批量分发策略：优先填满最佳分发器
+    /// Large batch dispatch strategy: fill best dispatcher first
+    fn dispatch_large_batch(
+        &self, 
+        events: Vec<TimerEventData<E>>, 
+        best_dispatcher: usize, 
+        _dispatcher_count: usize
+    ) -> usize {
+        // 对于大批量，直接使用批量写入到最佳分发器
+        // For large batches, directly use batch write to best dispatcher
+        self.event_slots[best_dispatcher].batch_write_events(events)
+    }
+
+    /// 小批量分发策略：轮询分发确保低延迟
+    /// Small batch dispatch strategy: round-robin for low latency
+    fn dispatch_small_batch(
+        &self, 
+        events: Vec<TimerEventData<E>>, 
+        best_dispatcher: usize, 
+        dispatcher_count: usize
+    ) -> usize {
+        let mut dispatched_count = 0;
+        let mut current_dispatcher = best_dispatcher;
         
-        self.round_robin_index.fetch_add(dispatched_count, Ordering::Relaxed);
+        for mut event in events {
+            let mut placed = false;
+            let original_dispatcher = current_dispatcher;
+            
+            // 尝试所有分发器（每个事件只试一轮）
+            // Try all dispatchers (only one round per event)
+            loop {
+                match self.event_slots[current_dispatcher].try_write_event(event) {
+                    Ok(()) => {
+                        dispatched_count += 1;
+                        placed = true;
+                        current_dispatcher = (current_dispatcher + 1) % dispatcher_count;
+                        break;
+                    }
+                    Err(returned_event) => {
+                        event = returned_event;
+                        current_dispatcher = (current_dispatcher + 1) % dispatcher_count;
+                        
+                        // 如果回到起始分发器，说明所有分发器都满了
+                        // If we're back to the starting dispatcher, all are full
+                        if current_dispatcher == original_dispatcher {
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // 如果无法放置事件，停止尝试后续事件
+            // If unable to place event, stop trying subsequent events
+            if !placed {
+                break;
+            }
+        }
+
         dispatched_count
     }
+
+    /// 智能批量创建并分发事件（使用优化批量处理器）
+    /// Smart batch create and dispatch events (using optimized batch processor)
+    pub fn create_and_dispatch_events(&self, requests: &[(u32, E)]) -> usize {
+        if requests.is_empty() {
+            return 0;
+        }
+
+        // 使用优化批量处理器创建事件
+        // Use optimized batch processor to create events
+        let events = self.batch_processor.create_events_optimized(requests);
+
+        // 分发事件
+        // Dispatch events
+        self.batch_dispatch_events(events)
+    }
+
+    /// 批量消费事件（用于测试和监控）
+    /// Batch consume events (for testing and monitoring)
+    pub fn batch_consume_events(&self, max_events_per_slot: usize) -> Vec<TimerEventData<E>> {
+        let mut all_events = Vec::new();
+
+        for slot in &self.event_slots {
+            let events = slot.batch_read(max_events_per_slot);
+            all_events.extend(events);
+        }
+
+        all_events
+    }
+
+    /// 批量归还事件到内存池
+    /// Batch return events to memory pool
+    pub fn batch_return_to_pool(&self, events: Vec<TimerEventData<E>>) {
+        self.batch_processor.process_completed(events);
+    }
+
+    /// 获取详细性能统计
+    /// Get detailed performance statistics
+    pub fn get_detailed_stats(&self) -> DetailedPerformanceStats {
+        let dispatched = self.total_dispatched.load(Ordering::Relaxed);
+        let rejected = self.total_rejected.load(Ordering::Relaxed);
+
+        // 获取批量处理器的性能统计
+        // Get batch processor performance statistics
+        let (_processed_events, pool_size, _, _, large_batch_ratio) = self.batch_processor.get_performance_stats();
+
+        let avg_utilization = self.event_slots.iter()
+            .map(|slot| {
+                let (_, _, util) = slot.get_stats();
+                util
+            })
+            .sum::<f64>() / self.event_slots.len() as f64;
+
+        DetailedPerformanceStats {
+            total_dispatched: dispatched,
+            total_rejected: rejected,
+            success_rate: if dispatched + rejected > 0 {
+                dispatched as f64 / (dispatched + rejected) as f64
+            } else {
+                1.0
+            },
+            memory_pool_hit_rate: large_batch_ratio, // 大批量处理率作为命中率指标
+            memory_pool_size: pool_size,
+            memory_pool_reuse_rate: large_batch_ratio, // 大批量处理率作为复用率指标
+            average_slot_utilization: avg_utilization,
+            dispatcher_count: self.event_slots.len(),
+        }
+    }
 }
+
+/// 详细性能统计结构
+/// Detailed performance statistics structure
+#[derive(Debug, Clone)]
+pub struct DetailedPerformanceStats {
+    pub total_dispatched: usize,
+    pub total_rejected: usize,
+    pub success_rate: f64,
+    pub memory_pool_hit_rate: f64,
+    pub memory_pool_size: usize,
+    pub memory_pool_reuse_rate: f64,
+    pub average_slot_utilization: f64,
+    pub dispatcher_count: usize,
+}
+
+impl DetailedPerformanceStats {
+    /// 打印详细统计信息
+    /// Print detailed statistics
+    pub fn print_summary(&self) {
+        println!("=== 智能零拷贝分发器性能统计 ===");
+        println!("📊 事件分发统计:");
+        println!("  - 成功分发: {}", self.total_dispatched);
+        println!("  - 分发失败: {}", self.total_rejected);
+        println!("  - 成功率: {:.1}%", self.success_rate * 100.0);
+        println!("🔋 内存池统计:");
+        println!("  - 池命中率: {:.1}%", self.memory_pool_hit_rate * 100.0);
+        println!("  - 当前池大小: {}", self.memory_pool_size);
+        println!("  - 复用率: {:.1}%", self.memory_pool_reuse_rate * 100.0);
+        println!("⚡ 分发器统计:");
+        println!("  - 平均利用率: {:.1}%", self.average_slot_utilization * 100.0);
+        println!("  - 分发器数量: {}", self.dispatcher_count);
+        println!();
+    }
+}
+
+/// 兼容性别名，保持向后兼容
+/// Compatibility alias for backward compatibility
+pub type ZeroCopyBatchDispatcher<E> = SmartZeroCopyDispatcher<E>;

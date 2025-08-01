@@ -12,6 +12,12 @@ pub mod pool;
 #[cfg(test)]
 mod zero_copy_tests;
 
+#[cfg(test)]
+mod performance_bench;
+
+pub mod lockfree_ring;
+pub mod memory_pool;
+
 use std::fmt;
 use std::fmt::Debug;
 use tokio::sync::mpsc;

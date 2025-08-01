@@ -27,7 +27,7 @@ mod tests {
 
     #[test]
     fn test_fast_event_slot_creation() {
-        let slot = FastEventSlot::<TimeoutEvent>::new(64);
+        let slot = EventSlot::<TimeoutEvent>::new(64);
         // 验证槽位创建成功，通过写入测试功能
         let event = create_test_event_data(1);
         assert!(slot.write_event(event));
@@ -35,7 +35,7 @@ mod tests {
 
     #[test]
     fn test_fast_event_slot_non_power_of_two() {
-        let slot = FastEventSlot::<TimeoutEvent>::new(100);
+        let slot = EventSlot::<TimeoutEvent>::new(100);
         // 验证非2的幂槽位数也能正常工作
         let event = create_test_event_data(1);
         assert!(slot.write_event(event));
@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn test_fast_event_slot_write_single() {
-        let slot = FastEventSlot::<TimeoutEvent>::new(16);
+        let slot = EventSlot::<TimeoutEvent>::new(16);
         let event = create_test_event_data(1);
         
         let success = slot.write_event(event);
@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn test_fast_event_slot_write_multiple() {
-        let slot = FastEventSlot::<TimeoutEvent>::new(16);
+        let slot = EventSlot::<TimeoutEvent>::new(16);
         let mut success_count = 0;
         
         for i in 0..10 {
@@ -71,7 +71,7 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
         
-        let slot = Arc::new(FastEventSlot::<TimeoutEvent>::new(64));
+        let slot = Arc::new(EventSlot::<TimeoutEvent>::new(64));
         let success_count = Arc::new(AtomicUsize::new(0));
         let thread_count = 8;
         let writes_per_thread = 50;
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_batch_dispatcher_creation() {
-        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(64, 4);
+        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(64, 4, 1000);
         // 验证分发器创建成功，通过功能测试
         let events = create_test_event_data_batch(4);
         let dispatched = dispatcher.batch_dispatch_events(events);
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_batch_dispatcher_single_batch() {
-        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(32, 2);
+        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(32, 2, 1000);
         let events = create_test_event_data_batch(10);
         
         let dispatched_count = dispatcher.batch_dispatch_events(events);
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_batch_dispatcher_multiple_batches() {
-        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(64, 4);
+        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(64, 4, 1000);
         let mut total_dispatched = 0;
         
         for batch_id in 0..5 {
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_batch_dispatcher_load_balancing() {
-        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(16, 4);
+        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(16, 4, 1000);
         let events = create_test_event_data_batch(100);
         
         let start = Instant::now();
@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_performance_small_batch() {
-        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(64, 4);
+        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(64, 4, 1000);
         let events = create_test_event_data_batch(32);
         
         let start = Instant::now();
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_performance_medium_batch() {
-        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(256, 8);
+        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(256, 8, 1000);
         let events = create_test_event_data_batch(512);
         
         let start = Instant::now();
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_performance_large_batch() {
-        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(1024, 16);
+        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(1024, 16, 1000);
         let events = create_test_event_data_batch(2048);
         
         let start = Instant::now();
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn test_memory_efficiency_no_cloning() {
         // 使用较大的槽位数以减少冲突
-        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(1024, 8);
+        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(1024, 8, 1000);
         let mut total_dispatched = 0;
         
         // 使用较少的迭代和较小的批量大小
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_empty_batch() {
-        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(32, 2);
+        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(32, 2, 1000);
         let empty_events = Vec::new();
         
         let dispatched_count = dispatcher.batch_dispatch_events(empty_events);
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_single_event() {
-        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(32, 2);
+        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(32, 2, 1000);
         let single_event = vec![create_test_event_data(42)];
         
         let dispatched_count = dispatcher.batch_dispatch_events(single_event);
@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_max_batch_size() {
-        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(512, 8);
+        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(512, 8, 1000);
         let large_batch = create_test_event_data_batch(10000);
         
         let start = Instant::now();
@@ -335,7 +335,7 @@ mod tests {
     async fn test_zero_copy_concurrent_dispatching() {
         use tokio::task;
         
-        let dispatcher = Arc::new(ZeroCopyBatchDispatcher::<TimeoutEvent>::new(256, 8));
+        let dispatcher = Arc::new(ZeroCopyBatchDispatcher::<TimeoutEvent>::new(256, 8, 1000));
         let mut tasks = Vec::new();
         let task_count = 10;
         let events_per_task = 100;
@@ -423,7 +423,7 @@ mod tests {
         let factory = EventFactory::<TimeoutEvent>::new();
         
         // 2. 创建零拷贝分发器
-        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(128, 4);
+        let dispatcher = ZeroCopyBatchDispatcher::<TimeoutEvent>::new(128, 4, 1000);
         
         // 3. 创建引用处理器
         let processed_count = Arc::new(AtomicUsize::new(0));

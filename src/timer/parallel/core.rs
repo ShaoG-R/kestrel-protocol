@@ -77,7 +77,7 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
             simd_processor: SIMDTimerProcessor::new(),
             rayon_executor: RayonBatchExecutor::new(cpu_cores),
             async_dispatcher: Arc::new(AsyncEventDispatcher::new()),
-            zero_copy_dispatcher: crate::timer::event::zero_copy::ZeroCopyBatchDispatcher::new(slot_count, dispatcher_count),
+            zero_copy_dispatcher: crate::timer::event::zero_copy::ZeroCopyBatchDispatcher::new(slot_count, dispatcher_count, 1000),
             bypass_processor: BypassTimerProcessor::new(),
             mode_selector: crate::timer::parallel::single_thread_bypass::ExecutionModeSelector::new(),
             zero_alloc_processor: crate::timer::parallel::memory::ZeroAllocProcessor::new(),
@@ -188,13 +188,28 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
     ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         let processed_data = self.simd_processor.process_batch(&timer_entries)?;
         
-        // 优先使用零拷贝分发器，失败时fallback到异步分发器
-        // Prefer zero-copy dispatcher, fallback to async dispatcher on failure
-        let events: Vec<crate::timer::event::TimerEventData<E>> = processed_data.iter()
-            .map(|data| crate::timer::event::TimerEventData::new(data.connection_id, data.timeout_event.clone()))
+        // 使用智能创建和分发，集成内存池优化
+        // Use smart creation and dispatch with memory pool optimization
+        let event_requests: Vec<_> = processed_data.iter()
+            .map(|data| (data.connection_id, data.timeout_event.clone()))
             .collect();
         
-        let dispatch_count = self.zero_copy_dispatcher.batch_dispatch_events(events.clone());
+        // 使用智能分发器的创建和分发功能，避免中间事件存储
+        // Use smart dispatcher's create and dispatch functionality, avoiding intermediate event storage
+        let dispatch_count = self.zero_copy_dispatcher.create_and_dispatch_events(&event_requests);
+        
+        // 处理事件回收和内存池管理
+        // Handle event recycling and memory pool management
+        if dispatch_count > 0 {
+            // 批量消费一些已处理的事件进行回收
+            // Batch consume some processed events for recycling
+            let consumed_events = self.zero_copy_dispatcher.batch_consume_events(dispatch_count / 2);
+            if !consumed_events.is_empty() {
+                // 将消费的事件返回内存池以供复用
+                // Return consumed events to memory pool for reuse
+                self.zero_copy_dispatcher.batch_return_to_pool(consumed_events);
+            }
+        }
         
         // 如果零拷贝分发失败（返回0），使用异步分发器作为fallback
         // If zero-copy dispatch fails (returns 0), use async dispatcher as fallback
@@ -293,15 +308,28 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
             }).await??
         };
 
-        // 步骤2: 使用智能工厂批量创建事件，优先零拷贝分发，失败时fallback到异步分发器
-        // Step 2: Use smart factory for batch event creation, prefer zero-copy dispatch, fallback to async dispatcher on failure
-        let factory = crate::timer::event::traits::EventFactory::new();
+        // 步骤2: 使用智能创建和分发，集成内存池优化
+        // Step 2: Use smart creation and dispatch with memory pool optimization
         let event_requests: Vec<_> = processed_data.iter()
             .map(|data| (data.connection_id, data.timeout_event.clone()))
             .collect();
-        let events = factory.batch_create_events(&event_requests);
         
-        let dispatch_count = self.zero_copy_dispatcher.batch_dispatch_events(events.clone());
+        // 使用智能分发器的创建和分发功能，避免中间事件存储
+        // Use smart dispatcher's create and dispatch functionality, avoiding intermediate event storage
+        let dispatch_count = self.zero_copy_dispatcher.create_and_dispatch_events(&event_requests);
+        
+        // 处理事件回收和内存池管理
+        // Handle event recycling and memory pool management
+        if dispatch_count > 0 {
+            // 批量消费一些已处理的事件进行回收
+            // Batch consume some processed events for recycling
+            let consumed_events = self.zero_copy_dispatcher.batch_consume_events(dispatch_count / 2);
+            if !consumed_events.is_empty() {
+                // 将消费的事件返回内存池以供复用
+                // Return consumed events to memory pool for reuse
+                self.zero_copy_dispatcher.batch_return_to_pool(consumed_events);
+            }
+        }
         
         // 如果零拷贝分发失败，使用异步分发器作为fallback
         // If zero-copy dispatch fails, use async dispatcher as fallback
