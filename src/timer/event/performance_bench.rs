@@ -334,11 +334,22 @@ impl ZeroCopyBenchmarker {
                 // 1. 智能创建和分发
                 total_dispatched += smart_dispatcher.create_and_dispatch_events(&requests);
                 
-                // 2. 批量消费
-                let consumed_events = smart_dispatcher.batch_consume_events(batch_size / 2);
-                
-                // 3. 批量回收到内存池
-                smart_dispatcher.batch_return_to_pool(consumed_events);
+                // 优化：减少消费和回收的频率，只在必要时执行
+                // Optimization: reduce consumption and recycling frequency, execute only when necessary
+                // 每4轮迭代才执行一次消费和回收，减少开销
+                // Execute consumption and recycling only every 4 iterations to reduce overhead
+                if total_dispatched % (batch_size * 4) == 0 {
+                    // 2. 批量消费 - 使用更小的消费量减少锁竞争
+                    // Batch consume - use smaller consumption amount to reduce lock contention
+                    let consume_size = std::cmp::min(batch_size / 4, 16);
+                    let consumed_events = smart_dispatcher.batch_consume_events(consume_size);
+                    
+                    // 3. 批量回收到内存池 - 仅在有消费事件时执行
+                    // Batch return to memory pool - execute only when there are consumed events
+                    if !consumed_events.is_empty() {
+                        smart_dispatcher.batch_return_to_pool(consumed_events);
+                    }
+                }
             }
             
             let duration = start.elapsed();

@@ -170,7 +170,6 @@ where
     event_slots: Vec<EventSlot<E>>,
     /// 优化批量处理器（集成了事件工厂和内存池）
     /// Optimized batch processor (integrated with event factory and memory pool)
-    #[allow(dead_code)] // Used in benchmarks and create_and_dispatch_events
     batch_processor: OptimizedBatchProcessor<E>,
     /// 分发索引（智能负载均衡）
     /// Dispatch index (smart load balancing)
@@ -263,17 +262,59 @@ where
         dispatched
     }
 
-    /// 大批量分发策略：优先填满最佳分发器
-    /// Large batch dispatch strategy: fill best dispatcher first
+    /// 大批量分发策略：智能分散到多个分发器
+    /// Large batch dispatch strategy: intelligently distribute to multiple dispatchers
     fn dispatch_large_batch(
         &self, 
         events: Vec<TimerEventData<E>>, 
         best_dispatcher: usize, 
-        _dispatcher_count: usize
+        dispatcher_count: usize
     ) -> usize {
-        // 对于大批量，直接使用批量写入到最佳分发器
-        // For large batches, directly use batch write to best dispatcher
-        self.event_slots[best_dispatcher].batch_write_events(events)
+        let events_per_dispatcher = events.len() / dispatcher_count;
+        let mut total_dispatched = 0;
+        let mut event_iter = events.into_iter();
+        
+        // 首先尝试在最佳分发器上处理更多事件
+        // First try to handle more events on the best dispatcher
+        let best_batch_size = std::cmp::min(events_per_dispatcher * 2, event_iter.len());
+        let mut best_batch = Vec::with_capacity(best_batch_size);
+        
+        for _ in 0..best_batch_size {
+            if let Some(event) = event_iter.next() {
+                best_batch.push(event);
+            } else {
+                break;
+            }
+        }
+        
+        if !best_batch.is_empty() {
+            total_dispatched += self.event_slots[best_dispatcher].batch_write_events(best_batch);
+        }
+        
+        // 将剩余事件分散到其他分发器
+        // Distribute remaining events to other dispatchers
+        let mut current_dispatcher = (best_dispatcher + 1) % dispatcher_count;
+        let mut current_batch = Vec::with_capacity(events_per_dispatcher);
+        
+        for event in event_iter {
+            current_batch.push(event);
+            
+            // 当批量达到合适大小或没有更多事件时，写入当前分发器
+            // Write to current dispatcher when batch reaches appropriate size or no more events
+            if current_batch.len() >= events_per_dispatcher {
+                total_dispatched += self.event_slots[current_dispatcher].batch_write_events(current_batch);
+                current_batch = Vec::with_capacity(events_per_dispatcher);
+                current_dispatcher = (current_dispatcher + 1) % dispatcher_count;
+            }
+        }
+        
+        // 处理剩余的事件
+        // Handle remaining events
+        if !current_batch.is_empty() {
+            total_dispatched += self.event_slots[current_dispatcher].batch_write_events(current_batch);
+        }
+        
+        total_dispatched
     }
 
     /// 小批量分发策略：轮询分发确保低延迟
@@ -331,12 +372,18 @@ where
             return 0;
         }
 
-        // 使用优化批量处理器创建事件
-        // Use optimized batch processor to create events
-        let events = self.batch_processor.create_events_optimized(requests);
+        // 对于小批量，直接创建事件避免批量处理器的开销
+        // For small batches, create events directly to avoid batch processor overhead
+        if requests.len() <= 64 {
+            let events: Vec<_> = requests.iter()
+                .map(|(connection_id, event_data)| TimerEventData::new(*connection_id, event_data.clone()))
+                .collect();
+            return self.batch_dispatch_events(events);
+        }
 
-        // 分发事件
-        // Dispatch events
+        // 大批量使用优化批量处理器
+        // Use optimized batch processor for large batches
+        let events = self.batch_processor.create_events_optimized(requests);
         self.batch_dispatch_events(events)
     }
 
@@ -361,6 +408,7 @@ where
 
     /// 获取详细性能统计
     /// Get detailed performance statistics
+    #[cfg(test)]
     pub fn get_detailed_stats(&self) -> DetailedPerformanceStats {
         let dispatched = self.total_dispatched.load(Ordering::Relaxed);
         let rejected = self.total_rejected.load(Ordering::Relaxed);
@@ -396,6 +444,7 @@ where
 /// 详细性能统计结构
 /// Detailed performance statistics structure
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct DetailedPerformanceStats {
     pub total_dispatched: usize,
     pub total_rejected: usize,
@@ -406,7 +455,7 @@ pub struct DetailedPerformanceStats {
     pub average_slot_utilization: f64,
     pub dispatcher_count: usize,
 }
-
+#[cfg(test)]
 impl DetailedPerformanceStats {
     /// 打印详细统计信息
     /// Print detailed statistics
