@@ -7,7 +7,7 @@ use crate::{
     core::reliability::ReliabilityLayer,
     socket::SocketActorCommand,
     error::Result,
-    timer::task::GlobalTimerTaskHandle,
+    timer::HybridTimerTaskHandle,
 };
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -32,7 +32,7 @@ impl<T: Transport> Endpoint<T> {
         sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
         initial_data: Option<Bytes>,
-        timer_handle: GlobalTimerTaskHandle<TimeoutEvent>,
+        timer_handle: HybridTimerTaskHandle<TimeoutEvent>,
     ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
@@ -50,7 +50,7 @@ impl<T: Transport> Endpoint<T> {
         );
         lifecycle_manager.initialize(local_cid, remote_addr)?;
 
-        let mut timing = TimingManager::new(local_cid, timer_handle);
+        let (mut timing, timer_event_rx) = TimingManager::new(local_cid, timer_handle);
         
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer
@@ -77,6 +77,7 @@ impl<T: Transport> Endpoint<T> {
                 command_tx,
                 rx_from_stream,
                 Some(tx_to_stream),
+                timer_event_rx, // 事件驱动架构的核心 - 定时器事件通道
             ),
         };
 
@@ -92,7 +93,7 @@ impl<T: Transport> Endpoint<T> {
         receiver: mpsc::Receiver<(crate::packet::frame::Frame, SocketAddr)>,
         sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
-        timer_handle: GlobalTimerTaskHandle<TimeoutEvent>,
+        timer_handle: HybridTimerTaskHandle<TimeoutEvent>,
     ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
@@ -106,7 +107,7 @@ impl<T: Transport> Endpoint<T> {
         );
         lifecycle_manager.initialize(local_cid, remote_addr)?;
 
-        let mut timing = TimingManager::new(local_cid, timer_handle);
+        let (mut timing, timer_event_rx) = TimingManager::new(local_cid, timer_handle);
         
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer
@@ -126,6 +127,7 @@ impl<T: Transport> Endpoint<T> {
                 command_tx,
                 rx_from_stream,
                 Some(tx_to_stream),
+                timer_event_rx, // 事件驱动架构的核心 - 定时器事件通道
             ),
         };
 

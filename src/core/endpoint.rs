@@ -100,6 +100,72 @@ impl<T: Transport> Endpoint<T> {
         &mut self.lifecycle_manager
     }
 
+    /// 处理定时器事件 - 事件驱动架构的核心方法
+    /// Handle timer event - core method of event-driven architecture
+    /// 
+    /// 此方法处理从全局定时器系统接收到的超时事件，替代了原有的轮询式超时检查
+    /// This method handles timeout events received from the global timer system,
+    /// replacing the original polling-based timeout checks
+    pub async fn handle_timeout_event(&mut self, timeout_event: TimeoutEvent) -> Result<()> {
+        use crate::core::endpoint::timing::TimeoutEvent;
+
+        trace!(cid = self.identity.local_cid(), timeout_event = ?timeout_event, "Processing timeout event");
+
+        match timeout_event {
+            TimeoutEvent::IdleTimeout => {
+                // 处理空闲超时 - 连接长时间无活动
+                // Handle idle timeout - connection has been inactive for too long
+                trace!(cid = self.identity.local_cid(), "Processing idle timeout");
+                
+                // 转换到关闭状态
+                // Transition to closed state
+                let _ = self.transition_state(ConnectionState::Closed);
+                
+                // 可以在这里添加额外的清理逻辑
+                // Additional cleanup logic can be added here
+            }
+            
+            TimeoutEvent::ConnectionTimeout => {
+                // 处理连接超时 - 连接建立超时
+                // Handle connection timeout - connection establishment timed out
+                trace!(cid = self.identity.local_cid(), "Processing connection timeout");
+                
+                // 转换到关闭状态
+                // Transition to closed state
+                let _ = self.transition_state(ConnectionState::Closed);
+            }
+            
+            TimeoutEvent::RetransmissionTimeout => {
+                // 处理重传超时 - 触发数据包重传
+                // Handle retransmission timeout - trigger packet retransmission
+                trace!(cid = self.identity.local_cid(), "Processing retransmission timeout");
+                
+                let now = Instant::now();
+                let context = self.create_retransmission_context();
+                let retx_result = self.transport.reliability_mut().check_retransmissions(now, &context);
+                
+                // 发送重传的帧
+                // Send retransmitted frames
+                if !retx_result.frames_to_retransmit.is_empty() {
+                    self.send_frames(retx_result.frames_to_retransmit).await?;
+                }
+            }
+            
+            TimeoutEvent::PathValidationTimeout => {
+                // 处理路径验证超时
+                // Handle path validation timeout
+                trace!(cid = self.identity.local_cid(), "Processing path validation timeout");
+                
+                // 当前实现暂时不处理路径验证超时
+                // Currently not handling path validation timeout
+                // 未来可以在这里添加路径验证逻辑
+                // Path validation logic can be added here in the future
+            }
+        }
+
+        Ok(())
+    }
+
     /// Creates a retransmission context with current endpoint state
     /// 使用当前端点状态创建重传上下文
     pub fn create_retransmission_context(&self) -> crate::packet::frame::RetransmissionContext {

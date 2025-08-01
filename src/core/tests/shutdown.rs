@@ -67,7 +67,7 @@ async fn test_shutdown_when_connecting() {
 
     // 启动测试用全局定时器任务
     // Start global timer task for testing
-    let timer_handle = crate::timer::task::start_global_timer_task();
+            let timer_handle = crate::timer::start_hybrid_timer_task();
 
     let (mut client_endpoint, tx_to_stream, _) =
         crate::core::endpoint::Endpoint::<MockTransport>::new_client(

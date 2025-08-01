@@ -20,7 +20,7 @@ use crate::{
     core::{endpoint::Endpoint, stream::Stream},
     error::{Error, Result},
     packet::frame::Frame,
-    timer::task::GlobalTimerTaskHandle,
+    timer::HybridTimerTaskHandle,
 };
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc;
@@ -61,9 +61,9 @@ pub(crate) struct SocketSessionCoordinator<T: BindableTransport> {
     /// 发送命令到上层的通道
     /// Channel for sending commands to upper layer
     command_tx: mpsc::Sender<SocketActorCommand>,
-    /// 全局定时器任务句柄
-    /// Global timer task handle
-    timer_handle: GlobalTimerTaskHandle<TimeoutEvent>,
+    /// 混合并行定时器任务句柄
+    /// Hybrid parallel timer task handle
+    timer_handle: HybridTimerTaskHandle<TimeoutEvent>,
 }
 
 impl<T: BindableTransport> SocketSessionCoordinator<T> {
@@ -75,7 +75,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         config: Arc<Config>,
         accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
         command_tx: mpsc::Sender<SocketActorCommand>,
-        timer_handle: GlobalTimerTaskHandle<TimeoutEvent>,
+        timer_handle: HybridTimerTaskHandle<TimeoutEvent>,
     ) -> Self {
         Self {
             transport_manager,

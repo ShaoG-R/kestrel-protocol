@@ -4,7 +4,7 @@ use crate::core::endpoint::processing::traits::ProcessorOperations;
 use crate::core::endpoint::types::state::ConnectionState;
 use crate::core::endpoint::{ConnectionCleaner, Endpoint};
 use crate::{error::Result, socket::Transport};
-use tokio::time::{Instant, sleep_until};
+use tokio::time::Instant;
 use tracing::trace;
 
 impl<T: Transport> Endpoint<T> {
@@ -21,11 +21,7 @@ impl<T: Transport> Endpoint<T> {
         }
 
         loop {
-            // 使用优化的时间管理计算唤醒时间
-            // Use optimized time management to calculate wakeup time
-            let next_wakeup = self.calculate_next_wakeup_time();
-
-            trace!(cid = self.identity.local_cid(), state = ?self.lifecycle_manager.current_state(), "Main loop waiting for event.");
+            trace!(cid = self.identity.local_cid(), state = ?self.lifecycle_manager.current_state(), "Event-driven loop waiting for events.");
             tokio::select! {
                 biased; // Prioritize incoming packets and user commands
 
@@ -58,13 +54,14 @@ impl<T: Transport> Endpoint<T> {
                     }
                 }
 
-                // 3. Handle timeouts - 使用统一的超时检查
-                // Handle timeouts - use unified timeout check
-                _ = sleep_until(next_wakeup) => {
-                    // 使用统一时间点检查所有超时
-                    // Use unified time point to check all timeouts
-                    let timeout_check_time = Instant::now();
-                    self.check_all_timeouts(timeout_check_time).await?;
+                // 3. 处理定时器事件 - 事件驱动架构的核心
+                // Handle timer events - core of event-driven architecture
+                Some(timer_event_data) = self.channels.timer_event_rx.recv() => {
+                    let timeout_event = timer_event_data.timeout_event;
+                    trace!(cid = self.identity.local_cid(), timeout_event = ?timeout_event, "Received timer event");
+                    
+                    // 处理定时器事件
+                    self.handle_timeout_event(timeout_event).await?;
                 }
 
                 // 4. Stop if all channels are closed

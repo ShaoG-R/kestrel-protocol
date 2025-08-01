@@ -12,6 +12,7 @@ pub mod event;
 pub mod parallel;
 pub mod task;
 pub mod wheel;
+pub mod hybrid_system;
 
 #[cfg(test)]
 mod tests;
@@ -26,4 +27,5 @@ pub use task::{
     TimerRegistration, BatchTimerRegistration, BatchTimerCancellation,
     BatchTimerResult, TimerHandle, TimerTaskCommand, TimerError, TimerTaskStats,
 };
+pub use hybrid_system::{HybridTimerTask, HybridTimerTaskHandle, start_hybrid_timer_task};
 pub use wheel::{TimingWheel, TimerEntry, TimerEntryId};

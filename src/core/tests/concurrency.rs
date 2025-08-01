@@ -160,7 +160,7 @@ async fn test_core_multiple_clients_concurrently() {
         let (server_command_tx, _) = mpsc::channel(128);
         // 启动测试用全局定时器任务
         // Start global timer task for testing
-        let timer_handle = crate::timer::task::start_global_timer_task();
+        let timer_handle = crate::timer::start_hybrid_timer_task();
 
         let (server_endpoint, tx_to_server_user, rx_from_server_user) = Endpoint::new_server(
             Config::default(),
@@ -189,7 +189,7 @@ async fn test_core_multiple_clients_concurrently() {
 
             // 启动测试用全局定时器任务
             // Start global timer task for testing
-            let timer_handle = crate::timer::task::start_global_timer_task();
+            let timer_handle = crate::timer::start_hybrid_timer_task();
 
             let (mut endpoint, tx_to_client_user, mut rx_from_client_user) = Endpoint::new_client(
                 Config::default(),

@@ -80,9 +80,9 @@ impl<T: BindableTransport> TransportReliableUdpSocket<T> {
 
         let config = Arc::new(Config::default());
 
-        // 启动全局定时器任务
-        // Start global timer task
-        let timer_handle = crate::timer::task::start_global_timer_task();
+        // 启动混合并行定时器任务
+        // Start hybrid parallel timer task
+        let timer_handle = crate::timer::hybrid_system::start_hybrid_timer_task();
 
         // 创建传输管理器
         // Create transport manager

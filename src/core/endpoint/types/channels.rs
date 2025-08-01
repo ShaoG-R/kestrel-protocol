@@ -14,6 +14,8 @@ use crate::{
     socket::{SocketActorCommand, Transport},
     core::endpoint::types::command::StreamCommand,
     socket::TransportCommand,
+    timer::event::TimerEventData,
+    core::endpoint::timing::TimeoutEvent,
 };
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -41,6 +43,10 @@ pub struct ChannelManager<T: Transport> {
     /// 用户流数据发送通道
     /// User stream data send channel
     pub(crate) tx_to_stream: Option<mpsc::Sender<Vec<Bytes>>>,
+    
+    /// 定时器事件接收通道 - 事件驱动架构的核心
+    /// Timer event receive channel - core of event-driven architecture
+    pub(crate) timer_event_rx: mpsc::Receiver<TimerEventData<TimeoutEvent>>,
 }
 
 impl<T: Transport> ChannelManager<T> {
@@ -52,6 +58,7 @@ impl<T: Transport> ChannelManager<T> {
         command_tx: mpsc::Sender<SocketActorCommand>,
         rx_from_stream: mpsc::Receiver<StreamCommand>,
         tx_to_stream: Option<mpsc::Sender<Vec<Bytes>>>,
+        timer_event_rx: mpsc::Receiver<TimerEventData<TimeoutEvent>>,
     ) -> Self {
         Self {
             receiver,
@@ -59,6 +66,7 @@ impl<T: Transport> ChannelManager<T> {
             command_tx,
             rx_from_stream,
             tx_to_stream,
+            timer_event_rx,
         }
     }
 
@@ -154,10 +162,28 @@ impl<T: Transport> ChannelManager<T> {
         self.rx_from_stream.try_recv()
     }
 
+    /// 尝试接收定时器事件
+    /// Try to receive timer event
+    pub async fn recv_timer_event(&mut self) -> Option<TimerEventData<TimeoutEvent>> {
+        self.timer_event_rx.recv().await
+    }
+
+    /// 尝试非阻塞接收定时器事件
+    /// Try to receive timer event non-blocking
+    pub fn try_recv_timer_event(&mut self) -> Result<TimerEventData<TimeoutEvent>, mpsc::error::TryRecvError> {
+        self.timer_event_rx.try_recv()
+    }
+
+    /// 获取定时器事件接收通道的可变引用
+    /// Get mutable reference to timer event receive channel
+    pub fn timer_event_rx_mut(&mut self) -> &mut mpsc::Receiver<TimerEventData<TimeoutEvent>> {
+        &mut self.timer_event_rx
+    }
+
     /// 检查是否所有输入通道都已关闭
     /// Check if all input channels are closed
     pub fn are_input_channels_closed(&self) -> bool {
-        self.receiver.is_closed() && self.rx_from_stream.is_closed()
+        self.receiver.is_closed() && self.rx_from_stream.is_closed() && self.timer_event_rx.is_closed()
     }
 }
 
@@ -166,6 +192,7 @@ impl<T: Transport> std::fmt::Debug for ChannelManager<T> {
         f.debug_struct("ChannelManager")
             .field("receiver_closed", &self.receiver.is_closed())
             .field("rx_from_stream_closed", &self.rx_from_stream.is_closed())
+            .field("timer_event_rx_closed", &self.timer_event_rx.is_closed())
             .field("tx_to_stream_available", &self.tx_to_stream.is_some())
             .finish()
     }
@@ -185,6 +212,7 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::channel(10);
         let (_stream_cmd_tx, stream_cmd_rx) = mpsc::channel(10);
         let (to_stream_tx, _to_stream_rx) = mpsc::channel(10);
+        let (_timer_tx, timer_rx) = mpsc::channel(10);
 
         let manager = ChannelManager::<UdpTransport>::new(
             frame_rx,
@@ -192,6 +220,7 @@ mod tests {
             cmd_tx,
             stream_cmd_rx,
             Some(to_stream_tx),
+            timer_rx,
         );
 
         assert!(!manager.is_user_stream_closed());
@@ -205,6 +234,7 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::channel(10);
         let (_stream_cmd_tx, stream_cmd_rx) = mpsc::channel(10);
         let (to_stream_tx, mut to_stream_rx) = mpsc::channel(10);
+        let (_timer_tx, timer_rx) = mpsc::channel(10);
 
         let mut manager = ChannelManager::<UdpTransport>::new(
             frame_rx,
@@ -212,6 +242,7 @@ mod tests {
             cmd_tx,
             stream_cmd_rx,
             Some(to_stream_tx),
+            timer_rx,
         );
 
         // 测试发送数据到用户流
@@ -237,6 +268,7 @@ mod tests {
         let (sender_tx, _sender_rx) = mpsc::channel(10);
         let (cmd_tx, _cmd_rx) = mpsc::channel(10);
         let (stream_cmd_tx, stream_cmd_rx) = mpsc::channel(10);
+        let (timer_tx, timer_rx) = mpsc::channel(10);
 
         let manager = ChannelManager::<UdpTransport>::new(
             frame_rx,
@@ -244,6 +276,7 @@ mod tests {
             cmd_tx,
             stream_cmd_rx,
             None,
+            timer_rx,
         );
 
         // 初始状态下通道应该是开放的
@@ -252,6 +285,7 @@ mod tests {
         // 关闭发送端后检查状态
         drop(frame_tx);
         drop(stream_cmd_tx);
+        drop(timer_tx);
         
         // 注意：这个测试可能需要一些时间让通道状态更新
         tokio::task::yield_now().await;

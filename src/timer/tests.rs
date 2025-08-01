@@ -7,7 +7,7 @@ use tokio::time::{sleep, Duration};
 #[tokio::test]
 async fn test_global_timer_integration() {
     // 启动全局定时器任务
-    let timer_handle = crate::timer::task::start_global_timer_task();
+    let timer_handle = crate::timer::start_hybrid_timer_task();
     
     // 创建定时器管理器
     let connection_id = 1;
@@ -38,7 +38,7 @@ async fn test_global_timer_integration() {
 
 #[tokio::test]
 async fn test_timer_cancellation() {
-    let timer_handle = crate::timer::task::start_global_timer_task();
+    let timer_handle = crate::timer::start_hybrid_timer_task();
     let connection_id = 2;
     let mut timer_manager = crate::core::endpoint::timing::TimerManager::new(
         connection_id, 
@@ -67,7 +67,7 @@ async fn test_timer_cancellation() {
 
 #[tokio::test]
 async fn test_multiple_timer_types() {
-    let timer_handle = crate::timer::task::start_global_timer_task();
+    let timer_handle = crate::timer::start_hybrid_timer_task();
     let connection_id = 3;
     let mut timer_manager = crate::core::endpoint::timing::TimerManager::new(
         connection_id, 
@@ -99,7 +99,7 @@ async fn test_multiple_timer_types() {
 
 #[tokio::test]
 async fn test_timer_replacement() {
-    let timer_handle = crate::timer::task::start_global_timer_task();
+    let timer_handle = crate::timer::start_hybrid_timer_task();
     let connection_id = 4;
     let mut timer_manager = crate::core::endpoint::timing::TimerManager::new(
         connection_id, 

@@ -5,7 +5,7 @@ use kestrel_protocol::{
     config::Config,
     core::endpoint::timing::{TimeoutEvent, TimingManager},
     socket::{TransportReliableUdpSocket, transport::UdpTransport},
-    timer::task::start_global_timer_task,
+    timer::start_hybrid_timer_task,
 };
 use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
@@ -13,11 +13,11 @@ use tokio::time::{sleep, Duration};
 #[tokio::test]
 async fn test_timer_system_with_real_connection() {
     // 启动全局定时器任务
-    let timer_handle = start_global_timer_task();
+    let timer_handle = start_hybrid_timer_task();
     
     // 创建 TimingManager
     let connection_id = 1;
-    let mut timing_manager = TimingManager::new(connection_id, timer_handle.clone());
+    let (mut timing_manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
     
     // 测试基本的定时器功能
     let config = Config::default();
@@ -46,9 +46,9 @@ async fn test_timer_system_with_real_connection() {
 
 #[tokio::test]
 async fn test_timer_reset_functionality() {
-    let timer_handle = start_global_timer_task();
+    let timer_handle = start_hybrid_timer_task();
     let connection_id = 2;
-    let mut timing_manager = TimingManager::new(connection_id, timer_handle.clone());
+    let (mut timing_manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
     
     let config = Config::default();
     
@@ -101,12 +101,12 @@ async fn test_socket_layer_timer_integration() {
 
 #[tokio::test]
 async fn test_multiple_connections_timer_isolation() {
-    let timer_handle = start_global_timer_task();
+    let timer_handle = start_hybrid_timer_task();
     
     // 创建多个连接的定时器管理器
     let mut timing_managers = Vec::new();
     for i in 1..=5 {
-        let timing_manager = TimingManager::new(i, timer_handle.clone());
+        let (timing_manager, _timer_rx) = TimingManager::new(i, timer_handle.clone());
         timing_managers.push(timing_manager);
     }
     
