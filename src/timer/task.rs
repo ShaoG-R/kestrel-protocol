@@ -3,8 +3,6 @@
 
 pub mod types;
 pub mod commands;
-pub mod global;
-pub mod handle;
 
 #[cfg(test)]
 pub mod tests;
@@ -15,5 +13,3 @@ pub use types::{
     BatchTimerResult, TimerHandle,
 };
 pub use commands::{TimerTaskCommand, TimerError, TimerTaskStats};
-pub use global::GlobalTimerTask;
-pub use handle::{GlobalTimerTaskHandle, start_global_timer_task};
