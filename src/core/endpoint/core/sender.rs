@@ -10,6 +10,7 @@ use crate::{
 };
 use std::{future::Future, net::SocketAddr};
 use tokio::time::Instant;
+use tracing::trace;
 use crate::core::endpoint::core::frame::{create_ack_frame, create_fin_frame, create_syn_ack_frame, create_syn_frame};
 use crate::core::endpoint::types::state::ConnectionState;
 
@@ -126,6 +127,23 @@ impl<T: Transport> Endpoint<T> {
         // 3. Now that all mutable operations are done, create the builder and send.
         // 3. 所有可变操作都完成后，创建构建器并发送。
         if !frames_to_send.is_empty() {
+            // 4. 为需要重传的帧批量注册定时器（在发送前）
+            // 4. Batch register timers for frames that need retransmission (before sending)
+            let seq_nums_to_register: Vec<u32> = frames_to_send.iter()
+                .filter(|frame| frame.needs_reliability_tracking())
+                .filter_map(|frame| frame.sequence_number())
+                .collect();
+            
+            if !seq_nums_to_register.is_empty() {
+                let registered_count = self.transport.reliability_mut()
+                    .batch_register_retransmission_timers(&seq_nums_to_register).await;
+                trace!(
+                    registered = registered_count,
+                    total = seq_nums_to_register.len(),
+                    "Batch registered retransmission timers"
+                );
+            }
+            
             let sender = |p: Vec<Frame>| self.send_raw_frames(p);
             let mut packet_builder =
                 PacketBuilder::new(self.config.connection.max_packet_size, sender);

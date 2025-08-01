@@ -38,7 +38,12 @@ impl<T: Transport> Endpoint<T> {
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
 
         let congestion_control = Box::new(Vegas::new(config.clone()));
-        let mut reliability = ReliabilityLayer::new(config.clone(), congestion_control);
+        
+        // 创建定时器Actor用于批量定时器管理
+        // Create timer actor for batch timer management
+        let timer_actor = crate::timer::start_timer_actor(timer_handle.clone(), None);
+        
+        let mut reliability = ReliabilityLayer::new(config.clone(), congestion_control, local_cid, timer_actor);
         if let Some(data) = initial_data {
             // Immediately write the 0-RTT data to the stream buffer.
             reliability.write_to_stream(data);
@@ -99,7 +104,12 @@ impl<T: Transport> Endpoint<T> {
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
 
         let congestion_control = Box::new(Vegas::new(config.clone()));
-        let reliability = ReliabilityLayer::new(config.clone(), congestion_control);
+        
+        // 创建定时器Actor用于批量定时器管理
+        // Create timer actor for batch timer management
+        let timer_actor = crate::timer::start_timer_actor(timer_handle.clone(), None);
+        
+        let reliability = ReliabilityLayer::new(config.clone(), congestion_control, local_cid, timer_actor);
 
         let mut lifecycle_manager = DefaultLifecycleManager::new(
             ConnectionState::SynReceived,

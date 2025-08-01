@@ -10,8 +10,9 @@
 use crate::config::Config;
 use crate::timer::{
     event::{ConnectionId, TimerEventData},
-    task::{TimerHandle, TimerRegistration},
+    task::TimerRegistration,
     HybridTimerTaskHandle,
+    TimerActorHandle,
 };
 use crate::core::endpoint::unified_scheduler::{TimeoutLayer, TimeoutCheckResult, UnifiedTimeoutScheduler};
 use std::collections::HashMap;
@@ -19,6 +20,7 @@ use tokio::{
     sync::mpsc,
     time::{Duration, Instant},
 };
+use tracing::trace;
 
 /// 超时事件类型枚举
 /// Timeout event type enumeration
@@ -51,9 +53,9 @@ pub struct TimerManager {
     /// Connection ID for global timer registration
     connection_id: ConnectionId,
 
-    /// 全局定时器任务句柄
-    /// Global timer task handle
-    timer_handle: HybridTimerTaskHandle<TimeoutEvent>,
+    /// 定时器Actor句柄，用于批量定时器操作
+    /// Timer actor handle for batch timer operations
+    timer_actor: TimerActorHandle,
 
     /// 接收超时事件的通道
     /// Channel for receiving timeout events
@@ -63,9 +65,9 @@ pub struct TimerManager {
     /// Channel for sending timeout events (used for timer registration)
     timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,
 
-    /// 活跃定时器句柄映射
-    /// Active timer handles mapping
-    active_timers: HashMap<TimeoutEvent, TimerHandle<TimeoutEvent>>,
+    /// 活跃定时器类型集合（简化跟踪）
+    /// Active timer types set (simplified tracking)
+    active_timer_types: HashMap<TimeoutEvent, bool>,
 }
 
 impl TimerManager {
@@ -74,12 +76,16 @@ impl TimerManager {
     pub fn new(connection_id: ConnectionId, timer_handle: HybridTimerTaskHandle<TimeoutEvent>) -> Self {
         let (timeout_tx, timeout_rx) = mpsc::channel(32);
         
+        // 创建定时器Actor用于批量处理
+        // Create timer actor for batch processing
+        let timer_actor = crate::timer::start_timer_actor(timer_handle, None);
+        
         Self {
             connection_id,
-            timer_handle,
+            timer_actor,
             timeout_rx,
             timeout_tx,
-            active_timers: HashMap::new(),
+            active_timer_types: HashMap::new(),
         }
     }
 
@@ -91,12 +97,16 @@ impl TimerManager {
     pub fn new_with_receiver(connection_id: ConnectionId, timer_handle: HybridTimerTaskHandle<TimeoutEvent>) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
         let (timeout_tx, timeout_rx) = mpsc::channel(32);
         
+        // 创建定时器Actor用于批量处理
+        // Create timer actor for batch processing
+        let timer_actor = crate::timer::start_timer_actor(timer_handle, None);
+        
         let manager = Self {
             connection_id,
-            timer_handle,
+            timer_actor,
             timeout_rx: mpsc::channel(1).1, // 创建一个空的接收端，实际接收由外部通道处理
             timeout_tx,
-            active_timers: HashMap::new(),
+            active_timer_types: HashMap::new(),
         };
 
         (manager, timeout_rx)
@@ -113,7 +123,7 @@ impl TimerManager {
             let timeout_event = event_data.timeout_event;
             // 从活跃定时器中移除这个事件类型
             // Remove this event type from active timers
-            self.active_timers.remove(&timeout_event);
+            self.active_timer_types.remove(&timeout_event);
             // 避免不必要的克隆，直接移动所有权
             // Avoid unnecessary cloning, move ownership directly
             events.push(timeout_event);
@@ -122,15 +132,23 @@ impl TimerManager {
         events
     }
 
-    /// 注册定时器到全局定时器任务（优化版本）
-    /// Register timer with global timer task (optimized version)
+    /// 注册定时器（使用TimerActor批量优化）
+    /// Register timer (using TimerActor batch optimization)
     pub async fn register_timer(
         &mut self,
         timeout_event: TimeoutEvent,
         delay: Duration,
     ) -> Result<(), &'static str> {
-        // 高效的定时器替换：先注册新的，成功后再取消旧的
-        // Efficient timer replacement: register new first, cancel old after success
+        // 如果之前有同类型定时器，先标记为取消
+        // If there was a previous timer of same type, mark for cancellation first
+        if self.active_timer_types.contains_key(&timeout_event) {
+            // 先取消旧的定时器
+            // Cancel old timer first
+            self.timer_actor.cancel_timer(self.connection_id, timeout_event).await;
+        }
+        
+        // 注册新的定时器
+        // Register new timer
         let registration = TimerRegistration::new(
             self.connection_id,
             delay,
@@ -138,17 +156,12 @@ impl TimerManager {
             self.timeout_tx.clone(),
         );
 
-        match self.timer_handle.register_timer(registration).await {
-            Ok(new_handle) => {
-                // 如果之前有同类型定时器，取消它（异步进行，不阻塞）
-                // If there was a previous timer of same type, cancel it (async, non-blocking)
-                if let Some(old_handle) = self.active_timers.insert(timeout_event, new_handle) {
-                    // 使用 tokio::spawn 异步取消，避免阻塞当前操作
-                    // Use tokio::spawn for async cancellation to avoid blocking current operation
-                    tokio::spawn(async move {
-                        let _ = old_handle.cancel().await;
-                    });
-                }
+        match self.timer_actor.register_timer(registration).await {
+            Ok(_) => {
+                // 标记这种类型的定时器为活跃
+                // Mark this timer type as active
+                self.active_timer_types.insert(timeout_event, true);
+                trace!(timeout_event = ?timeout_event, delay = ?delay, "Registered timer via TimerActor");
                 Ok(())
             }
             Err(_) => Err("Failed to register timer"),
@@ -158,8 +171,10 @@ impl TimerManager {
     /// 取消指定类型的定时器
     /// Cancel timer of specified type
     pub async fn cancel_timer(&mut self, timeout_event: &TimeoutEvent) -> bool {
-        if let Some(handle) = self.active_timers.remove(timeout_event) {
-            handle.cancel().await.unwrap_or_default()
+        if self.active_timer_types.remove(timeout_event).is_some() {
+            let success = self.timer_actor.cancel_timer(self.connection_id, *timeout_event).await;
+            trace!(timeout_event = ?timeout_event, success = success, "Cancelled timer via TimerActor");
+            success
         } else {
             false
         }
@@ -168,8 +183,23 @@ impl TimerManager {
     /// 取消所有活跃的定时器
     /// Cancel all active timers
     pub async fn cancel_all_timers(&mut self) {
-        for (_, handle) in self.active_timers.drain() {
-            let _ = handle.cancel().await;
+        if self.active_timer_types.is_empty() {
+            return;
+        }
+        
+        // 准备批量取消请求
+        // Prepare batch cancellation requests
+        let cancel_requests: Vec<_> = self.active_timer_types.keys()
+            .map(|&timeout_event| (self.connection_id, timeout_event))
+            .collect();
+        
+        // 清空活跃定时器跟踪
+        // Clear active timer tracking
+        self.active_timer_types.clear();
+        
+        if !cancel_requests.is_empty() {
+            let cancelled_count = self.timer_actor.batch_cancel_timers(cancel_requests).await;
+            trace!(cancelled = cancelled_count, "Batch cancelled all timers");
         }
     }
 

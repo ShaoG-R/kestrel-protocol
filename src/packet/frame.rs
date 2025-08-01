@@ -633,4 +633,14 @@ impl Frame {
             _ => None,
         }
     }
+
+    /// Checks if this frame needs reliability tracking (retransmission timers)
+    /// 检查此帧是否需要可靠性跟踪（重传定时器）
+    pub fn needs_reliability_tracking(&self) -> bool {
+        match self.reliability_mode() {
+            ReliabilityMode::Reliable => true,
+            ReliabilityMode::SimpleRetransmit { .. } => true,
+            ReliabilityMode::BestEffort => false,
+        }
+    }
 } 

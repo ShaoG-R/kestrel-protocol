@@ -27,10 +27,17 @@ use crate::{
 };
 use bytes::Bytes;
 use tokio::time::Instant;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 use congestion::CongestionControl;
 use crate::core::endpoint::timing::TimeoutEvent;
 use crate::core::endpoint::unified_scheduler::{TimeoutLayer, TimeoutCheckResult, RetransmissionLayer, RetransmissionCheckResult};
+use crate::timer::{
+    event::ConnectionId,
+    task::TimerRegistration,
+    TimerActorHandle,
+};
+use tokio::sync::mpsc;
+use std::collections::HashSet;
 
 /// 可靠性层超时检查结果（遗留结构体，保持向后兼容）
 /// Reliability layer timeout check result (legacy struct, maintained for backward compatibility)
@@ -104,13 +111,27 @@ pub struct ReliabilityLayer {
     /// 统计自上次发送ACK以来收到的引发ACK的数据包数量。
     /// 用于决定何时发送独立的ACK。
     ack_eliciting_packets_since_last_ack: u16,
+    /// Connection ID for timer registration with timer actor
+    /// 连接ID，用于在定时器Actor中注册定时器
+    connection_id: ConnectionId,
+    /// Timer actor handle for batch timer operations
+    /// 定时器Actor句柄，用于批量定时器操作
+    timer_actor: TimerActorHandle,
+    /// Sequence numbers with active retransmission timers (for tracking)
+    /// 具有活跃重传定时器的序列号集合（用于跟踪）
+    active_retx_sequences: HashSet<u32>,
 }
 
 impl ReliabilityLayer {
     /// Creates a new `ReliabilityLayer`.
     ///
     /// 创建一个新的 `ReliabilityLayer`。
-    pub fn new(config: Config, congestion_control: Box<dyn CongestionControl>) -> Self {
+    pub fn new(
+        config: Config, 
+        congestion_control: Box<dyn CongestionControl>,
+        connection_id: ConnectionId,
+        timer_actor: TimerActorHandle,
+    ) -> Self {
         Self {
             send_buffer: SendBuffer::new(config.connection.send_buffer_capacity_bytes),
             recv_buffer: ReceiveBuffer::new(config.connection.recv_buffer_capacity_packets),
@@ -121,6 +142,9 @@ impl ReliabilityLayer {
             sequence_number_counter: 0,
             ack_pending: false,
             ack_eliciting_packets_since_last_ack: 0,
+            connection_id,
+            timer_actor,
+            active_retx_sequences: HashSet::new(),
         }
     }
 
@@ -144,6 +168,32 @@ impl ReliabilityLayer {
         // Use the unified retransmission manager for ACK processing.
         // 使用统一的重传管理器进行ACK处理。
         let result = self.retransmission_manager.process_ack(recv_next_seq, &sack_ranges, now, context);
+
+        // 取消已确认数据包的重传定时器
+        // Cancel retransmission timers for acknowledged packets
+        if !result.newly_acked_sequences.is_empty() {
+            trace!(acked_seqs = ?result.newly_acked_sequences, "Cancelling retransmission timers for ACKed packets");
+            
+            // 准备批量取消请求
+            // Prepare batch cancellation requests
+            let mut cancel_requests = Vec::new();
+            for &seq_num in &result.newly_acked_sequences {
+                if self.active_retx_sequences.remove(&seq_num) {
+                    cancel_requests.push((self.connection_id, TimeoutEvent::RetransmissionTimeout));
+                    trace!(seq = seq_num, "Prepared retransmission timer cancellation for ACKed packet");
+                }
+            }
+            
+            // 批量取消定时器（异步进行，不阻塞当前处理）
+            // Batch cancel timers (asynchronously, non-blocking)
+            if !cancel_requests.is_empty() {
+                let timer_actor = self.timer_actor.clone();
+                tokio::spawn(async move {
+                    let cancelled_count = timer_actor.batch_cancel_timers(cancel_requests).await;
+                    trace!(cancelled = cancelled_count, "Batch cancelled retransmission timers for ACKed packets");
+                });
+            }
+        }
 
         // Update RTT and congestion control with real samples from SACK-managed packets.
         // Simple retransmission packets don't contribute to RTT estimation or congestion control.
@@ -265,6 +315,16 @@ impl ReliabilityLayer {
             // Add all frames to the unified retransmission manager.
             // 将所有帧添加到统一重传管理器。
             self.retransmission_manager.add_in_flight_packet(frame.clone(), now);
+            
+            // 为需要可靠传输的帧注册重传超时定时器
+            // Register retransmission timeout timer for frames that need reliable transmission
+            if frame.needs_reliability_tracking() {
+                // Note: Timer registration will be done asynchronously via endpoint
+                // We'll need to modify the caller to handle timer registration
+                // 注意：定时器注册将通过端点异步完成
+                // 我们需要修改调用者来处理定时器注册
+                trace!(seq = frame.sequence_number(), "Frame needs retransmission timer");
+            }
         }
 
         frames
@@ -585,6 +645,133 @@ impl ReliabilityLayer {
         // Use layered timeout management interface to get retransmission timeout deadline
         let rto = self.rto_estimator.rto();
         self.retransmission_manager.next_retransmission_timeout_deadline(rto)
+    }
+
+    /// 批量注册重传超时定时器
+    /// Batch register retransmission timeout timers
+    ///
+    /// 为多个序列号的数据包批量注册RTO超时定时器，利用TimerActor的批量优化
+    /// Batch register RTO timeout timers for multiple sequence number packets, utilizing TimerActor's batch optimization
+    pub async fn batch_register_retransmission_timers(&mut self, seq_nums: &[u32]) -> usize {
+        if seq_nums.is_empty() {
+            return 0;
+        }
+        
+        let rto = self.rto_estimator.rto();
+        let (timeout_tx, _) = mpsc::channel(1);
+        
+        // 准备批量注册请求
+        // Prepare batch registration requests
+        let mut registrations = Vec::new();
+        for &seq_num in seq_nums {
+            if !self.active_retx_sequences.contains(&seq_num) {
+                registrations.push(TimerRegistration::new(
+                    self.connection_id,
+                    rto,
+                    TimeoutEvent::RetransmissionTimeout,
+                    timeout_tx.clone(),
+                ));
+                self.active_retx_sequences.insert(seq_num);
+            }
+        }
+        
+        if registrations.is_empty() {
+            return 0;
+        }
+        
+        trace!(
+            count = registrations.len(),
+            rto = ?rto,
+            "Batch registering retransmission timers"
+        );
+        
+        // 批量注册定时器
+        // Batch register timers
+        match self.timer_actor.batch_register_timers(registrations).await {
+            Ok(_) => {
+                trace!("Successfully batch registered retransmission timers");
+                seq_nums.len()
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to batch register retransmission timers");
+                // 清理失败的序列号跟踪
+                // Clean up failed sequence number tracking
+                for &seq_num in seq_nums {
+                    self.active_retx_sequences.remove(&seq_num);
+                }
+                0
+            }
+        }
+    }
+    
+    /// 单个注册重传超时定时器（简化版本）
+    /// Register single retransmission timeout timer (simplified version)
+    pub async fn register_retransmission_timer(&mut self, seq_num: u32) -> bool {
+        self.batch_register_retransmission_timers(&[seq_num]).await > 0
+    }
+
+    /// 批量取消重传定时器
+    /// Batch cancel retransmission timers
+    ///
+    /// 当多个数据包被确认时，批量取消对应的RTO定时器
+    /// When multiple packets are acknowledged, batch cancel corresponding RTO timers
+    pub async fn batch_cancel_retransmission_timers(&mut self, seq_nums: &[u32]) -> usize {
+        if seq_nums.is_empty() {
+            return 0;
+        }
+        
+        // 准备批量取消请求
+        // Prepare batch cancellation requests
+        let mut cancel_requests = Vec::new();
+        for &seq_num in seq_nums {
+            if self.active_retx_sequences.remove(&seq_num) {
+                cancel_requests.push((self.connection_id, TimeoutEvent::RetransmissionTimeout));
+            }
+        }
+        
+        if cancel_requests.is_empty() {
+            return 0;
+        }
+        
+        trace!(count = cancel_requests.len(), "Batch cancelling retransmission timers");
+        
+        // 批量取消定时器
+        // Batch cancel timers
+        self.timer_actor.batch_cancel_timers(cancel_requests).await
+    }
+    
+    /// 单个取消重传超时定时器（简化版本）
+    /// Cancel single retransmission timeout timer (simplified version)
+    pub async fn cancel_retransmission_timer(&mut self, seq_num: u32) -> bool {
+        self.batch_cancel_retransmission_timers(&[seq_num]).await > 0
+    }
+
+    /// 清理所有重传定时器
+    /// Clean up all retransmission timers
+    ///
+    /// 连接关闭时清理所有活跃的重传定时器
+    /// Clean up all active retransmission timers when connection closes
+    pub async fn cleanup_all_retransmission_timers(&mut self) {
+        if self.active_retx_sequences.is_empty() {
+            return;
+        }
+        
+        let seq_nums: Vec<_> = self.active_retx_sequences.drain().collect();
+        let cancel_requests: Vec<_> = seq_nums.iter()
+            .map(|_| (self.connection_id, TimeoutEvent::RetransmissionTimeout))
+            .collect();
+        
+        if !cancel_requests.is_empty() {
+            trace!(count = cancel_requests.len(), "Cleaning up all retransmission timers");
+            let cancelled_count = self.timer_actor.batch_cancel_timers(cancel_requests).await;
+            debug!(cancelled = cancelled_count, "Cleaned up retransmission timers");
+        }
+    }
+
+    /// 获取活跃重传定时器数量
+    /// Get the number of active retransmission timers
+    pub fn active_retransmission_timer_count(&self) -> usize {
+        self.active_retx_sequences.len()
     }
 }
 

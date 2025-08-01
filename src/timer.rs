@@ -8,6 +8,7 @@
 //! timing wheel algorithm, efficiently managing all connection timer needs
 //! including retransmission timeouts, idle timeouts, path validation timeouts, etc.
 
+pub mod actor;
 pub mod event;
 pub mod parallel;
 pub mod task;
@@ -17,6 +18,7 @@ pub mod hybrid_system;
 #[cfg(test)]
 mod tests;
 
+pub use actor::{TimerActor, TimerActorHandle, TimerActorConfig, TimerActorStats, start_timer_actor};
 pub use event::{TimerEvent, TimerEventData};
 pub use parallel::{
     HybridParallelTimerSystem, OptimalParallelStrategy, 
