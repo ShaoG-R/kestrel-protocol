@@ -21,5 +21,9 @@ pub use parallel::{
     HybridParallelTimerSystem, OptimalParallelStrategy, 
     ProcessedTimerData, ParallelProcessingResult, ParallelProcessingStats
 };
-pub use task::{GlobalTimerTask, TimerRegistration, TimerHandle};
+pub use task::{
+    GlobalTimerTask, GlobalTimerTaskHandle, start_global_timer_task,
+    TimerRegistration, BatchTimerRegistration, BatchTimerCancellation,
+    BatchTimerResult, TimerHandle, TimerTaskCommand, TimerError, TimerTaskStats,
+};
 pub use wheel::{TimingWheel, TimerEntry, TimerEntryId};
