@@ -704,11 +704,13 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
             }).await??
         };
 
-        // 步骤2: 优先使用零拷贝批量分发，失败时fallback到异步分发器
-        // Step 2: Prefer zero-copy batch dispatch, fallback to async dispatcher on failure
-        let events: Vec<TimerEventData<E>> = processed_data.iter()
-            .map(|data| TimerEventData::new(data.connection_id, data.timeout_event.clone()))
+        // 步骤2: 使用智能工厂批量创建事件，优先零拷贝分发，失败时fallback到异步分发器
+        // Step 2: Use smart factory for batch event creation, prefer zero-copy dispatch, fallback to async dispatcher on failure
+        let factory = crate::timer::event::traits::EventFactory::new();
+        let event_requests: Vec<_> = processed_data.iter()
+            .map(|data| (data.connection_id, data.timeout_event.clone()))
             .collect();
+        let events = factory.batch_create_events(&event_requests);
         
         let dispatch_count = self.zero_copy_dispatcher.batch_dispatch_events(events.clone());
         
@@ -1023,8 +1025,10 @@ impl<E: EventDataTrait> AsyncEventDispatcher<E> {
                 let tx = self.event_channels[channel_index].clone();
                 
                 tokio::spawn(async move {
-                    
-                    let event_data = TimerEventData::new(
+                    // 使用智能工厂创建事件 (Copy类型零开销，非Copy类型智能管理)
+                    // Use smart factory to create event (zero-cost for Copy types, smart management for non-Copy types)
+                    let factory = crate::timer::event::traits::EventFactory::new();
+                    let event_data = factory.create_event(
                         data.connection_id,
                         data.timeout_event,
                     );
@@ -1058,7 +1062,7 @@ impl<E: EventDataTrait> Default for HybridParallelTimerSystem<E> {
 mod tests {
     use super::*;
     use crate::timer::event::TimerEvent;
-    use crate::timer::event::pool::TimerEventPool;
+    use crate::timer::event::traits::EventFactory;
     use tokio::sync::mpsc;
     use std::time::Instant;
     use crate::core::endpoint::timing::TimeoutEvent;
@@ -1092,15 +1096,15 @@ mod tests {
         assert_eq!(processed.len(), 0);
     }
 
-    /// 创建测试用的定时器条目
+    /// 创建测试用的定时器条目 (使用智能工厂)
     fn create_test_timer_entries<E: EventDataTrait>(count: usize) -> Vec<TimerEntry<E>> {
         let (tx, _rx) = mpsc::channel(1);
         let mut entries = Vec::with_capacity(count);
-        let pool = TimerEventPool::<E>::new_default(); // 为测试创建临时池
+        let factory = EventFactory::<E>::new(); // 智能策略选择工厂
         
         for i in 0..count {
-            let timer_event = TimerEvent::from_pool(
-                &pool,
+            let timer_event = TimerEvent::from_factory(
+                &factory,
                 i as u64, // id
                 (i % 10000) as u32, // connection_id
                 E::default(),

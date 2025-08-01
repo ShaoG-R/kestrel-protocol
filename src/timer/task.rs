@@ -13,7 +13,7 @@ use crate::timer::{
     wheel::{TimingWheel, TimerEntryId},
 };
 use crate::timer::event::traits::EventDataTrait;
-use crate::timer::event::pool::{TimerEventPool, PoolConfig};
+use crate::timer::event::traits::EventFactory;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -362,9 +362,9 @@ pub struct GlobalTimerTask<E: EventDataTrait> {
     /// 预分配的容器，用于批量处理时减少内存分配
     /// Pre-allocated containers for reducing memory allocation during batch processing
     batch_processing_buffers: BatchProcessingBuffers,
-    /// 定时器事件数据对象池
-    /// Timer event data object pool
-    event_pool: TimerEventPool<E>,
+    /// 定时器事件工厂 (智能策略选择)
+    /// Timer event factory (smart strategy selection)
+    event_factory: EventFactory<E>,
 }
 
 impl<E: EventDataTrait> GlobalTimerTask<E> {
@@ -391,7 +391,7 @@ impl<E: EventDataTrait> GlobalTimerTask<E> {
                 wheel_stats,
             },
             batch_processing_buffers: BatchProcessingBuffers::new(),
-            event_pool: TimerEventPool::with_capacity(2048), // 较大的池容量用于高性能
+            event_factory: EventFactory::new(), // 智能策略选择，零配置
         };
 
         (task, command_tx)
@@ -401,37 +401,6 @@ impl<E: EventDataTrait> GlobalTimerTask<E> {
     /// Create global timer task with default configuration
     pub fn new_default() -> (Self, mpsc::Sender<TimerTaskCommand<E>>) {
         Self::new(1024)
-    }
-
-    /// 使用自定义池配置创建全局定时器任务
-    /// Create global timer task with custom pool configuration
-    pub fn with_pool_config(
-        command_buffer_size: usize,
-        pool_config: PoolConfig,
-    ) -> (Self, mpsc::Sender<TimerTaskCommand<E>>) {
-        let (command_tx, command_rx) = mpsc::channel(command_buffer_size);
-        let timing_wheel = TimingWheel::new(512, Duration::from_millis(10));
-        
-        let wheel_stats = timing_wheel.stats();
-        let task = Self {
-            timing_wheel,
-            command_rx,
-            command_tx: command_tx.clone(),
-            connection_timers: HashMap::new(),
-            entry_to_connection: HashMap::new(),
-            next_event_id: 1,
-            stats: TimerTaskStats {
-                total_timers: 0,
-                active_connections: 0,
-                processed_timers: 0,
-                cancelled_timers: 0,
-                wheel_stats,
-            },
-            batch_processing_buffers: BatchProcessingBuffers::new(),
-            event_pool: TimerEventPool::new(pool_config),
-        };
-
-        (task, command_tx)
     }
 
     /// 运行定时器任务主循环
@@ -554,11 +523,11 @@ impl<E: EventDataTrait> GlobalTimerTask<E> {
         let event_id = self.next_event_id;
         self.next_event_id += 1;
 
-        // 使用对象池高效创建定时器事件 - 内存优化
-        // Efficiently create timer event using object pool - memory optimization
+        // 使用智能工厂创建定时器事件 - 自动策略优化
+        // Create timer event using smart factory - automatic strategy optimization
         let timeout_event_for_log = registration.timeout_event.clone();
-        let timer_event = TimerEvent::from_pool(
-            &self.event_pool,
+        let timer_event = TimerEvent::from_factory(
+            &self.event_factory,
             event_id,
             registration.connection_id,
             registration.timeout_event,
@@ -627,10 +596,10 @@ impl<E: EventDataTrait> GlobalTimerTask<E> {
             .map(|reg| reg.callback_tx.clone())
             .collect();
         
-        // 批量创建定时器事件，大幅减少对象池锁定次数
-        // Batch create timer events, dramatically reduce object pool lock count
-        let timer_events = TimerEvent::batch_from_pool(
-            &self.event_pool,
+        // 批量创建定时器事件，智能策略选择，高性能优化
+        // Batch create timer events, smart strategy selection, high performance optimization
+        let timer_events = TimerEvent::batch_from_factory(
+            &self.event_factory,
             start_event_id,
             &pool_requests,
             &callback_txs,
@@ -831,19 +800,19 @@ impl<E: EventDataTrait> GlobalTimerTask<E> {
             }
         }
 
-        // 第四步：批量并发触发所有定时器
-        // Step 4: Batch concurrent trigger all timers
-        let pool_ref = self.event_pool.clone_ref(); // 克隆池引用用于并发触发
+        // 第四步：批量并发触发所有定时器 (使用智能工厂)
+        // Step 4: Batch concurrent trigger all timers (using smart factory)
+        let factory = self.event_factory.clone(); // 工厂可以安全克隆，轻量级
         let trigger_futures: Vec<_> = expired_timers
             .into_iter()
             .map(|entry| {
                 let entry_id = entry.id;
                 let connection_id = entry.event.data.connection_id;
                 let event_type = entry.event.data.timeout_event.clone();
-                let pool = pool_ref.clone_ref(); // 每个任务都需要自己的池引用
+                let factory_ref = factory.clone(); // 每个任务都可以有自己的工厂引用（零成本）
                 
                 async move {
-                    entry.event.trigger(&pool).await;
+                    entry.event.trigger_with_factory(&factory_ref).await;
                     (entry_id, connection_id, event_type)
                 }
             })

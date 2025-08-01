@@ -122,10 +122,10 @@ impl<E: EventDataTrait> TimerEvent<E> {
         }
     }
 
-    /// 使用对象池高效创建定时器事件
-    /// Efficiently create timer event using object pool
-    pub fn from_pool(
-        pool: &TimerEventPool<E>,
+    /// 使用智能工厂创建定时器事件 (推荐)
+    /// Create timer event using smart factory (recommended)
+    pub fn from_factory(
+        factory: &crate::timer::event::traits::EventFactory<E>,
         id: TimerEventId,
         connection_id: ConnectionId,
         timeout_event: E,
@@ -133,15 +133,16 @@ impl<E: EventDataTrait> TimerEvent<E> {
     ) -> Self {
         Self {
             id,
-            data: TimerEventData::from_pool(pool, connection_id, timeout_event),
+            data: factory.create_event(connection_id, timeout_event),
             callback_tx,
         }
     }
 
-    /// 批量创建定时器事件（高性能版本）
-    /// Batch create timer events (high-performance version)
-    pub fn batch_from_pool(
-        pool: &TimerEventPool<E>,
+
+    /// 批量创建定时器事件（智能工厂版本，推荐）
+    /// Batch create timer events (smart factory version, recommended)
+    pub fn batch_from_factory(
+        factory: &crate::timer::event::traits::EventFactory<E>,
         start_id: TimerEventId,
         requests: &[(ConnectionId, E)],
         callback_txs: &[mpsc::Sender<TimerEventData<E>>],
@@ -150,9 +151,9 @@ impl<E: EventDataTrait> TimerEvent<E> {
             panic!("Requests and callback_txs must have the same length");
         }
 
-        // 批量获取数据对象
-        // Batch acquire data objects
-        let data_objects = TimerEventData::batch_from_pool(pool, requests);
+        // 批量获取数据对象 (智能策略选择)
+        // Batch acquire data objects (smart strategy selection)
+        let data_objects = factory.batch_create_events(requests);
         
         // 构建定时器事件
         // Build timer events
@@ -168,16 +169,16 @@ impl<E: EventDataTrait> TimerEvent<E> {
             .collect()
     }
 
-    /// 触发定时器事件，向注册者发送超时通知（优化版本）
-    /// Trigger timer event, send timeout notification to registrant (optimized version)
-    pub async fn trigger(self, pool: &TimerEventPool<E>) {
+    /// 触发定时器事件，向注册者发送超时通知（智能工厂版本，推荐）
+    /// Trigger timer event, send timeout notification to registrant (smart factory version, recommended)
+    pub async fn trigger_with_factory(self, factory: &crate::timer::event::traits::EventFactory<E>) {
         let timer_id = self.id;
         let connection_id = self.data.connection_id;
         let event_type = self.data.timeout_event.clone();
         
-        // 克隆数据用于发送，原对象将被回收到池中
-        // Clone data for sending, original object will be recycled to pool
-        let data_for_send = TimerEventData::new(connection_id, event_type);
+        // 使用智能工厂创建数据用于发送（Copy类型零开销，非Copy类型智能管理）
+        // Use smart factory to create data for sending (zero-cost for Copy types, smart management for non-Copy types)
+        let data_for_send = factory.create_event(connection_id, event_type);
         
         if let Err(err) = self.callback_tx.send(data_for_send).await {
             tracing::warn!(
@@ -194,10 +195,10 @@ impl<E: EventDataTrait> TimerEvent<E> {
             );
         }
         
-        // 将数据对象返回到对象池中以供重用
-        // Return data object to object pool for reuse
-        self.data.return_to_pool(pool);
+        // 智能工厂会自动处理资源回收，无需手动管理
+        // Smart factory automatically handles resource recycling, no manual management needed
     }
+
 }
 
 impl<E: EventDataTrait> fmt::Display for TimerEvent<E> {

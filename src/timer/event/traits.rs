@@ -77,6 +77,7 @@ impl<E: EventDataTrait> EventCreationStrategy<E> for CloneStrategy {
 
 /// `EventFactory` 是一个无状态的结构体，作为创建事件的入口点。
 /// `EventFactory` is a stateless struct that acts as an entry point for creating events.
+#[derive(Clone)]
 pub struct EventFactory<E: EventDataTrait>(PhantomData<E>);
 
 // --- 统一的智能实现：根据类型特征自动选择策略 ---
