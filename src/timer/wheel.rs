@@ -8,10 +8,10 @@
 //! The timing wheel divides time into multiple slots, each containing a list of timers
 //! that expire at that time point.
 
-pub mod entry;
-pub mod core;
-pub mod simd;
-pub mod stats;
+mod entry;
+mod core;
+mod simd;
+mod stats;
 
 // Re-export the main types for convenience
 pub use entry::{TimerEntry, TimerEntryId};
