@@ -28,9 +28,5 @@ pub use task::{
 };
 pub use hybrid_system::{
     HybridTimerTask, HybridTimerTaskHandle, start_hybrid_timer_task,
-    // 为了向后兼容，提供别名
-    HybridTimerTask as TimerTask,
-    HybridTimerTaskHandle as TimerTaskHandle,
-    start_hybrid_timer_task as start_timer_task,
 };
 pub use wheel::{TimingWheel, TimerEntry, TimerEntryId};
