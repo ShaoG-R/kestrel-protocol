@@ -15,335 +15,25 @@
 //! 4. Zero-Copy Channels - Reference passing to avoid data cloning
 //! 5. Single-Thread Bypass - Direct path bypassing async scheduling
 
-use crate::timer::event::{TimerEventData, ConnectionId, zero_copy::{ZeroCopyEventDelivery}};
+
+/// 单线程直通优化模块 - 绕过异步调度的同步路径
+/// Single-thread bypass optimization module - synchronous path bypassing async scheduling
+mod single_thread_bypass;
+/// 内存预分配管理器 - 减少运行时分配
+/// Memory pre-allocation manager - reducing runtime allocations
+mod memory;
+
+use crate::timer::event::{ConnectionId, TimerEventData};
 use crate::timer::wheel::{TimerEntry, TimerEntryId};
 use rayon::prelude::*;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use wide::{u32x8, u64x4};
 use tracing;
 use crate::timer::event::traits::EventDataTrait;
 
-/// 单线程直通优化模块 - 绕过异步调度的同步路径
-/// Single-thread bypass optimization module - synchronous path bypassing async scheduling
-pub mod single_thread_bypass {
-    use super::*;
-    
-    /// 单线程执行模式判断
-    /// Single-thread execution mode detection
-    #[derive(Debug, Clone, Copy)]
-    pub enum ExecutionMode {
-        /// 单线程直接执行（零异步开销）
-        /// Single-thread direct execution (zero async overhead)
-        SingleThreadDirect,
-        /// 单线程但异步调度
-        /// Single-thread with async scheduling  
-        SingleThreadAsync,
-        /// 多线程并行执行
-        /// Multi-thread parallel execution
-        MultiThreadParallel,
-    }
-    
-    /// 智能执行模式选择器
-    /// Smart execution mode selector
-    pub struct ExecutionModeSelector {
-        /// 当前线程数
-        /// Current thread count
-        thread_count: usize,
-        /// 是否在tokio运行时内
-        /// Whether inside tokio runtime
-        in_tokio_runtime: AtomicBool,
-        /// 性能阈值：小于此批量大小时使用直通模式
-        /// Performance threshold: use bypass mode for batches smaller than this
-        bypass_threshold: usize,
-    }
-    
-    impl Default for ExecutionModeSelector {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl ExecutionModeSelector {
-        pub fn new() -> Self {
-            Self {
-                thread_count: num_cpus::get(),
-                in_tokio_runtime: AtomicBool::new(false),
-                bypass_threshold: 128, // 小批量使用直通模式
-            }
-        }
-        
-        /// 根据批量大小和系统状态选择最优执行模式
-        /// Choose optimal execution mode based on batch size and system state
-        pub fn choose_mode(&self, batch_size: usize) -> ExecutionMode {
-            // 检测是否在tokio运行时中
-            let in_runtime = tokio::runtime::Handle::try_current().is_ok();
-            self.in_tokio_runtime.store(in_runtime, Ordering::Relaxed);
-            
-            match (batch_size, self.thread_count, in_runtime) {
-                // 小批量 + 单核心 + 非异步环境 = 直通
-                (size, 1, false) if size <= self.bypass_threshold => ExecutionMode::SingleThreadDirect,
-                
-                // 小批量 + 无需并行 = 直通  
-                (size, _, _) if size <= 64 => ExecutionMode::SingleThreadDirect,
-                
-                // 中等批量 + 多核心 = 并行
-                (size, cores, _) if size > self.bypass_threshold && cores > 1 => ExecutionMode::MultiThreadParallel,
-                
-                // 其他情况：单线程异步
-                _ => ExecutionMode::SingleThreadAsync,
-            }
-        }
-        
-        /// 检查是否应该使用直通模式
-        /// Check if bypass mode should be used
-        pub fn should_bypass_async(&self, batch_size: usize) -> bool {
-            matches!(self.choose_mode(batch_size), ExecutionMode::SingleThreadDirect)
-        }
-    }
-    
-    /// 直通式定时器处理器（零异步开销）
-    /// Bypass timer processor (zero async overhead)
-    pub struct BypassTimerProcessor<E: EventDataTrait> {
-        /// 内联处理缓冲区（栈分配）
-        /// Inline processing buffer (stack allocated)
-        inline_buffer: Vec<ProcessedTimerData<E>>,
-        /// 处理统计
-        /// Processing statistics
-        processed_count: usize,
-    }
-
-    impl<E: EventDataTrait> Default for BypassTimerProcessor<E> {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-    
-    impl<E: EventDataTrait> BypassTimerProcessor<E> {
-        pub fn new() -> Self {
-            Self {
-                inline_buffer: Vec::with_capacity(256), // 预分配避免运行时分配
-                processed_count: 0,
-            }
-        }
-        
-        /// 直通式批量处理（同步，零异步开销）
-        /// Bypass batch processing (synchronous, zero async overhead)
-        pub fn process_batch_bypass(
-            &mut self,
-            timer_entries: &[TimerEntry<E>],
-        ) -> &[ProcessedTimerData<E>] {
-            self.inline_buffer.clear();
-            self.inline_buffer.reserve(timer_entries.len());
-            
-            // 直接同步处理，无异步调度开销
-            // Direct synchronous processing, no async scheduling overhead
-            for (i, entry) in timer_entries.iter().enumerate() {
-                self.inline_buffer.push(ProcessedTimerData {
-                    entry_id: entry.id,
-                    connection_id: entry.event.data.connection_id,
-                    timeout_event: entry.event.data.timeout_event.clone(),
-                    expiry_time: entry.expiry_time,
-                    slot_index: i,
-                });
-            }
-            
-            self.processed_count += timer_entries.len();
-            &self.inline_buffer
-        }
-        
-        /// 直通式事件分发（同步，使用引用传递）
-        /// Bypass event dispatch (synchronous, using reference passing)
-        pub fn dispatch_events_bypass<H>(
-            &self,
-            processed_data: &[ProcessedTimerData<E>],
-            handler: &H,
-        ) -> usize
-        where
-            H: ZeroCopyEventDelivery<E>,
-        {
-            // 构建事件引用数组，避免克隆
-            // Build event reference array, avoiding clones
-            let event_refs: Vec<TimerEventData<E>> = processed_data.iter()
-                .map(|data| TimerEventData::new(data.connection_id, data.timeout_event.clone()))
-                .collect();
-            
-            let event_ref_ptrs: Vec<&TimerEventData<E>> = event_refs.iter().collect();
-            
-            // 批量传递引用，零拷贝
-            // Batch deliver references, zero-copy
-            handler.batch_deliver_event_refs(&event_ref_ptrs)
-        }
-        
-        /// 获取处理统计
-        /// Get processing statistics
-        pub fn get_processed_count(&self) -> usize {
-            self.processed_count
-        }
-    }
-}
-
-/// 内存预分配管理器 - 减少运行时分配
-/// Memory pre-allocation manager - reducing runtime allocations
-pub mod memory_optimization {
-    use super::*;
-    
-    /// 预分配内存池
-    /// Pre-allocated memory pool  
-    pub struct MemoryPool<E: EventDataTrait> {
-        /// 预分配的数据缓冲区
-        /// Pre-allocated data buffers
-        data_buffers: Vec<Vec<ProcessedTimerData<E>>>,
-        /// 预分配的ID缓冲区  
-        /// Pre-allocated ID buffers
-        id_buffers: Vec<Vec<u32>>,
-        /// 预分配的时间戳缓冲区
-        /// Pre-allocated timestamp buffers
-        timestamp_buffers: Vec<Vec<u64>>,
-        /// 当前缓冲区索引
-        /// Current buffer index
-        current_buffer_index: AtomicUsize,
-        /// 缓冲区数量
-        /// Buffer count
-        buffer_count: usize,
-    }
-    
-    impl<E: EventDataTrait> MemoryPool<E> {
-        pub fn new(buffer_count: usize, buffer_capacity: usize) -> Self {
-            let mut data_buffers = Vec::with_capacity(buffer_count);
-            let mut id_buffers = Vec::with_capacity(buffer_count);
-            let mut timestamp_buffers = Vec::with_capacity(buffer_count);
-            
-            for _ in 0..buffer_count {
-                data_buffers.push(Vec::with_capacity(buffer_capacity));
-                id_buffers.push(Vec::with_capacity(buffer_capacity));
-                timestamp_buffers.push(Vec::with_capacity(buffer_capacity));
-            }
-            
-            Self {
-                data_buffers,
-                id_buffers,
-                timestamp_buffers,
-                current_buffer_index: AtomicUsize::new(0),
-                buffer_count,
-            }
-        }
-        
-        /// 获取下一个可用的数据缓冲区
-        /// Get next available data buffer
-        pub fn get_data_buffer(&mut self) -> &mut Vec<ProcessedTimerData<E>> {
-            let index = self.current_buffer_index.fetch_add(1, Ordering::Relaxed) % self.buffer_count;
-            let buffer = &mut self.data_buffers[index];
-            buffer.clear();
-            buffer
-        }
-        
-        /// 获取ID缓冲区和时间戳缓冲区
-        /// Get ID buffer and timestamp buffer
-        pub fn get_work_buffers(&mut self) -> (&mut Vec<u32>, &mut Vec<u64>) {
-            let index = self.current_buffer_index.load(Ordering::Relaxed) % self.buffer_count;
-            let id_buffer = &mut self.id_buffers[index];
-            let timestamp_buffer = &mut self.timestamp_buffers[index];
-            
-            id_buffer.clear();
-            timestamp_buffer.clear();
-            
-            (id_buffer, timestamp_buffer)
-        }
-        
-        /// 返回缓冲区（标记为可重用）
-        /// Return buffer (mark as reusable)
-        pub fn return_buffers(&self) {
-            // 在这个实现中，缓冲区会在下次获取时自动清理
-            // In this implementation, buffers are automatically cleaned on next acquisition
-        }
-    }
-    
-    /// 零分配处理器 - 最小化内存分配
-    /// Zero-allocation processor - minimizing memory allocations
-    pub struct ZeroAllocProcessor<E: EventDataTrait> {
-        /// 内存池
-        /// Memory pool
-        memory_pool: MemoryPool<E>,
-        /// 栈分配缓冲区（用于小批量）
-        /// Stack-allocated buffer (for small batches)
-        stack_buffer: [ProcessedTimerData<E>; 64],
-        /// 栈缓冲区使用计数
-        /// Stack buffer usage count
-        stack_usage: usize,
-    }
-
-    impl<E: EventDataTrait> Default for ZeroAllocProcessor<E> {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-    
-    impl<E: EventDataTrait> ZeroAllocProcessor<E> {
-        pub fn new() -> Self {
-            // 创建默认时间戳
-            let default_instant = tokio::time::Instant::now();
-            
-            // 使用数组映射来初始化栈缓冲区
-            let stack_buffer: [ProcessedTimerData<E>; 64] = std::array::from_fn(|_| ProcessedTimerData {
-                entry_id: 0,
-                connection_id: 0,
-                timeout_event: E::default(),
-                expiry_time: default_instant,
-                slot_index: 0,
-            });
-            
-            Self {
-                memory_pool: MemoryPool::new(4, 1024), // 4个缓冲区，每个1024容量
-                stack_buffer,
-                stack_usage: 0,
-            }
-        }
-        
-        /// 处理小批量（使用栈分配）
-        /// Process small batch (using stack allocation)
-        pub fn process_small_batch(&mut self, timer_entries: &[TimerEntry<E>]) -> &[ProcessedTimerData<E>] {
-            if timer_entries.len() <= 64 {
-                self.stack_usage = timer_entries.len();
-                
-                for (i, entry) in timer_entries.iter().enumerate() {
-                    self.stack_buffer[i] = ProcessedTimerData {
-                        entry_id: entry.id,
-                        connection_id: entry.event.data.connection_id,
-                        timeout_event: entry.event.data.timeout_event.clone(),
-                        expiry_time: entry.expiry_time,
-                        slot_index: i,
-                    };
-                }
-                
-                &self.stack_buffer[..self.stack_usage]
-            } else {
-                &[]
-            }
-        }
-        
-        /// 处理大批量（使用内存池）
-        /// Process large batch (using memory pool)
-        pub fn process_large_batch(&mut self, timer_entries: &[TimerEntry<E>]) -> &[ProcessedTimerData<E>] {
-            let buffer = self.memory_pool.get_data_buffer();
-            buffer.reserve(timer_entries.len());
-            
-            for (i, entry) in timer_entries.iter().enumerate() {
-                buffer.push(ProcessedTimerData {
-                    entry_id: entry.id,
-                    connection_id: entry.event.data.connection_id,
-                    timeout_event: entry.event.data.timeout_event.clone(),
-                    expiry_time: entry.expiry_time,
-                    slot_index: i,
-                });
-            }
-            
-            buffer
-        }
-    }
-}
 
 /// 自适应并行策略选择
 /// Adaptive parallel strategy selection
@@ -383,7 +73,7 @@ pub struct HybridParallelTimerSystem<E: EventDataTrait> {
     /// 执行模式选择器
     mode_selector: single_thread_bypass::ExecutionModeSelector,
     /// 零分配处理器
-    zero_alloc_processor: memory_optimization::ZeroAllocProcessor<E>,
+    zero_alloc_processor: memory::ZeroAllocProcessor<E>,
     /// 性能统计
     stats: ParallelProcessingStats,
     /// CPU核心数，用于策略选择
@@ -499,7 +189,7 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
             zero_copy_dispatcher: crate::timer::event::zero_copy::ZeroCopyBatchDispatcher::new(slot_count, dispatcher_count),
             bypass_processor: single_thread_bypass::BypassTimerProcessor::new(),
             mode_selector: single_thread_bypass::ExecutionModeSelector::new(),
-            zero_alloc_processor: memory_optimization::ZeroAllocProcessor::new(),
+            zero_alloc_processor: memory::ZeroAllocProcessor::new(),
             stats: ParallelProcessingStats::default(),
             cpu_cores,
         }
@@ -1301,6 +991,7 @@ mod tests {
         
         // 测试场景：不同批量大小下的性能对比 (已扩展至 8192)
         let benchmark_cases = vec![
+            (1, "超小批量 (1)"),
             (16, "超小批量 (16)"),
             (32, "超小批量 (32)"),
             (64, "小批量 (64)"),

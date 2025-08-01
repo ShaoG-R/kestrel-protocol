@@ -23,9 +23,6 @@ pub type TimerEventId = u64;
 /// Connection ID, used to identify which connection a timer belongs to
 pub type ConnectionId = u32;
 
-
-
-
 /// 定时器事件数据
 /// Timer event data
 pub struct TimerEventData<E: EventDataTrait> {
@@ -125,7 +122,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
     /// 使用智能工厂创建定时器事件 (推荐)
     /// Create timer event using smart factory (recommended)
     pub fn from_factory(
-        factory: &crate::timer::event::traits::EventFactory<E>,
+        factory: &traits::EventFactory<E>,
         id: TimerEventId,
         connection_id: ConnectionId,
         timeout_event: E,
@@ -142,7 +139,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
     /// 批量创建定时器事件（智能工厂版本，推荐）
     /// Batch create timer events (smart factory version, recommended)
     pub fn batch_from_factory(
-        factory: &crate::timer::event::traits::EventFactory<E>,
+        factory: &traits::EventFactory<E>,
         start_id: TimerEventId,
         requests: &[(ConnectionId, E)],
         callback_txs: &[mpsc::Sender<TimerEventData<E>>],
@@ -171,7 +168,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
 
     /// 触发定时器事件，向注册者发送超时通知（智能工厂版本，推荐）
     /// Trigger timer event, send timeout notification to registrant (smart factory version, recommended)
-    pub async fn trigger_with_factory(self, factory: &crate::timer::event::traits::EventFactory<E>) {
+    pub async fn trigger_with_factory(self, factory: &traits::EventFactory<E>) {
         let timer_id = self.id;
         let connection_id = self.data.connection_id;
         let event_type = self.data.timeout_event.clone();
