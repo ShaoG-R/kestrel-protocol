@@ -13,7 +13,7 @@ use crate::timer::{
     wheel::{TimingWheel, TimerEntryId},
 };
 use crate::timer::event::traits::EventDataTrait;
-use crate::timer::event::pool_manager::{TimerEventPool, PoolConfig};
+use crate::timer::event::pool::{TimerEventPool, PoolConfig};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 

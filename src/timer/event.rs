@@ -7,13 +7,13 @@
 
 pub(super) mod zero_copy;
 pub mod traits;
-pub mod pool_manager;
+pub mod pool;
 
 use std::fmt;
 use std::fmt::Debug;
 use tokio::sync::mpsc;
 use crate::timer::event::traits::EventDataTrait;
-use crate::timer::event::pool_manager::TimerEventPool;
+use crate::timer::event::pool::TimerEventPool;
 
 /// 定时器事件ID，用于唯一标识一个定时器
 /// Timer event ID, used to uniquely identify a timer

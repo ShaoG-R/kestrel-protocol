@@ -1058,7 +1058,7 @@ impl<E: EventDataTrait> Default for HybridParallelTimerSystem<E> {
 mod tests {
     use super::*;
     use crate::timer::event::TimerEvent;
-    use crate::timer::event::pool_manager::TimerEventPool;
+    use crate::timer::event::pool::TimerEventPool;
     use tokio::sync::mpsc;
     use std::time::Instant;
     use crate::core::endpoint::timing::TimeoutEvent;
