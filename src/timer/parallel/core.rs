@@ -360,21 +360,28 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
     /// 将统计逻辑重构到此函数中，结构更清晰
     fn update_stats(&mut self, strategy: OptimalParallelStrategy, batch_size: usize, duration: Duration) {
         self.stats.total_batches_processed += 1;
-        self.stats.avg_processing_time_ns = (self.stats.avg_processing_time_ns + duration.as_nanos() as f64) / 2.0;
+        
+        // 正确的运行平均值计算：先累加总时间，再计算平均值
+        // Correct running average calculation: accumulate total time, then calculate average
+        let current_duration_ns = duration.as_nanos() as f64;
+        self.stats.total_processing_time_ns += current_duration_ns;
+        self.stats.avg_processing_time_ns = self.stats.total_processing_time_ns / self.stats.total_batches_processed as f64;
+        
+        // 累加总操作数
+        // Accumulate total operations
+        self.stats.total_operations_processed += batch_size as u64;
+        
+        // 计算整体吞吐量（基于总操作数和总时间）
+        // Calculate overall throughput based on total operations and total time
+        if self.stats.total_processing_time_ns > 0.0 {
+            let total_time_secs = self.stats.total_processing_time_ns / 1_000_000_000.0;
+            self.stats.overall_throughput_ops_per_sec = self.stats.total_operations_processed as f64 / total_time_secs;
+        }
 
         match strategy {
             OptimalParallelStrategy::SIMDOnly => self.stats.simd_only_count += 1,
             OptimalParallelStrategy::SIMDWithRayon => self.stats.simd_rayon_count += 1,
             OptimalParallelStrategy::FullHybrid => self.stats.full_hybrid_count += 1,
-        }
-
-        // 使用f64进行精确的吞吐量计算
-        let duration_secs = duration.as_secs_f64();
-        if duration_secs > 0.0 {
-            let current_throughput = batch_size as f64 / duration_secs;
-            if current_throughput > self.stats.peak_throughput_ops_per_sec {
-                self.stats.peak_throughput_ops_per_sec = current_throughput;
-            }
         }
     }
 

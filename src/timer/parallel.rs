@@ -510,8 +510,8 @@ mod tests {
         let stats = optimized_system.get_stats();
         println!("📊 优化系统性能统计:");
         println!("  处理批次: {}", stats.total_batches_processed);
-        println!("  峰值吞吐量: {} ops/sec", stats.peak_throughput_ops_per_sec);
-        println!("  平均处理时间: {} 纳秒", stats.avg_processing_time_ns);
+        println!("  整体吞吐量: {:.0} ops/sec", stats.overall_throughput_ops_per_sec);
+        println!("  平均处理时间: {:.3}µs", stats.avg_processing_time_ns / 1000.0);
     }
 
     
@@ -616,9 +616,9 @@ mod tests {
             println!();
             
             println!("  📈 性能指标:");
-            println!("    平均延迟: {:.}µs", avg_duration.as_micros() as f64 / 1000.0);
-            println!("    最小延迟: {:.}µs", min_duration.as_micros() as f64 / 1000.0);
-            println!("    最大延迟: {:.}µs", max_duration.as_micros() as f64 / 1000.0);
+            println!("    平均延迟: {:.3}µs", avg_duration.as_secs_f64() * 1_000_000.0);
+            println!("    最小延迟: {:.3}µs", min_duration.as_secs_f64() * 1_000_000.0);
+            println!("    最大延迟: {:.3}µs", max_duration.as_secs_f64() * 1_000_000.0);
             println!("    每操作: {} 纳秒", nanos_per_op);
             println!("    吞吐量: {:.0} ops/sec", throughput);
             println!();
@@ -638,16 +638,6 @@ mod tests {
             };
             
             println!("  🏆 性能等级: {}", performance_grade);
-            
-            // 优化效果总结
-            let optimization_impact = match (should_bypass, nanos_per_op) {
-                (true, 0..=100) => "🚀 直通优化效果显著",
-                (false, 0..=200) if avg_memory_allocs <= 2.0 => "⚡ 零拷贝优化有效",
-                (false, 201..=400) => "✅ 优化有一定效果",
-                _ => "⚠️  优化效果有限",
-            };
-            
-            println!("  💡 优化效果: {}", optimization_impact);
             println!();
         }
 
@@ -655,8 +645,8 @@ mod tests {
         let final_stats = optimized_system.get_stats();
         println!("🎯 最终性能统计:");
         println!("  处理批次总数: {}", final_stats.total_batches_processed);
-        println!("  峰值吞吐量: {:.0} ops/sec", final_stats.peak_throughput_ops_per_sec);
-        println!("  平均处理时间: {} 纳秒", final_stats.avg_processing_time_ns);
+        println!("  整体吞吐量: {:.0} ops/sec", final_stats.overall_throughput_ops_per_sec);
+        println!("  平均处理时间: {:.3}µs", final_stats.avg_processing_time_ns / 1000.0);
         println!("  直通模式使用: {} 次", final_stats.simd_only_count);
         println!("  SIMD+Rayon使用: {} 次", final_stats.simd_rayon_count);
         println!("  完整混合使用: {} 次", final_stats.full_hybrid_count);

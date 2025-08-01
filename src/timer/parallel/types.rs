@@ -52,7 +52,13 @@ pub struct ParallelProcessingStats {
     pub simd_rayon_count: u64,
     pub full_hybrid_count: u64,
     pub avg_processing_time_ns: f64,
-    pub peak_throughput_ops_per_sec: f64,
+    pub overall_throughput_ops_per_sec: f64,
+    /// 总处理时间（纳秒），用于计算正确的平均值
+    /// Total processing time in nanoseconds for accurate average calculation
+    pub total_processing_time_ns: f64,
+    /// 总处理的操作数，用于计算整体吞吐量
+    /// Total operations processed for overall throughput calculation
+    pub total_operations_processed: u64,
 }
 
 /// 内部处理结果类型
