@@ -58,7 +58,7 @@ mod tests {
     use crate::timer::event::traits::{EventDataTrait, EventFactory};
     use crate::timer::TimerEntry;
     use tokio::sync::mpsc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
     use crate::core::endpoint::timing::TimeoutEvent;
 
     #[tokio::test]
@@ -75,6 +75,276 @@ mod tests {
         assert_eq!(system.choose_optimal_strategy(100), OptimalParallelStrategy::SIMDOnly);
         assert_eq!(system.choose_optimal_strategy(1000), OptimalParallelStrategy::SIMDOnly);
         assert_eq!(system.choose_optimal_strategy(10000), OptimalParallelStrategy::FullHybrid);
+    }
+
+    // ========== 扩展的并行系统测试 ==========
+
+    #[tokio::test]
+    async fn test_strategy_selection_comprehensive() {
+        let system = HybridParallelTimerSystem::<TimeoutEvent>::new();
+        
+        // 边界值测试
+        assert_eq!(system.choose_optimal_strategy(0), OptimalParallelStrategy::SIMDOnly);
+        assert_eq!(system.choose_optimal_strategy(256), OptimalParallelStrategy::SIMDOnly);
+        assert_eq!(system.choose_optimal_strategy(257), OptimalParallelStrategy::SIMDOnly);
+        assert_eq!(system.choose_optimal_strategy(1023), OptimalParallelStrategy::SIMDOnly);
+        assert_eq!(system.choose_optimal_strategy(1024), OptimalParallelStrategy::FullHybrid);
+        assert_eq!(system.choose_optimal_strategy(4095), OptimalParallelStrategy::FullHybrid);
+        assert_eq!(system.choose_optimal_strategy(4096), OptimalParallelStrategy::FullHybrid);
+        assert_eq!(system.choose_optimal_strategy(100000), OptimalParallelStrategy::FullHybrid);
+    }
+
+    #[tokio::test]
+    async fn test_simd_processor_detailed() {
+        let mut processor = SIMDTimerProcessor::<TimeoutEvent>::new();
+        
+        // 测试空批量
+        let empty_entries = vec![];
+        let result = processor.process_batch(&empty_entries);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
+        
+        // 测试小批量（触发SIMD优化）
+        let small_entries = create_test_timer_entries(8);
+        let result = processor.process_batch(&small_entries);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 8);
+        
+        // 测试中等批量
+        let medium_entries = create_test_timer_entries(64);
+        let result = processor.process_batch(&medium_entries);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 64);
+    }
+
+    #[tokio::test]
+    async fn test_rayon_executor() {
+        let mut executor = RayonBatchExecutor::new(num_cpus::get());
+        let mut simd_processor = SIMDTimerProcessor::<TimeoutEvent>::new();
+        
+        // 测试Rayon + SIMD并行处理
+        let test_entries = create_test_timer_entries(1000);
+        
+        let start = Instant::now();
+        let result = executor.parallel_process_with_simd(test_entries, &mut simd_processor).await;
+        let duration = start.elapsed();
+        
+        assert!(result.is_ok());
+        let processed = result.unwrap();
+        assert_eq!(processed.len(), 1000);
+        
+        // 验证每个条目都被正确处理
+        for (i, timer_data) in processed.iter().enumerate() {
+            assert_eq!(timer_data.entry_id, i as u64);
+            assert_eq!(timer_data.connection_id, (i % 10000) as u32);
+        }
+        
+        println!("Rayon + SIMD parallel processing 1000 timers took: {:?}", duration);
+        assert!(duration < Duration::from_millis(100)); // 应该很快
+    }
+
+    #[tokio::test]
+    async fn test_zero_copy_batch_dispatcher() {
+        let mut system = HybridParallelTimerSystem::<TimeoutEvent>::new();
+        
+        // 测试零拷贝批量分发
+        let test_entries = create_test_timer_entries(100);
+        let entry_count = test_entries.len();
+        
+        let start = Instant::now();
+        let result = system.process_timer_batch(test_entries).await;
+        let duration = start.elapsed();
+        
+        assert!(result.is_ok());
+        let processed = result.unwrap();
+        assert_eq!(processed.processed_count, entry_count);
+        
+        println!("Zero-copy batch dispatch 100 timers took: {:?}", duration);
+        assert!(duration < Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn test_single_thread_bypass() {
+        let mut system = HybridParallelTimerSystem::<TimeoutEvent>::new();
+        
+        // 小批量应该触发单线程直通优化
+        let small_batch = create_test_timer_entries(32);
+        
+        let start = Instant::now();
+        let result = system.process_timer_batch(small_batch).await;
+        let duration = start.elapsed();
+        
+        assert!(result.is_ok());
+        let processed = result.unwrap();
+        assert_eq!(processed.processed_count, 32);
+        
+        // 验证使用了单线程直通（非常快）
+        println!("Single-thread bypass 32 timers took: {:?}", duration);
+        assert!(duration < Duration::from_millis(10));
+        
+        // 统计信息应该反映直通使用
+        assert!(processed.detailed_stats.memory_allocations < 10);
+    }
+
+    #[tokio::test]
+    async fn test_memory_efficiency() {
+        let mut system = HybridParallelTimerSystem::<TimeoutEvent>::new();
+        
+        // 预热系统
+        for _ in 0..5 {
+            let warmup = create_test_timer_entries(50);
+            let _ = system.process_timer_batch(warmup).await;
+        }
+        
+        // 测试内存分配情况
+        let test_entries = create_test_timer_entries(200);
+        let result = system.process_timer_batch(test_entries).await;
+        
+        assert!(result.is_ok());
+        let processed = result.unwrap();
+        
+        // 验证内存效率
+        let allocations = processed.detailed_stats.memory_allocations;
+        println!("Memory allocations for 200 timers: {}", allocations);
+        
+        // 由于零拷贝和对象池，内存分配应该很少
+        assert!(allocations < 50);
+    }
+
+    #[tokio::test]
+    async fn test_performance_scaling() {
+        let mut system = HybridParallelTimerSystem::<TimeoutEvent>::new();
+        
+        let test_sizes = vec![10, 50, 100, 500, 1000, 2000];
+        let mut performance_results = Vec::new();
+        
+        for size in test_sizes {
+            // 预热
+            for _ in 0..3 {
+                let warmup = create_test_timer_entries(size);
+                let _ = system.process_timer_batch(warmup).await;
+            }
+            
+            // 测试性能
+            let test_entries = create_test_timer_entries(size);
+            let start = Instant::now();
+            let result = system.process_timer_batch(test_entries).await;
+            let duration = start.elapsed();
+            
+            assert!(result.is_ok());
+            
+            let nanos_per_timer = duration.as_nanos() / size as u128;
+            performance_results.push((size, nanos_per_timer));
+            
+            println!("Batch size {}: {} ns/timer", size, nanos_per_timer);
+        }
+        
+        // 验证性能特征
+        // 小批量应该有很好的单位性能（由于直通优化）
+        assert!(performance_results[0].1 < 1000); // <1微秒/定时器
+        
+        // 大批量的绝对性能应该不会太差
+        assert!(performance_results.last().unwrap().1 < 10000); // <10微秒/定时器
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_processing() {
+        use tokio::task::JoinSet;
+        
+        // 创建多个并发任务，测试系统的并发安全性
+        let mut join_set = JoinSet::new();
+        let task_count = 10;
+        let entries_per_task = 100;
+        
+        for task_id in 0..task_count {
+            join_set.spawn(async move {
+                let mut system = HybridParallelTimerSystem::<TimeoutEvent>::new();
+                let test_entries = create_test_timer_entries(entries_per_task);
+                
+                let start = Instant::now();
+                let result = system.process_timer_batch(test_entries).await;
+                let duration = start.elapsed();
+                
+                assert!(result.is_ok());
+                let processed = result.unwrap();
+                assert_eq!(processed.processed_count, entries_per_task);
+                
+                (task_id, duration, processed.detailed_stats)
+            });
+        }
+        
+        // 等待所有任务完成
+        let mut total_duration = Duration::ZERO;
+        let mut completed_tasks = 0;
+        
+        while let Some(task_result) = join_set.join_next().await {
+            assert!(task_result.is_ok());
+            let (task_id, duration, stats) = task_result.unwrap();
+            
+            total_duration += duration;
+            completed_tasks += 1;
+            
+            println!("Task {} completed in {:?}, allocations: {}", 
+                     task_id, duration, stats.memory_allocations);
+        }
+        
+        assert_eq!(completed_tasks, task_count);
+        let avg_duration = total_duration / task_count as u32;
+        
+        println!("Average concurrent task duration: {:?}", avg_duration);
+        assert!(avg_duration < Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn test_error_handling() {
+        let mut system = HybridParallelTimerSystem::<TimeoutEvent>::new();
+        
+        // 测试空批量处理
+        let empty_batch = vec![];
+        let result = system.process_timer_batch(empty_batch).await;
+        assert!(result.is_ok());
+        let processed = result.unwrap();
+        assert_eq!(processed.processed_count, 0);
+        
+        // 测试极大批量（可能触发某些限制）
+        let large_batch = create_test_timer_entries(50000);
+        let result = system.process_timer_batch(large_batch).await;
+        
+        // 即使是极大批量，系统也应该能处理
+        assert!(result.is_ok());
+        let processed = result.unwrap();
+        assert_eq!(processed.processed_count, 50000);
+    }
+
+    #[tokio::test]
+    async fn test_system_statistics() {
+        let mut system = HybridParallelTimerSystem::<TimeoutEvent>::new();
+        
+        // 初始统计应该为0
+        assert_eq!(system.stats.total_batches_processed, 0);
+        
+        // 处理一些批量
+        let batches = vec![
+            create_test_timer_entries(50),
+            create_test_timer_entries(200),
+            create_test_timer_entries(1000),
+        ];
+        
+        for batch in batches {
+            let result = system.process_timer_batch(batch).await;
+            assert!(result.is_ok());
+        }
+        
+        // 验证统计更新
+        assert_eq!(system.stats.total_batches_processed, 3);
+        
+        // 验证策略使用计数
+        assert!(system.stats.simd_only_count > 0 || system.stats.full_hybrid_count > 0);
+        
+        println!("Processed {} batches, SIMD-only: {}, Full-hybrid: {}", 
+                 system.stats.total_batches_processed,
+                 system.stats.simd_only_count,
+                 system.stats.full_hybrid_count);
     }
 
     #[tokio::test]
