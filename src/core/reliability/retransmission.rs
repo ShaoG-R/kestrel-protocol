@@ -11,6 +11,7 @@ pub mod rtt;
 mod sack_manager;
 mod simple_retx_manager;
 
+pub use sack_manager::RetransmissionFrameInfo;
 use self::{sack_manager::SackManager, simple_retx_manager::SimpleRetransmissionManager};
 use crate::packet::frame::{FrameType, RetransmissionContext};
 

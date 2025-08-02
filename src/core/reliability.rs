@@ -14,12 +14,14 @@ pub mod recv_buffer;
 pub mod retransmission;
 pub mod send_buffer;
 pub mod congestion;
+pub mod packet_timer_manager;
 
 use self::{
     packetizer::{packetize, PacketizerContext},
     recv_buffer::ReceiveBuffer,
     retransmission::{rtt::RttEstimator, RetransmissionManager},
     send_buffer::SendBuffer,
+    packet_timer_manager::PacketTimerManager,
 };
 use crate::{
     config::Config,
@@ -37,7 +39,7 @@ use crate::timer::{
     TimerActorHandle,
 };
 use tokio::sync::mpsc;
-use std::collections::HashSet;
+
 
 /// 可靠性层超时检查结果（遗留结构体，保持向后兼容）
 /// Reliability layer timeout check result (legacy struct, maintained for backward compatibility)
@@ -56,6 +58,22 @@ pub struct LegacyTimeoutCheckResult {
     /// 需要重传的帧（仅在RetransmissionTimeout时有效）
     /// Frames that need retransmission (only valid for RetransmissionTimeout)
     pub frames_to_retransmit: Vec<Frame>,
+}
+
+/// ACK处理结果
+/// ACK processing result
+///
+/// 该结构体包含ACK处理的完整结果，包括需要重传的帧和被确认的序列号。
+/// This struct contains the complete result of ACK processing, including
+/// frames that need retransmission and acknowledged sequence numbers.
+#[derive(Debug)]
+pub struct AckProcessingResult {
+    /// 需要重传的帧
+    /// Frames that need retransmission
+    pub frames_to_retransmit: Vec<Frame>,
+    /// 新确认的序列号列表
+    /// List of newly acknowledged sequence numbers
+    pub newly_acked_sequences: Vec<u32>,
 }
 
 /// The reliability layer for a connection.
@@ -117,9 +135,9 @@ pub struct ReliabilityLayer {
     /// Timer actor handle for batch timer operations
     /// 定时器Actor句柄，用于批量定时器操作
     timer_actor: TimerActorHandle,
-    /// Sequence numbers with active retransmission timers (for tracking)
-    /// 具有活跃重传定时器的序列号集合（用于跟踪）
-    active_retx_sequences: HashSet<u32>,
+    /// Packet timer manager for direct packet-timer binding
+    /// 数据包定时器管理器，用于数据包与定时器的直接绑定
+    packet_timer_manager: PacketTimerManager,
 }
 
 impl ReliabilityLayer {
@@ -132,6 +150,8 @@ impl ReliabilityLayer {
         connection_id: ConnectionId,
         timer_actor: TimerActorHandle,
     ) -> Self {
+        let packet_timer_manager = PacketTimerManager::new(connection_id, timer_actor.clone());
+        
         Self {
             send_buffer: SendBuffer::new(config.connection.send_buffer_capacity_bytes),
             recv_buffer: ReceiveBuffer::new(config.connection.recv_buffer_capacity_packets),
@@ -144,44 +164,57 @@ impl ReliabilityLayer {
             ack_eliciting_packets_since_last_ack: 0,
             connection_id,
             timer_actor,
-            active_retx_sequences: HashSet::new(),
+            packet_timer_manager,
         }
     }
 
-    /// Handles an incoming ACK frame.
+    /// Handles an incoming ACK frame and returns comprehensive result.
     ///
     /// This method processes the SACK ranges to identify acknowledged and lost packets,
-    /// updates the RTT estimate, adjusts the congestion window, and queues lost packets
-    /// for fast retransmission.
+    /// updates the RTT estimate, adjusts the congestion window, and returns both
+    /// frames that need retransmission and newly acknowledged sequence numbers.
     ///
-    /// 处理传入的 ACK 帧。
+    /// 处理传入的 ACK 帧并返回综合结果。
     ///
     /// 此方法处理 SACK 范围以识别已确认和丢失的数据包，
-    /// 更新 RTT 估计，调整拥塞窗口，并将丢失的数据包排队以便快速重传。
-    pub fn handle_ack(
+    /// 更新 RTT 估计，调整拥塞窗口，并返回需要重传的帧和新确认的序列号。
+    pub fn handle_ack_comprehensive(
         &mut self,
         recv_next_seq: u32,
         sack_ranges: Vec<SackRange>,
         now: Instant,
         context: &crate::packet::frame::RetransmissionContext,
-    ) -> Vec<Frame> {
+    ) -> AckProcessingResult {
         // Use the unified retransmission manager for ACK processing.
         // 使用统一的重传管理器进行ACK处理。
         let result = self.retransmission_manager.process_ack(recv_next_seq, &sack_ranges, now, context);
+
+        // Store newly acknowledged sequences for async processing
+        // 存储新确认的序列号用于异步处理
+        let newly_acked_sequences = result.newly_acked_sequences.clone();
 
         // 取消已确认数据包的重传定时器
         // Cancel retransmission timers for acknowledged packets
         if !result.newly_acked_sequences.is_empty() {
             trace!(acked_seqs = ?result.newly_acked_sequences, "Cancelling retransmission timers for ACKed packets");
             
-            // 准备批量取消请求
-            // Prepare batch cancellation requests
+            // 标记需要异步批量确认的序列号（新实现）
+            // Mark sequences for async batch acknowledgment (new implementation)
+            trace!(
+                sequences_count = result.newly_acked_sequences.len(),
+                sequences = ?result.newly_acked_sequences,
+                "Packets marked for async batch acknowledgment using PacketTimerManager"
+            );
+            
+            // 注意：实际的PacketTimerManager批量确认将在调用者的异步上下文中处理
+            // Note: Actual PacketTimerManager batch acknowledgment will be handled in caller's async context
+            
+            // 保持旧的批量取消逻辑以兼容传统重传管理器
+            // Keep old batch cancellation logic for compatibility with legacy retransmission manager
             let mut cancel_requests = Vec::new();
             for &seq_num in &result.newly_acked_sequences {
-                if self.active_retx_sequences.remove(&seq_num) {
-                    cancel_requests.push((self.connection_id, TimeoutEvent::RetransmissionTimeout));
-                    trace!(seq = seq_num, "Prepared retransmission timer cancellation for ACKed packet");
-                }
+                cancel_requests.push((self.connection_id, TimeoutEvent::RetransmissionTimeout));
+                trace!(seq = seq_num, "Prepared retransmission timer cancellation for ACKed packet");
             }
             
             // 批量取消定时器（异步进行，不阻塞当前处理）
@@ -223,7 +256,33 @@ impl ReliabilityLayer {
             );
         }
 
-        result.frames_to_retransmit
+        AckProcessingResult {
+            frames_to_retransmit: result.frames_to_retransmit,
+            newly_acked_sequences,
+        }
+    }
+
+    /// Handles an incoming ACK frame (legacy interface for backward compatibility).
+    ///
+    /// This method processes the SACK ranges to identify acknowledged and lost packets,
+    /// updates the RTT estimate, adjusts the congestion window, and queues lost packets
+    /// for fast retransmission.
+    ///
+    /// 处理传入的 ACK 帧（向后兼容的遗留接口）。
+    ///
+    /// 此方法处理 SACK 范围以识别已确认和丢失的数据包，
+    /// 更新 RTT 估计，调整拥塞窗口，并将丢失的数据包排队以便快速重传。
+    pub fn handle_ack(
+        &mut self,
+        recv_next_seq: u32,
+        sack_ranges: Vec<SackRange>,
+        now: Instant,
+        context: &crate::packet::frame::RetransmissionContext,
+    ) -> Vec<Frame> {
+        // 使用新的综合方法获取完整结果，但只返回需要重传的帧以保持向后兼容性
+        // Use new comprehensive method to get full result, but only return frames that need retransmission for backward compatibility
+        let ack_result = self.handle_ack_comprehensive(recv_next_seq, sack_ranges, now, context);
+        ack_result.frames_to_retransmit
     }
 
     /// Checks for packets that have timed out based on the current RTO.
@@ -316,12 +375,15 @@ impl ReliabilityLayer {
             // 将所有帧添加到统一重传管理器。
             self.retransmission_manager.add_in_flight_packet(frame.clone(), now);
             
-            // 为需要可靠传输的帧注册重传超时定时器
-            // Register retransmission timeout timer for frames that need reliable transmission
+            // 标记需要在异步上下文中添加到PacketTimerManager的帧
+            // Mark frames that need to be added to PacketTimerManager in async context
             if frame.needs_reliability_tracking() {
                 if let Some(seq) = frame.sequence_number() {
-                    self.active_retx_sequences.insert(seq);
-                    trace!(seq = seq, "Frame marked for retransmission timer registration");
+                    trace!(
+                        seq = seq,
+                        frame_type = ?frame.frame_type(),
+                        "Frame marked for PacketTimerManager registration in async context"
+                    );
                 }
             }
         }
@@ -329,22 +391,60 @@ impl ReliabilityLayer {
         frames
     }
 
-    /// 为刚刚打包的帧注册重传定时器
-    /// Register retransmission timers for just packetized frames
-    pub async fn register_timers_for_packetized_frames(&mut self) -> usize {
-        // 收集需要注册定时器的序列号
-        // Collect sequence numbers that need timer registration
-        let seq_nums: Vec<u32> = self.active_retx_sequences.iter().copied().collect();
+    /// 为刚刚打包的帧注册重传定时器（使用PacketTimerManager）
+    /// Register retransmission timers for just packetized frames (using PacketTimerManager)
+    pub async fn register_timers_for_packetized_frames(&mut self, frames: &[crate::packet::frame::Frame]) -> usize {
+        let mut registered_count = 0;
+        let rto = self.rto_estimator.rto();
         
-        if seq_nums.is_empty() {
-            return 0;
+        for frame in frames {
+            if frame.needs_reliability_tracking() {
+                let now = Instant::now();
+                if self.packet_timer_manager.add_packet(frame, now, rto).await {
+                    registered_count += 1;
+                    if let Some(seq) = frame.sequence_number() {
+                        trace!(
+                            seq = seq,
+                            rto = ?rto,
+                            "Registered packet with PacketTimerManager"
+                        );
+                    }
+                }
+            }
         }
         
-        trace!(count = seq_nums.len(), "Registering timers for packetized frames");
+        trace!(
+            registered_count = registered_count,
+            total_frames = frames.len(),
+            "Completed PacketTimerManager registration for packetized frames"
+        );
         
-        // 批量注册定时器
-        // Batch register timers
-        self.batch_register_retransmission_timers(&seq_nums).await
+        registered_count
+    }
+    
+    /// 异步添加单个数据包到PacketTimerManager
+    /// Async add single packet to PacketTimerManager
+    pub async fn add_packet_to_timer_manager(&mut self, frame: &crate::packet::frame::Frame) -> bool {
+        if !frame.needs_reliability_tracking() {
+            return false;
+        }
+        
+        let now = Instant::now();
+        let rto = self.rto_estimator.rto();
+        
+        let result = self.packet_timer_manager.add_packet(frame, now, rto).await;
+        
+        if result {
+            if let Some(seq) = frame.sequence_number() {
+                trace!(
+                    seq = seq,
+                    rto = ?rto,
+                    "Added packet to PacketTimerManager async"
+                );
+            }
+        }
+        
+        result
     }
 
     /// Packetize stream data for 0-RTT scenario with intelligent packet splitting.
@@ -680,16 +780,15 @@ impl ReliabilityLayer {
         // 准备批量注册请求
         // Prepare batch registration requests
         let mut registrations = Vec::new();
-        for &seq_num in seq_nums {
-            if !self.active_retx_sequences.contains(&seq_num) {
-                registrations.push(TimerRegistration::new(
-                    self.connection_id,
-                    rto,
-                    TimeoutEvent::RetransmissionTimeout,
-                    timeout_tx.clone(),
-                ));
-                self.active_retx_sequences.insert(seq_num);
-            }
+        for &_seq_num in seq_nums {
+            // 在新设计中，不再需要跟踪active_retx_sequences，因为PacketTimerManager会处理
+            // In new design, no need to track active_retx_sequences as PacketTimerManager handles it
+            registrations.push(TimerRegistration::new(
+                self.connection_id,
+                rto,
+                TimeoutEvent::RetransmissionTimeout,
+                timeout_tx.clone(),
+            ));
         }
         
         if registrations.is_empty() {
@@ -711,11 +810,8 @@ impl ReliabilityLayer {
             }
             Err(e) => {
                 warn!(error = %e, "Failed to batch register retransmission timers");
-                // 清理失败的序列号跟踪
-                // Clean up failed sequence number tracking
-                for &seq_num in seq_nums {
-                    self.active_retx_sequences.remove(&seq_num);
-                }
+                // 在新设计中，PacketTimerManager会自动处理失败的清理
+                // In new design, PacketTimerManager automatically handles failure cleanup
                 0
             }
         }
@@ -725,6 +821,47 @@ impl ReliabilityLayer {
     /// Register single retransmission timeout timer (simplified version)
     pub async fn register_retransmission_timer(&mut self, seq_num: u32) -> bool {
         self.batch_register_retransmission_timers(&[seq_num]).await > 0
+    }
+    
+    /// 使用新的数据包定时器管理器添加数据包
+    /// Add packet using new packet timer manager
+    pub async fn add_packet_with_timer(&mut self, frame: &Frame) -> bool {
+        let now = Instant::now();
+        let rto = self.rto_estimator.rto();
+        
+        // 同时添加到传统管理器和新的数据包定时器管理器
+        // Add to both traditional manager and new packet timer manager
+        self.retransmission_manager.add_in_flight_packet(frame.clone(), now);
+        self.packet_timer_manager.add_packet(frame, now, rto).await
+    }
+    
+    /// 处理特定定时器的超时（新接口）
+    /// Handle specific timer timeout (new interface)
+    pub async fn handle_packet_timer_timeout(
+        &mut self,
+        timer_id: crate::timer::actor::ActorTimerId,
+        context: &crate::packet::frame::RetransmissionContext,
+    ) -> Option<Frame> {
+        let rto = self.rto_estimator.rto();
+        self.packet_timer_manager.handle_timer_timeout(timer_id, context, rto).await
+    }
+    
+    /// 确认数据包（使用新接口）
+    /// Acknowledge packet (using new interface)
+    pub async fn acknowledge_packet_with_timer(&mut self, seq: u32) -> bool {
+        self.packet_timer_manager.acknowledge_packet(seq).await
+    }
+    
+    /// 批量确认数据包（使用新接口）
+    /// Batch acknowledge packets (using new interface)
+    pub async fn batch_acknowledge_packets_with_timer(&mut self, sequences: &[u32]) -> usize {
+        self.packet_timer_manager.batch_acknowledge_packets(sequences).await
+    }
+    
+    /// 获取数据包定时器管理器的在途数据包数量
+    /// Get in-flight packet count from packet timer manager
+    pub fn packet_timer_in_flight_count(&self) -> usize {
+        self.packet_timer_manager.in_flight_count()
     }
 
     /// 批量取消重传定时器
@@ -737,13 +874,15 @@ impl ReliabilityLayer {
             return 0;
         }
         
-        // 准备批量取消请求
-        // Prepare batch cancellation requests
+        // 使用PacketTimerManager批量确认数据包
+        // Use PacketTimerManager to batch acknowledge packets
+        let _acked_count = self.packet_timer_manager.batch_acknowledge_packets(seq_nums).await;
+        
+        // 保持传统的批量取消逻辑用于兼容性
+        // Keep traditional batch cancellation logic for compatibility
         let mut cancel_requests = Vec::new();
-        for &seq_num in seq_nums {
-            if self.active_retx_sequences.remove(&seq_num) {
-                cancel_requests.push((self.connection_id, TimeoutEvent::RetransmissionTimeout));
-            }
+        for &_seq_num in seq_nums {
+            cancel_requests.push((self.connection_id, TimeoutEvent::RetransmissionTimeout));
         }
         
         if cancel_requests.is_empty() {
@@ -769,26 +908,45 @@ impl ReliabilityLayer {
     /// 连接关闭时清理所有活跃的重传定时器
     /// Clean up all active retransmission timers when connection closes
     pub async fn cleanup_all_retransmission_timers(&mut self) {
-        if self.active_retx_sequences.is_empty() {
-            return;
-        }
+        // 使用PacketTimerManager清理所有定时器
+        // Use PacketTimerManager to clean up all timers
+        self.packet_timer_manager.clear().await;
         
-        let seq_nums: Vec<_> = self.active_retx_sequences.drain().collect();
-        let cancel_requests: Vec<_> = seq_nums.iter()
-            .map(|_| (self.connection_id, TimeoutEvent::RetransmissionTimeout))
-            .collect();
-        
-        if !cancel_requests.is_empty() {
-            trace!(count = cancel_requests.len(), "Cleaning up all retransmission timers");
-            let cancelled_count = self.timer_actor.batch_cancel_timers(cancel_requests).await;
-            debug!(cancelled = cancelled_count, "Cleaned up retransmission timers");
-        }
+        trace!("Cleaned up all retransmission timers using PacketTimerManager");
     }
 
     /// 获取活跃重传定时器数量
     /// Get the number of active retransmission timers
     pub fn active_retransmission_timer_count(&self) -> usize {
-        self.active_retx_sequences.len()
+        self.packet_timer_manager.in_flight_count()
+    }
+    
+    /// 异步处理ACK确认后的PacketTimerManager更新
+    /// Async processing of PacketTimerManager updates after ACK confirmation
+    /// 
+    /// 该方法应在处理ACK后被调用，用于异步更新PacketTimerManager状态
+    /// This method should be called after processing ACK to asynchronously update PacketTimerManager state
+    pub async fn process_ack_acknowledgment(&mut self, acked_sequences: &[u32]) -> usize {
+        if acked_sequences.is_empty() {
+            return 0;
+        }
+        
+        trace!(
+            sequences_count = acked_sequences.len(),
+            sequences = ?acked_sequences,
+            "Processing async PacketTimerManager acknowledgment"
+        );
+        
+        // 使用PacketTimerManager进行批量确认
+        // Use PacketTimerManager for batch acknowledgment
+        let acked_count = self.packet_timer_manager.batch_acknowledge_packets(acked_sequences).await;
+        
+        trace!(
+            acked_count = acked_count,
+            "Completed async PacketTimerManager acknowledgment"
+        );
+        
+        acked_count
     }
 }
 

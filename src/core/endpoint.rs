@@ -136,9 +136,9 @@ impl<T: Transport> Endpoint<T> {
             }
             
             TimeoutEvent::RetransmissionTimeout => {
-                // 处理重传超时 - 触发数据包重传
-                // Handle retransmission timeout - trigger packet retransmission
-                trace!(cid = self.identity.local_cid(), "Processing retransmission timeout");
+                // 传统重传处理逻辑（保持向后兼容）
+                // Legacy retransmission logic (backward compatibility)
+                trace!(cid = self.identity.local_cid(), "Processing legacy retransmission timeout");
                 
                 let now = Instant::now();
                 let context = self.create_retransmission_context();
@@ -147,7 +147,57 @@ impl<T: Transport> Endpoint<T> {
                 // 发送重传的帧
                 // Send retransmitted frames
                 if !retx_result.frames_to_retransmit.is_empty() {
+                    let retx_count = retx_result.frames_to_retransmit.len();
                     self.send_frames(retx_result.frames_to_retransmit).await?;
+                    
+                    trace!(
+                        cid = self.identity.local_cid(),
+                        retransmitted = retx_count,
+                        "Retransmission completed using legacy logic"
+                    );
+                }
+            }
+            
+            TimeoutEvent::PacketRetransmissionTimeout { sequence_number, timer_id } => {
+                // 新的基于数据包的重传处理逻辑
+                // New packet-based retransmission logic
+                trace!(
+                    cid = self.identity.local_cid(),
+                    seq = sequence_number,
+                    timer_id = timer_id,
+                    "Processing packet-based retransmission timeout"
+                );
+                
+                let context = self.create_retransmission_context();
+                
+                // 使用PacketTimerManager处理特定数据包的超时
+                // Use PacketTimerManager to handle specific packet timeout
+                if let Some(retx_frame) = self.transport.reliability_mut()
+                    .handle_packet_timer_timeout(timer_id, &context).await 
+                {
+                    trace!(
+                        cid = self.identity.local_cid(),
+                        seq = sequence_number,
+                        timer_id = timer_id,
+                        "Retransmitting specific packet using PacketTimerManager"
+                    );
+                    
+                    // 发送重传的单个帧
+                    // Send the retransmitted single frame
+                    self.send_frames(vec![retx_frame]).await?;
+                    
+                    trace!(
+                        cid = self.identity.local_cid(),
+                        seq = sequence_number,
+                        "Packet retransmission completed using new logic"
+                    );
+                } else {
+                    trace!(
+                        cid = self.identity.local_cid(),
+                        seq = sequence_number,
+                        timer_id = timer_id,
+                        "No retransmission needed for packet (may have been acknowledged or dropped)"
+                    );
                 }
             }
             
@@ -189,7 +239,9 @@ impl<T: Transport> Endpoint<T> {
                     // 如果还不能发送EOF，重新调度检查
                     // If EOF can't be sent yet, reschedule the check
                     if self.timing.is_fin_pending_eof() {
-                        self.timing.set_fin_pending_eof(true).await;
+                        // 直接调度下一次检查，而不是重新设置标志
+                        // Directly schedule next check instead of resetting the flag
+                        self.timing.schedule_fin_processing_check().await;
                     }
                 }
             }

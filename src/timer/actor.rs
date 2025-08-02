@@ -100,6 +100,15 @@ pub enum TimerActorCommand {
         response_tx: oneshot::Sender<Result<ActorTimerId, String>>,
     },
     
+    /// 注册基于数据包的重传定时器（新版本）
+    /// Register packet-based retransmission timer (new version)
+    RegisterPacketRetransmissionTimer {
+        connection_id: ConnectionId,
+        sequence_number: u32, // 数据包序列号
+        delay: Duration,
+        response_tx: oneshot::Sender<Result<ActorTimerId, String>>,
+    },
+    
     /// 注册FIN处理定时器
     /// Register FIN processing timer
     RegisterFinProcessingTimer {
@@ -408,6 +417,11 @@ impl TimerActor {
                 let _ = response_tx.send(result);
             }
             
+            TimerActorCommand::RegisterPacketRetransmissionTimer { connection_id, sequence_number, delay, response_tx } => {
+                let result = self.handle_register_packet_retransmission_timer(connection_id, sequence_number, delay).await;
+                let _ = response_tx.send(result);
+            }
+            
             TimerActorCommand::RegisterFinProcessingTimer { connection_id, delay, response_tx } => {
                 let result = self.handle_register_fin_processing_timer(connection_id, delay).await;
                 let _ = response_tx.send(result);
@@ -668,6 +682,43 @@ impl TimerActor {
             packet_id = packet_id,
             delay = ?delay,
             "Registered retransmission timer"
+        );
+        
+        Ok(timer_id)
+    }
+    
+    /// 注册基于数据包的重传定时器（新版本）
+    /// Register packet-based retransmission timer (new version)
+    async fn handle_register_packet_retransmission_timer(
+        &mut self,
+        connection_id: ConnectionId,
+        sequence_number: u32,
+        delay: Duration,
+    ) -> Result<ActorTimerId, String> {
+        // 使用新的PacketRetransmissionTimeout事件，包含具体的数据包信息
+        // Use new PacketRetransmissionTimeout event with specific packet information
+        let timer_id = self.allocate_timer_id();
+        let timeout_event = TimeoutEvent::PacketRetransmissionTimeout {
+            sequence_number,
+            timer_id,
+        };
+        
+        let (callback_tx, _callback_rx) = mpsc::channel(1);
+        let registration = TimerRegistration::new(
+            connection_id,
+            delay,
+            timeout_event,
+            callback_tx,
+        );
+        
+        let timer_id = self.handle_register_timer(registration).await?;
+        
+        trace!(
+            timer_id = timer_id,
+            connection_id = connection_id,
+            sequence_number = sequence_number,
+            delay = ?delay,
+            "Registered packet-based retransmission timer with packet information"
         );
         
         Ok(timer_id)
@@ -1110,6 +1161,29 @@ impl TimerActorHandle {
         let command = TimerActorCommand::RegisterRetransmissionTimer { 
             connection_id, 
             packet_id, 
+            delay, 
+            response_tx 
+        };
+        
+        if self.command_tx.send(command).await.is_err() {
+            return Err("TimerActor is not available".to_string());
+        }
+        
+        response_rx.await.unwrap_or_else(|_| Err("Response channel closed".to_string()))
+    }
+    
+    /// 注册基于数据包的重传定时器（新版本）
+    /// Register packet-based retransmission timer (new version)
+    pub async fn register_packet_retransmission_timer(
+        &self,
+        connection_id: ConnectionId,
+        sequence_number: u32,
+        delay: Duration,
+    ) -> Result<ActorTimerId, String> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let command = TimerActorCommand::RegisterPacketRetransmissionTimer { 
+            connection_id, 
+            sequence_number, 
             delay, 
             response_tx 
         };

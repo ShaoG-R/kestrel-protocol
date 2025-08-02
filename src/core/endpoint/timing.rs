@@ -33,8 +33,8 @@ pub enum TimeoutEvent {
     /// 路径验证超时 - 路径验证过程超时
     /// Path validation timeout - path validation process timed out
     PathValidationTimeout,
-    /// 重传超时 - 数据包需要重传
-    /// Retransmission timeout - packets need to be retransmitted
+    /// 重传超时 - 数据包需要重传（传统版本，保持向后兼容）
+    /// Retransmission timeout - packets need to be retransmitted (legacy version, backward compatibility)
     RetransmissionTimeout,
     /// 连接超时 - 连接建立超时
     /// Connection timeout - connection establishment timed out
@@ -42,7 +42,20 @@ pub enum TimeoutEvent {
     /// FIN处理超时 - 检查是否可以发送EOF
     /// FIN processing timeout - check if EOF can be sent
     FinProcessingTimeout,
+    /// 基于数据包的重传超时 - 包含具体的数据包信息（新版本）
+    /// Packet-based retransmission timeout - contains specific packet info (new version)
+    PacketRetransmissionTimeout {
+        /// 数据包序列号
+        /// Packet sequence number
+        sequence_number: u32,
+        /// 定时器ID，用于精确匹配
+        /// Timer ID for precise matching
+        timer_id: crate::timer::actor::ActorTimerId,
+    },
 }
+
+// Copy trait 现在可以自动派生，因为所有字段都支持 Copy
+// Copy trait can now be automatically derived since all fields support Copy
 
 impl Default for TimeoutEvent {
     fn default() -> Self {
@@ -509,7 +522,7 @@ impl TimingManager {
 
     /// 调度FIN处理检查
     /// Schedule FIN processing check
-    async fn schedule_fin_processing_check(&mut self) {
+    pub async fn schedule_fin_processing_check(&mut self) {
         // 如果已有活跃的定时器，先取消
         // If there's already an active timer, cancel it first
         if let Some(timer_id) = self.fin_processing_timer_id.take() {

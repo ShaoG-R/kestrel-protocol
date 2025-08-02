@@ -455,7 +455,25 @@ impl<T: Transport> Endpoint<T> {
                         self.config.connection.max_packet_size,
                     );
 
-                    // 4. Send each packet group separately to maintain the intelligent splitting
+                    // 4. Register timers for all frames in packet groups
+                    // 4. 为数据包组中的所有帧注册定时器
+                    let mut all_frames = Vec::new();
+                    for packet_group in &packet_groups {
+                        all_frames.extend(packet_group.iter().cloned());
+                    }
+                    
+                    if !all_frames.is_empty() {
+                        let timer_count = self.transport.reliability_mut()
+                            .register_timers_for_packetized_frames(&all_frames)
+                            .await;
+                        trace!(
+                            count = timer_count,
+                            total_frames = all_frames.len(),
+                            "Registered retransmission timers for 0-RTT frames"
+                        );
+                    }
+
+                    // 5. Send each packet group separately to maintain the intelligent splitting
                     self.send_zero_rtt_packets(packet_groups).await?;
                 } else {
                     self.transport.reliability_mut().write_to_stream(data);

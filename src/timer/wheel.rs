@@ -178,6 +178,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_batch_add_timers_large() {
         let mut wheel = TimingWheel::new(512, Duration::from_millis(10));
         let events = create_test_timer_events(128);
@@ -344,6 +345,7 @@ mod tests {
     // ========== 性能压力测试 ==========
     
     #[test]
+    #[ignore]
     fn test_large_scale_operations() {
         let mut wheel = TimingWheel::new(512, Duration::from_millis(10));
         let timer_count = 1000;

@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::{sync::mpsc, time::Instant};
+use tracing::trace;
 
 /// 为 Endpoint<S> 实现 EndpointOperations trait
 /// Implementation of EndpointOperations trait for Endpoint<S>
@@ -153,20 +154,39 @@ impl<T: Transport> ProcessorOperations for Endpoint<T> {
         sack_ranges: Vec<(u32, u32)>,
         now: Instant,
     ) -> Result<Vec<Frame>> {
-        // 使用 reliability layer 处理 ACK 并获取需要重传的帧
-        // Use reliability layer to process ACK and get frames that need retransmission
+        // 使用 reliability layer 处理 ACK 并获取完整结果
+        // Use reliability layer to process ACK and get comprehensive result
         let sack_ranges_converted: Vec<SackRange> = sack_ranges
             .into_iter()
             .map(|(start, end)| SackRange { start, end })
             .collect();
         let context = self.create_retransmission_context();
-        let frames_to_retx = self.transport.reliability_mut().handle_ack(
+        
+        // 使用新的综合ACK处理方法
+        // Use new comprehensive ACK processing method
+        let ack_result = self.transport.reliability_mut().handle_ack_comprehensive(
             recv_next_seq,
             sack_ranges_converted,
             now,
             &context,
         );
-        Ok(frames_to_retx)
+        
+        // 异步处理已确认数据包的PacketTimerManager更新
+        // Async processing of PacketTimerManager updates for acknowledged packets
+        if !ack_result.newly_acked_sequences.is_empty() {
+            let acked_count = self.transport.reliability_mut()
+                .process_ack_acknowledgment(&ack_result.newly_acked_sequences)
+                .await;
+            
+            trace!(
+                cid = self.identity.local_cid(),
+                acked_count = acked_count,
+                sequences_count = ack_result.newly_acked_sequences.len(),
+                "Processed async PacketTimerManager acknowledgment in endpoint"
+            );
+        }
+        
+        Ok(ack_result.frames_to_retransmit)
     }
     
     async fn receive_data_and_maybe_ack(

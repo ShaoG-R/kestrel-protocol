@@ -129,7 +129,9 @@ impl<T: Transport> Endpoint<T> {
         if !frames_to_send.is_empty() {
             // 4. Register retransmission timers for frames that need reliability tracking
             // 4. 为需要可靠传输跟踪的帧注册重传定时器
-            let timer_count = self.transport.reliability_mut().register_timers_for_packetized_frames().await;
+            let timer_count = self.transport.reliability_mut()
+                .register_timers_for_packetized_frames(&frames_to_send)
+                .await;
             if timer_count > 0 {
                 trace!(count = timer_count, "Registered retransmission timers for packetized frames");
             }
