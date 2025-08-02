@@ -131,6 +131,13 @@ impl PacketTimerManager {
         }
     }
     
+    /// 更新timeout_tx通道
+    /// Update timeout_tx channel
+    pub fn update_timeout_tx(&mut self, timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>) {
+        self.timeout_tx = timeout_tx;
+        trace!("Updated PacketTimerManager timeout_tx channel");
+    }
+    
     /// 添加数据包到在途管理
     /// Add packet to in-flight management
     pub async fn add_packet(&mut self, frame: &Frame, now: Instant, rto: Duration) -> bool {

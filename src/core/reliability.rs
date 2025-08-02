@@ -124,11 +124,9 @@ impl ReliabilityLayer {
         congestion_control: Box<dyn CongestionControl>,
         connection_id: ConnectionId,
         timer_actor: TimerActorHandle<SenderCallback<TimeoutEvent>>,
+        timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,  // 直接使用正确的通道
     ) -> Self {
-        // 创建一个临时的timeout_tx通道，稍后会被实际的通道替换
-        // Create a temporary timeout_tx channel, will be replaced with the actual channel later
-        let (temp_timeout_tx, _temp_timeout_rx) = mpsc::channel(32);
-        let packet_timer_manager = PacketTimerManager::new(connection_id, timer_actor.clone(), temp_timeout_tx);
+        let packet_timer_manager = PacketTimerManager::new(connection_id, timer_actor.clone(), timeout_tx);
         
         Self {
             send_buffer: SendBuffer::new(config.connection.send_buffer_capacity_bytes),

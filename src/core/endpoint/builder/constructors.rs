@@ -7,7 +7,7 @@ use crate::{
     core::reliability::ReliabilityLayer,
     socket::SocketActorCommand,
     error::Result,
-    timer::HybridTimerTaskHandle,
+    timer::{HybridTimerTaskHandle, task::types::SenderCallback},
 };
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -32,7 +32,7 @@ impl<T: Transport> Endpoint<T> {
         sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
         initial_data: Option<Bytes>,
-        timer_handle: HybridTimerTaskHandle<TimeoutEvent>,
+        timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
     ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
@@ -42,8 +42,16 @@ impl<T: Transport> Endpoint<T> {
         // 创建定时器Actor用于批量定时器管理
         // Create timer actor for batch timer management
         let timer_actor = crate::timer::start_sender_timer_actor(timer_handle.clone(), None);
+        let (mut timing, timer_event_rx) = TimingManager::new(local_cid, timer_handle);
+
+        let mut reliability = ReliabilityLayer::new(config.clone(), congestion_control, local_cid, timer_actor, timing.get_timeout_tx());
         
-        let mut reliability = ReliabilityLayer::new(config.clone(), congestion_control, local_cid, timer_actor);
+        // 注册初始的空闲超时定时器
+        // Register initial idle timeout timer
+        if let Err(e) = timing.register_idle_timeout(&config).await {
+            return Err(crate::error::Error::TimerError(e.to_string()));
+        }
+        
         if let Some(data) = initial_data {
             // Immediately write the 0-RTT data to the stream buffer.
             reliability.write_to_stream(data);
@@ -55,11 +63,7 @@ impl<T: Transport> Endpoint<T> {
         );
         lifecycle_manager.initialize(local_cid, remote_addr)?;
 
-        let (mut timing, timer_event_rx) = TimingManager::new(local_cid, timer_handle);
         
-        // 更新ReliabilityLayer的PacketTimerManager使用正确的timeout_tx通道
-        // Update ReliabilityLayer's PacketTimerManager to use the correct timeout_tx channel
-        reliability.update_packet_timer_timeout_tx(timing.get_timeout_tx());
         
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer
@@ -102,7 +106,7 @@ impl<T: Transport> Endpoint<T> {
         receiver: mpsc::Receiver<(crate::packet::frame::Frame, SocketAddr)>,
         sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
-        timer_handle: HybridTimerTaskHandle<TimeoutEvent>,
+        timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
     ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
@@ -113,8 +117,6 @@ impl<T: Transport> Endpoint<T> {
         // Create timer actor for batch timer management
         let timer_actor = crate::timer::start_sender_timer_actor(timer_handle.clone(), None);
         
-        let mut reliability = ReliabilityLayer::new(config.clone(), congestion_control, local_cid, timer_actor);
-
         let mut lifecycle_manager = DefaultLifecycleManager::new(
             ConnectionState::SynReceived,
             config.clone(),
@@ -123,10 +125,9 @@ impl<T: Transport> Endpoint<T> {
 
         let (mut timing, timer_event_rx) = TimingManager::new(local_cid, timer_handle);
         
-        // 更新ReliabilityLayer的PacketTimerManager使用正确的timeout_tx通道
-        // Update ReliabilityLayer's PacketTimerManager to use the correct timeout_tx channel
-        reliability.update_packet_timer_timeout_tx(timing.get_timeout_tx());
-        
+        let reliability = ReliabilityLayer::new(config.clone(), congestion_control, local_cid, timer_actor, timing.get_timeout_tx());
+
+
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer
         if let Err(e) = timing.register_idle_timeout(&config).await {

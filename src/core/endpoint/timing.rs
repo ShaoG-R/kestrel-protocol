@@ -14,6 +14,7 @@ use crate::timer::{
     HybridTimerTaskHandle,
     TimerActorHandle,
     actor::ActorTimerId,
+    task::types::SenderCallback,
 };
 use crate::core::endpoint::unified_scheduler::{TimeoutLayer, TimeoutCheckResult, UnifiedTimeoutScheduler};
 use std::collections::HashMap;
@@ -90,7 +91,7 @@ pub struct TimerManager {
 
     /// 定时器Actor句柄，用于批量定时器操作
     /// Timer actor handle for batch timer operations
-    timer_actor: TimerActorHandle,
+    timer_actor: TimerActorHandle<SenderCallback<TimeoutEvent>>,
 
     /// 接收超时事件的通道
     /// Channel for receiving timeout events
@@ -108,7 +109,7 @@ pub struct TimerManager {
 impl TimerManager {
     /// 创建新的定时器管理器
     /// Create new timer manager
-    pub fn new(connection_id: ConnectionId, timer_handle: HybridTimerTaskHandle<TimeoutEvent>) -> Self {
+    pub fn new(connection_id: ConnectionId, timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>) -> Self {
         let (timeout_tx, timeout_rx) = mpsc::channel(32);
         
         // 创建定时器Actor用于批量处理
@@ -129,7 +130,7 @@ impl TimerManager {
     /// 
     /// 用于事件驱动架构，将接收通道传递给ChannelManager
     /// Used for event-driven architecture, passing receiver channel to ChannelManager
-    pub fn new_with_receiver(connection_id: ConnectionId, timer_handle: HybridTimerTaskHandle<TimeoutEvent>) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
+    pub fn new_with_receiver(connection_id: ConnectionId, timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
         let (timeout_tx, timeout_rx) = mpsc::channel(32);
         
         // 创建定时器Actor用于批量处理
@@ -188,7 +189,7 @@ impl TimerManager {
             self.connection_id,
             delay,
             timeout_event,
-            self.timeout_tx.clone(),
+            SenderCallback::new(self.timeout_tx.clone()),
         );
 
         match self.timer_actor.register_timer(registration).await {
@@ -307,7 +308,7 @@ impl TimingManager {
     /// 
     /// 返回时间管理器和定时器事件接收通道，用于事件驱动架构
     /// Returns timing manager and timer event receiver channel for event-driven architecture
-    pub fn new(connection_id: ConnectionId, timer_handle: HybridTimerTaskHandle<TimeoutEvent>) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
+    pub fn new(connection_id: ConnectionId, timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
         let now = Instant::now();
         let (timer_manager, timer_rx) = TimerManager::new_with_receiver(connection_id, timer_handle.clone());
 
@@ -332,7 +333,7 @@ impl TimingManager {
     pub fn with_start_time(
         start_time: Instant,
         connection_id: ConnectionId,
-        timer_handle: HybridTimerTaskHandle<TimeoutEvent>,
+        timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
     ) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
         let (timer_manager, timer_rx) = TimerManager::new_with_receiver(connection_id, timer_handle.clone());
 
@@ -529,10 +530,13 @@ impl TimingManager {
         // 注册新的FIN处理定时器（10ms后检查）
         // Register new FIN processing timer (check after 10ms)
         let delay = Duration::from_millis(10);
-        match self.timer_manager.timer_actor.register_fin_processing_timer(
+        let registration = TimerRegistration::new(
             self.timer_manager.connection_id,
-            delay
-        ).await {
+            delay,
+            TimeoutEvent::FinProcessingTimeout,
+            SenderCallback::new(self.timer_manager.timeout_tx.clone()),
+        );
+        match self.timer_manager.timer_actor.register_timer(registration).await {
             Ok(timer_id) => {
                 self.fin_processing_timer_id = Some(timer_id);
                 trace!("Scheduled FIN processing check in {:?}", delay);
@@ -905,8 +909,8 @@ mod tests {
     use tokio::time::{sleep, Duration};
 
     // 创建测试用的定时器句柄
-    fn create_test_timer_handle() -> HybridTimerTaskHandle<TimeoutEvent> {
-        crate::timer::start_hybrid_timer_task::<TimeoutEvent>()
+    fn create_test_timer_handle() -> HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>> {
+        crate::timer::start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>()
     }
 
     #[tokio::test]

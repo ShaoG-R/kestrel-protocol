@@ -254,9 +254,10 @@ mod tests {
                     let config = crate::config::Config::default();
                     let congestion_control = Box::new(crate::core::reliability::congestion::vegas::Vegas::new(config.clone()));
                     let connection_id = 1; // Test connection ID
-                    let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent>();
-                    let timer_actor = crate::timer::start_timer_actor(timer_handle, None);
-                    ReliabilityLayer::new(config, congestion_control, connection_id, timer_actor)
+                    let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent, crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>>();
+                    let timer_actor = crate::timer::start_sender_timer_actor(timer_handle, None);
+                    let (tx_to_endpoint, _rx_from_stream) = tokio::sync::mpsc::channel(128);
+                    ReliabilityLayer::new(config, congestion_control, connection_id, timer_actor, tx_to_endpoint)
                 },
                 command_tx,
             };
