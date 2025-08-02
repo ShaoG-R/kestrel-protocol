@@ -85,6 +85,10 @@ pub struct UnifiedReliabilityLayer {
     /// Sequence number counter
     sequence_counter: u32,
     
+    /// FIN帧在途标志
+    /// FIN frame in-flight flag
+    fin_in_flight: bool,
+    
     /// 配置信息
     /// Configuration
     config: Config,
@@ -115,6 +119,7 @@ impl UnifiedReliabilityLayer {
             flow_control_coordinator: FlowControlCoordinator::new(config.clone()),
             rtt_estimator: RttEstimator::new(config.reliability.initial_rto),
             sequence_counter: 0,
+            fin_in_flight: false,
             config,
         }
     }
@@ -125,6 +130,16 @@ impl UnifiedReliabilityLayer {
         // 使用RTT估算器计算的RTO，而不是传入的硬编码值
         // Use RTO calculated by RTT estimator instead of hardcoded input value
         let rto = self.rtt_estimator.rto();
+        
+        // 检查是否为FIN帧并更新状态
+        // Check if this is a FIN frame and update status
+        if matches!(frame, crate::packet::frame::Frame::Fin { .. }) {
+            self.fin_in_flight = true;
+            trace!(
+                seq = frame.sequence_number(),
+                "FIN frame added to in-flight tracking"
+            );
+        }
         
         trace!(
             seq = frame.sequence_number(),
@@ -204,6 +219,17 @@ impl UnifiedReliabilityLayer {
                 new_cwnd = flow_decision.congestion_decision.new_congestion_window,
                 "Congestion control updated due to fast retransmission packet loss"
             );
+        }
+        
+        // 步骤5：检查FIN是否被确认
+        // Step 5: Check if FIN was acknowledged
+        if self.fin_in_flight && !result.newly_acked_sequences.is_empty() {
+            // 简化实现：如果没有在途数据包，则清除FIN标志
+            // Simplified implementation: if no in-flight packets, clear FIN flag
+            if self.packet_coordinator.is_empty() {
+                self.fin_in_flight = false;
+                trace!("FIN frame acknowledged, clearing fin_in_flight flag");
+            }
         }
         
         // 转换为兼容的结果格式
@@ -425,6 +451,37 @@ impl UnifiedReliabilityLayer {
         self.flow_control_coordinator.update_peer_receive_window(window_size);
     }
     
+    /// 获取接收窗口信息（公开版本）
+    /// Get receive window info (public version)
+    pub fn get_receive_window_info(&self) -> (u32, u16) {
+        self.buffer_coordinator.get_receive_window_info()
+    }
+    
+    /// 获取完整的ACK信息（新方法，替代get_ack_info）
+    /// Get complete ACK information (new method, replaces get_ack_info)
+    pub fn get_acknowledgment_info(&self) -> (Vec<SackRange>, u32, u16) {
+        let (recv_next_seq, recv_window_size) = self.buffer_coordinator.get_receive_window_info();
+        let sack_ranges = self.buffer_coordinator.generate_sack_ranges();
+        (sack_ranges, recv_next_seq, recv_window_size)
+    }
+    
+    /// 为多个帧批量注册重传定时器（新方法，替代register_timers_for_packetized_frames）
+    /// Batch register retransmission timers for multiple frames (new method, replaces register_timers_for_packetized_frames)
+    pub async fn track_frames_for_retransmission(&mut self, frames: &[Frame]) -> usize {
+        let mut count = 0;
+        let now = tokio::time::Instant::now();
+
+        for frame in frames {
+            // 使用统一的add_in_flight_packet方法，它会使用RTT估算器的RTO
+            // Use unified add_in_flight_packet method, which uses RTT estimator's RTO
+            if self.add_in_flight_packet(frame, now).await {
+                count += 1;
+            }
+        }
+
+        count
+    }
+    
     /// 获取在途数据包数量
     /// Get in-flight packet count
     pub fn in_flight_count(&self) -> usize {
@@ -599,9 +656,13 @@ impl UnifiedReliabilityLayer {
     /// 检查是否有FIN在途
     /// Check if FIN is in flight
     pub fn has_fin_in_flight(&self) -> bool {
-        // 简化实现：目前假设没有FIN跟踪
-        // TODO: 实现FIN状态跟踪
-        false
+        self.fin_in_flight
+    }
+    
+    /// 设置FIN在途状态
+    /// Set FIN in-flight status
+    pub fn set_fin_in_flight(&mut self, in_flight: bool) {
+        self.fin_in_flight = in_flight;
     }
 
     /// 检查是否有ACK待发送

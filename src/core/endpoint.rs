@@ -203,7 +203,7 @@ impl<T: Transport> Endpoint<T> {
                 
                 // 检查是否可以发送EOF
                 // Check if EOF can be sent
-                if self.timing.should_send_eof(self.transport.unified_reliability().is_recv_buffer_empty()) {
+                if self.timing.should_send_eof(self.transport.is_recv_buffer_empty()) {
                     if let Some(tx) = self.channels.tx_to_stream_mut().take() {
                         trace!(
                             cid = self.identity.local_cid(),
@@ -230,10 +230,7 @@ impl<T: Transport> Endpoint<T> {
     /// Creates a retransmission context with current endpoint state
     /// 使用当前端点状态创建重传上下文
     pub fn create_retransmission_context(&self) -> crate::packet::frame::RetransmissionContext {
-        let (recv_next_sequence, recv_window_size) = {
-            let info = self.transport.unified_reliability().get_ack_info();
-            (info.1, info.2)
-        };
+        let (recv_next_sequence, recv_window_size) = self.transport.unified_reliability().get_receive_window_info();
 
         crate::packet::frame::RetransmissionContext::new(
             self.timing.start_time(),

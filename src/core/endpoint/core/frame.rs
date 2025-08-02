@@ -30,7 +30,7 @@ pub(in crate::core::endpoint) fn create_ack_frame(
     reliability: &mut UnifiedReliabilityLayer,
     start_time: Instant,
 ) -> Frame {
-    let (sack_ranges, recv_next, window_size) = reliability.get_ack_info();
+    let (sack_ranges, recv_next, window_size) = reliability.get_acknowledgment_info();
     let timestamp = Instant::now().duration_since(start_time).as_millis() as u32;
     Frame::new_ack(
         peer_cid,
@@ -41,17 +41,18 @@ pub(in crate::core::endpoint) fn create_ack_frame(
     )
 }
 
-/// Creates a FIN frame.
+/// Creates a FIN frame with automatic sequence number management.
+/// 创建FIN帧，自动管理序列号
 pub(in crate::core::endpoint) fn create_fin_frame(
     peer_cid: u32,
-    sequence_number: u32,
-    reliability: &UnifiedReliabilityLayer,
+    reliability: &mut UnifiedReliabilityLayer,
     start_time: Instant,
 ) -> Frame {
+    let sequence_number = reliability.next_sequence_number();
     let timestamp = Instant::now().duration_since(start_time).as_millis() as u32;
     // A FIN frame should also carry the latest acknowledgment information, just like a PUSH frame.
     // This is the last chance to acknowledge any packets received before closing.
-    let (_, recv_next_sequence, recv_window_size) = reliability.get_ack_info();
+    let (recv_next_sequence, recv_window_size) = reliability.get_receive_window_info();
     Frame::new_fin(
         peer_cid,
         sequence_number,
@@ -61,16 +62,19 @@ pub(in crate::core::endpoint) fn create_fin_frame(
     )
 }
 
-/// Creates a PATH_CHALLENGE frame.
+/// Creates a PATH_CHALLENGE frame with automatic sequence number management.
+/// 创建路径挑战帧，自动管理序列号
 pub(crate) fn create_path_challenge_frame(
     peer_cid: u32,
-    sequence_number: u32,
+    reliability: &mut UnifiedReliabilityLayer,
     start_time: Instant,
     challenge_data: u64,
 ) -> Frame {
+    let sequence_number = reliability.next_sequence_number();
     let timestamp = Instant::now().duration_since(start_time).as_millis() as u32;
     Frame::new_path_challenge(peer_cid, sequence_number, timestamp, challenge_data)
 }
+
 
 /// Creates a PATH_RESPONSE frame.
 pub(crate) fn create_path_response_frame(
@@ -112,10 +116,10 @@ mod tests {
     #[tokio::test]
     async fn test_create_fin_frame() {
         let mut reliability = create_test_reliability_layer().await;
-        reliability.receive_push(0, Bytes::new());
+        reliability.receive_packet(0, Bytes::new());
         let _ = reliability.reassemble_data();
 
-        let frame = create_fin_frame(456, 10, &reliability, Instant::now());
+        let frame = create_fin_frame(456, &mut reliability, Instant::now());
         match frame {
             Frame::Fin { header } => {
                 assert_eq!(header.connection_id, 456);
@@ -131,7 +135,7 @@ mod tests {
     async fn test_create_ack_frame() {
         let mut reliability = create_test_reliability_layer().await;
         // Simulate receiving a packet to generate ACK info
-        reliability.receive_push(0, Bytes::new());
+        reliability.receive_packet(0, Bytes::new());
         // Call reassemble to update the internal state of the receive buffer,
         // which moves the `next_sequence` forward.
         let _ = reliability.reassemble_data();

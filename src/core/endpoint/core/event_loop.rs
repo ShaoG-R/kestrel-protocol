@@ -164,7 +164,7 @@ impl<T: Transport> Endpoint<T> {
             // 所有数据已确认，转换到Closed状态 - 使用生命周期管理器
             // All data acknowledged, transition to Closed state - using lifecycle manager
             if let Ok(()) = self.transition_state(ConnectionState::Closed) {
-                self.transport.unified_reliability_mut().clear_in_flight_packets().await; // Clean up here
+                self.transport.unified_reliability_mut().cleanup_all_retransmission_timers().await; // Clean up here
                 // 连接关闭时，关闭用户流接收器
                 // Close user stream receiver when connection closes
                 *self.channels.tx_to_stream_mut() = None;

@@ -113,12 +113,11 @@ impl<T: Transport> Endpoint<T> {
         {
             let fin_frame = create_fin_frame(
                 self.identity.peer_cid(),
-                self.transport.unified_reliability_mut().next_sequence_number(),
-                self.transport.unified_reliability(),
+                self.transport.unified_reliability_mut(),
                 self.timing.start_time(),
             );
             self.transport.unified_reliability_mut()
-                .track_frame_in_flight(fin_frame.clone(), now).await;
+                .add_in_flight_packet(&fin_frame, now).await;
             frames_to_send.push(fin_frame);
         }
 
@@ -128,7 +127,7 @@ impl<T: Transport> Endpoint<T> {
             // 4. Register retransmission timers for frames that need reliability tracking
             // 4. 为需要可靠传输跟踪的帧注册重传定时器
             let timer_count = self.transport.unified_reliability_mut()
-                .register_timers_for_packetized_frames(&frames_to_send)
+                .track_frames_for_retransmission(&frames_to_send)
                 .await;
             if timer_count > 0 {
                 trace!(count = timer_count, "Registered retransmission timers for packetized frames");
@@ -180,13 +179,15 @@ impl<T: Transport> Endpoint<T> {
     }
 
     pub(in crate::core::endpoint) async fn send_standalone_ack(&mut self) -> Result<()> {
-        if !self.transport.unified_reliability().is_ack_pending() {
-            return Ok(());
-        }
+        // 直接创建ACK帧，不再检查是否有ACK待发送
+        // Directly create ACK frame, no longer check if ACK is pending
+        // ACK帧包含当前的接收状态，即使没有新数据也没问题
+        // ACK frame contains current receive state, no problem even if no new data
         let frame = create_ack_frame(self.identity.peer_cid(), self.transport.unified_reliability_mut(), self.timing.start_time());
-        self.transport.unified_reliability_mut().on_ack_sent(); // This requires &mut self
-
-        // Since we've mutated self, we can now send the frame.
+        
+        // 不需要特殊的ACK发送后处理
+        // No special post-ACK processing needed
+        
         self.send_raw_frames(vec![frame]).await
     }
 

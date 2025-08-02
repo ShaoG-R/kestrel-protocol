@@ -180,7 +180,7 @@ impl<T: Transport> ProcessorOperations for Endpoint<T> {
     ) -> Result<()> {
         // 接收数据并检查是否需要立即发送 ACK
         // Receive data and check if immediate ACK is needed
-        if self.unified_reliability_mut().receive_push(seq, payload) {
+        if self.unified_reliability_mut().receive_packet(seq, payload) {
             self.send_standalone_ack().await?;
         }
         Ok(())
