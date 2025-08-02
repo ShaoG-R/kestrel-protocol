@@ -1,0 +1,13 @@
+# Cargo 配置文件
+# 确保测试以序列方式运行，避免定时器系统在并发测试中的资源冲突
+# Ensure tests run sequentially to avoid timer system resource conflicts in concurrent tests
+
+[alias]
+# 默认测试别名，自动使用单线程
+# Default test alias with single-thread execution
+test-sequential = "test -- --test-threads=1"
+
+[env]
+# 设置测试环境变量，强制单线程执行
+# Set test environment variables to force single-threaded execution
+RUST_TEST_THREADS = "1"
