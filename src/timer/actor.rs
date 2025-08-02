@@ -30,7 +30,6 @@ pub type ActorTimerId = u64;
 
 /// 定时器Actor命令类型（泛型版本）
 /// Timer Actor command types (generic version)
-#[derive(Debug)]
 pub enum TimerActorCommand<C> 
 where 
     C: TimerCallback<TimeoutEvent>
@@ -39,6 +38,16 @@ where
     /// Register a single timer (returns internal ID)
     RegisterTimer {
         registration: TimerRegistration<TimeoutEvent, C>,
+        response_tx: oneshot::Sender<Result<ActorTimerId, String>>,
+    },
+    
+    /// 使用回调式ID注入注册定时器
+    /// Register timer with callback-based ID injection
+    RegisterTimerWithCallback {
+        connection_id: ConnectionId,
+        delay: Duration,
+        callback: C,
+        event_factory: Box<dyn FnOnce(ActorTimerId) -> TimeoutEvent + Send>,
         response_tx: oneshot::Sender<Result<ActorTimerId, String>>,
     },
     
@@ -105,6 +114,73 @@ where
     /// 关闭Actor
     /// Shutdown Actor
     Shutdown,
+}
+
+impl<C> std::fmt::Debug for TimerActorCommand<C>
+where
+    C: TimerCallback<TimeoutEvent>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimerActorCommand::RegisterTimer { registration, .. } => {
+                f.debug_struct("RegisterTimer")
+                    .field("registration", registration)
+                    .finish()
+            }
+            TimerActorCommand::RegisterTimerWithCallback { connection_id, delay, .. } => {
+                f.debug_struct("RegisterTimerWithCallback")
+                    .field("connection_id", connection_id)
+                    .field("delay", delay)
+                    .field("event_factory", &"<closure>")
+                    .finish()
+            }
+            TimerActorCommand::CancelTimerById { timer_id, .. } => {
+                f.debug_struct("CancelTimerById")
+                    .field("timer_id", timer_id)
+                    .finish()
+            }
+            TimerActorCommand::CancelTimer { connection_id, timeout_event, .. } => {
+                f.debug_struct("CancelTimer")
+                    .field("connection_id", connection_id)
+                    .field("timeout_event", timeout_event)
+                    .finish()
+            }
+            TimerActorCommand::CancelAllTimers { connection_id, .. } => {
+                f.debug_struct("CancelAllTimers")
+                    .field("connection_id", connection_id)
+                    .finish()
+            }
+            TimerActorCommand::BatchRegisterTimers { registrations, .. } => {
+                f.debug_struct("BatchRegisterTimers")
+                    .field("registrations", registrations)
+                    .finish()
+            }
+            TimerActorCommand::BatchCancelTimersByIds { timer_ids, .. } => {
+                f.debug_struct("BatchCancelTimersByIds")
+                    .field("timer_ids", timer_ids)
+                    .finish()
+            }
+            TimerActorCommand::BatchCancelTimers { entries, .. } => {
+                f.debug_struct("BatchCancelTimers")
+                    .field("entries", entries)
+                    .finish()
+            }
+            TimerActorCommand::FlushBuffers => {
+                f.debug_struct("FlushBuffers").finish()
+            }
+            TimerActorCommand::GetStats { .. } => {
+                f.debug_struct("GetStats").finish()
+            }
+            TimerActorCommand::QueryTimer { timer_id, .. } => {
+                f.debug_struct("QueryTimer")
+                    .field("timer_id", timer_id)
+                    .finish()
+            }
+            TimerActorCommand::Shutdown => {
+                f.debug_struct("Shutdown").finish()
+            }
+        }
+    }
 }
 
 /// 定时器信息（泛型版本）
@@ -360,6 +436,11 @@ where
                 let _ = response_tx.send(result);
             }
             
+            TimerActorCommand::RegisterTimerWithCallback { connection_id, delay, callback, event_factory, response_tx } => {
+                let result = self.handle_register_timer_with_callback(connection_id, delay, callback, event_factory).await;
+                let _ = response_tx.send(result);
+            }
+            
             TimerActorCommand::CancelTimerById { timer_id, response_tx } => {
                 let result = self.handle_cancel_timer_by_id(timer_id).await;
                 let _ = response_tx.send(result);
@@ -474,6 +555,76 @@ where
         
         // 检查是否需要自动刷新
         // Check if auto flush is needed
+        if self.register_buffer.len() >= self.config.batch_threshold {
+            self.flush_buffers().await;
+        }
+        
+        Ok(timer_id)
+    }
+    
+    /// 处理回调式ID注入的定时器注册
+    /// Handle timer registration with callback-based ID injection
+    async fn handle_register_timer_with_callback(
+        &mut self,
+        connection_id: ConnectionId,
+        delay: Duration,
+        callback: C,
+        event_factory: Box<dyn FnOnce(ActorTimerId) -> TimeoutEvent + Send>,
+    ) -> Result<ActorTimerId, String> {
+        // 1. 分配定时器ID
+        let timer_id = self.allocate_timer_id();
+        
+        // 2. 检查是否在取消缓冲区中，如果是则直接抵消
+        if self.cancel_buffer.remove(&timer_id) {
+            self.stats.optimized_operations += 1;
+            trace!(timer_id = timer_id, "Timer registration cancelled out by pending cancellation");
+            return Err("Timer registration cancelled by pending cancellation".to_string());
+        }
+        
+        // 3. 使用回调创建包含正确timer_id的事件
+        let timeout_event = event_factory(timer_id);
+        
+        // 4. 创建定时器注册
+        let registration = TimerRegistration::new(
+            connection_id,
+            delay,
+            timeout_event,
+            callback,
+        );
+        
+        // 5. 创建缓冲定时器
+        let buffered_timer = BufferedTimer {
+            timer_id,
+            registration: registration.clone(),
+            created_at: Instant::now(),
+        };
+        
+        // 6. 添加到注册缓冲区
+        self.register_buffer.insert(timer_id, buffered_timer);
+        
+        // 7. 更新索引
+        self.connection_timers
+            .entry(connection_id)
+            .or_default()
+            .insert(timer_id);
+            
+        let type_key = (connection_id, registration.timeout_event);
+        self.type_timers
+            .entry(type_key)
+            .or_default()
+            .insert(timer_id);
+        
+        self.stats.total_register_requests += 1;
+        
+        trace!(
+            timer_id = timer_id,
+            connection_id = connection_id,
+            timeout_event = ?registration.timeout_event,
+            buffer_size = self.register_buffer.len(),
+            "Added timer to register buffer using callback-based ID injection"
+        );
+        
+        // 8. 检查是否需要自动刷新
         if self.register_buffer.len() >= self.config.batch_threshold {
             self.flush_buffers().await;
         }
@@ -857,6 +1008,34 @@ where
     ) -> Result<ActorTimerId, String> {
         let (response_tx, response_rx) = oneshot::channel();
         let command = TimerActorCommand::RegisterTimer { registration, response_tx };
+        
+        if self.command_tx.send(command).await.is_err() {
+            return Err("TimerActor is not available".to_string());
+        }
+        
+        response_rx.await.unwrap_or_else(|_| Err("Response channel closed".to_string()))
+    }
+    
+    /// 使用回调式ID注入注册定时器
+    /// Register timer with callback-based ID injection
+    pub async fn register_timer_with_callback<F>(
+        &self,
+        connection_id: ConnectionId,
+        delay: Duration,
+        callback: C,
+        event_factory: F,
+    ) -> Result<ActorTimerId, String>
+    where
+        F: FnOnce(ActorTimerId) -> TimeoutEvent + Send + 'static,
+    {
+        let (response_tx, response_rx) = oneshot::channel();
+        let command = TimerActorCommand::RegisterTimerWithCallback {
+            connection_id,
+            delay,
+            callback,
+            event_factory: Box::new(event_factory),
+            response_tx,
+        };
         
         if self.command_tx.send(command).await.is_err() {
             return Err("TimerActor is not available".to_string());

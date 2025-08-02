@@ -6,7 +6,7 @@ use tokio::time::Instant;
 
 use crate::{
     config::Config,
-    core::reliability::unified_reliability::UnifiedReliabilityLayer,
+    core::reliability::UnifiedReliabilityLayer,
     packet::frame::Frame
 };
 

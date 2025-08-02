@@ -6,6 +6,7 @@ pub mod retransmission_decider;
 pub mod timer_event_handler;
 pub mod vegas_controller;
 pub mod packetization_processor;
+pub mod rtt;
 
 pub use sack_processor::{SackProcessor, SackProcessResult};
 pub use retransmission_decider::{RetransmissionDecider, RetransmissionDecision, RetransmissionType};
@@ -17,3 +18,4 @@ pub use packetization_processor::{
     PacketizationProcessor, PacketizationContext, PacketizationResult, 
     ZeroRttPacketizationResult, PacketizationLimitation, PacketizationStats,
 };
+pub use rtt::RttEstimator;

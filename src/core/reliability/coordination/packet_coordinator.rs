@@ -18,9 +18,8 @@ use super::super::{
 use crate::{
     core::{
         endpoint::timing::TimeoutEvent,
-        reliability::retransmission::RetransmissionFrameInfo,
     },
-    packet::{frame::{Frame, RetransmissionContext}, sack::SackRange},
+    packet::{frame::{Frame, FrameType, RetransmissionContext}, sack::SackRange},
     timer::{
         actor::{ActorTimerId, SenderTimerActorHandle},
         event::{ConnectionId, TimerEventData},
@@ -29,8 +28,126 @@ use crate::{
 use std::time::Duration;
 use tokio::time::Instant;
 use tokio::sync::mpsc;
+use bytes::Bytes;
 use tracing::{debug, info, trace, warn};
 
+
+/// Represents essential frame information for retransmission without storing complete header
+/// 表示重传所需的基本帧信息，不存储完整的header
+#[derive(Debug, Clone)]
+pub struct RetransmissionFrameInfo {
+    /// Frame type for reconstruction
+    /// 用于重构的帧类型
+    pub frame_type: FrameType,
+    /// Original sequence number
+    /// 原始序列号
+    pub sequence_number: u32,
+    /// Frame payload (empty for control frames)
+    /// 帧载荷（控制帧为空）
+    pub payload: Bytes,
+    /// Additional data for specific frame types (e.g., challenge_data for PATH_CHALLENGE)
+    /// 特定帧类型的附加数据（例如PATH_CHALLENGE的challenge_data）
+    pub additional_data: Option<u64>,
+}
+
+
+
+impl RetransmissionFrameInfo {
+    /// Creates retransmission info from a frame, extracting only essential information
+    /// 从帧创建重传信息，只提取必要信息
+    pub fn from_frame(frame: &Frame) -> Option<Self> {
+        let frame_type = frame.frame_type()?; // Return None if frame type is not retransmittable
+        let (payload, additional_data, sequence_number) = match frame {
+            Frame::Push { header, payload } => (
+                payload.clone(),
+                None,
+                header.sequence_number,
+            ),
+            Frame::Syn { .. } => (
+                Bytes::new(),
+                None,
+                0, // SYN frames don't have sequence numbers in our design
+            ),
+            Frame::SynAck { .. } => (
+                Bytes::new(),
+                None,
+                0, // SYN-ACK frames don't have sequence numbers in our design
+            ),
+            Frame::Fin { header } => (
+                Bytes::new(),
+                None,
+                header.sequence_number,
+            ),
+            Frame::PathChallenge { header, challenge_data } => (
+                Bytes::new(),
+                Some(*challenge_data),
+                header.sequence_number,
+            ),
+            Frame::PathResponse { header, challenge_data } => (
+                Bytes::new(),
+                Some(*challenge_data),
+                header.sequence_number,
+            ),
+            // ACK and PING frames should not be stored for retransmission
+            _ => return None,
+        };
+        Some(Self {
+            frame_type,
+            sequence_number,
+            payload,
+            additional_data,
+        })
+    }
+
+    /// Reconstructs a complete frame with fresh header information
+    /// 使用新鲜的header信息重构完整帧
+    pub fn reconstruct_frame(&self, context: &RetransmissionContext, now: Instant) -> Frame {
+        let current_timestamp = context.current_timestamp(now);
+        match self.frame_type {
+            FrameType::Push => {
+                Frame::new_push(
+                    context.current_peer_cid,
+                    self.sequence_number,
+                    context.recv_next_sequence,
+                    context.recv_window_size,
+                    current_timestamp,
+                    self.payload.clone(),
+                )
+            }
+            FrameType::Syn => {
+                Frame::new_syn(context.protocol_version, context.local_cid, context.current_peer_cid)
+            }
+            FrameType::SynAck => {
+                Frame::new_syn_ack(context.protocol_version, context.local_cid, context.current_peer_cid)
+            }
+            FrameType::Fin => {
+                Frame::new_fin(
+                    context.current_peer_cid,
+                    self.sequence_number,
+                    current_timestamp,
+                    context.recv_next_sequence,
+                    context.recv_window_size,
+                )
+            }
+            FrameType::PathChallenge => {
+                Frame::new_path_challenge(
+                    context.current_peer_cid,
+                    self.sequence_number,
+                    current_timestamp,
+                    self.additional_data.unwrap_or(0),
+                )
+            }
+            FrameType::PathResponse => {
+                Frame::new_path_response(
+                    context.current_peer_cid,
+                    self.sequence_number,
+                    current_timestamp,
+                    self.additional_data.unwrap_or(0),
+                )
+            }
+        }
+    }
+}
 /// 综合处理结果
 /// Comprehensive processing result
 #[derive(Debug)]

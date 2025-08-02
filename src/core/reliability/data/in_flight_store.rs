@@ -8,7 +8,7 @@
 //! - 无业务逻辑，只管理数据
 
 use crate::{
-    core::reliability::retransmission::RetransmissionFrameInfo,
+    core::reliability::coordination::packet_coordinator::RetransmissionFrameInfo,
     timer::actor::ActorTimerId,
 };
 use std::collections::BTreeMap;

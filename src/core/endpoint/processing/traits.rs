@@ -10,7 +10,7 @@
 
 use crate::{
     core::{
-        endpoint::types::state::ConnectionState, reliability::unified_reliability::UnifiedReliabilityLayer,
+        endpoint::types::state::ConnectionState, reliability::UnifiedReliabilityLayer,
     }, error::Result, packet::frame::Frame, socket::SocketActorCommand
 };
 use std::net::SocketAddr;

@@ -12,7 +12,7 @@ use crate::{
     timer::{
         actor::{ActorTimerId, SenderTimerActorHandle},
         event::{ConnectionId, TimerEventData},
-        task::types::SenderTimerRegistration,
+        task::types::SenderCallback,
     },
 };
 use std::time::Duration;
@@ -128,21 +128,19 @@ impl TimerEventHandler {
         seq: u32,
         rto: Duration,
     ) -> Result<ActorTimerId, String> {
-        // 创建PacketRetransmissionTimeout事件
-        let timeout_event = TimeoutEvent::PacketRetransmissionTimeout {
-            sequence_number: seq,
-            timer_id: 0, // 实际的timer_id由Actor分配
-        };
-        
-        // 创建定时器注册
-        let registration = SenderTimerRegistration::with_sender(
+        // 使用回调式ID注入，确保事件中的timer_id与实际分配的一致
+        // Use callback-based ID injection to ensure timer_id in event matches the allocated one
+        let timer_id = self.timer_actor.register_timer_with_callback(
             self.connection_id,
             rto,
-            timeout_event,
-            self.timeout_tx.clone(),
-        );
+            SenderCallback::new(self.timeout_tx.clone()),
+            move |timer_id| TimeoutEvent::PacketRetransmissionTimeout {
+                sequence_number: seq,
+                timer_id, // 使用实际分配的timer_id
+            }
+        ).await;
         
-        match self.timer_actor.register_timer(registration).await {
+        match timer_id {
             Ok(timer_id) => {
                 // 设置定时器映射
                 store.set_timer_mapping(timer_id, seq);
@@ -151,7 +149,7 @@ impl TimerEventHandler {
                     seq = seq,
                     timer_id = timer_id,
                     rto_ms = rto.as_millis(),
-                    "Scheduled retransmission timer"
+                    "Scheduled retransmission timer with callback-based ID injection"
                 );
                 
                 Ok(timer_id)

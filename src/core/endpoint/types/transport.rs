@@ -12,7 +12,7 @@ use crate::{
     config::Config,
     core::{
         endpoint::timing::TimeoutEvent,
-        reliability::unified_reliability::UnifiedReliabilityLayer,
+        reliability::UnifiedReliabilityLayer,
     },
     timer::{
         actor::SenderTimerActorHandle,

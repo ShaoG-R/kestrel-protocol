@@ -18,7 +18,7 @@ pub use types::command::StreamCommand;
 use lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::{
     config::Config,
-    core::reliability::unified_reliability::UnifiedReliabilityLayer,
+    core::reliability::UnifiedReliabilityLayer,
     error::Result,
     socket::{SocketActorCommand, Transport},
 };
