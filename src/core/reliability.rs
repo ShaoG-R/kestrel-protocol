@@ -29,36 +29,15 @@ use crate::{
 };
 use bytes::Bytes;
 use tokio::time::Instant;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 use congestion::CongestionControl;
-use crate::core::endpoint::timing::TimeoutEvent;
-use crate::core::endpoint::unified_scheduler::{TimeoutLayer, TimeoutCheckResult, RetransmissionLayer, RetransmissionCheckResult};
+use crate::core::endpoint::unified_scheduler::{RetransmissionLayer, RetransmissionCheckResult};
 use crate::timer::{
     event::ConnectionId,
-    task::TimerRegistration,
     TimerActorHandle,
 };
-use tokio::sync::mpsc;
 
 
-/// 可靠性层超时检查结果（遗留结构体，保持向后兼容）
-/// Reliability layer timeout check result (legacy struct, maintained for backward compatibility)
-///
-/// 该结构体包含可靠性层超时检查的结果，包括发生的超时事件和需要重传的帧。
-/// 新代码应使用分离的 TimeoutCheckResult 和 RetransmissionCheckResult。
-///
-/// This struct contains the result of reliability layer timeout checks,
-/// including timeout events that occurred and frames that need retransmission.
-/// New code should use separated TimeoutCheckResult and RetransmissionCheckResult.
-#[derive(Debug)]
-pub struct LegacyTimeoutCheckResult {
-    /// 发生的超时事件列表
-    /// List of timeout events that occurred
-    pub events: Vec<TimeoutEvent>,
-    /// 需要重传的帧（仅在RetransmissionTimeout时有效）
-    /// Frames that need retransmission (only valid for RetransmissionTimeout)
-    pub frames_to_retransmit: Vec<Frame>,
-}
 
 /// ACK处理结果
 /// ACK processing result
@@ -129,12 +108,6 @@ pub struct ReliabilityLayer {
     /// 统计自上次发送ACK以来收到的引发ACK的数据包数量。
     /// 用于决定何时发送独立的ACK。
     ack_eliciting_packets_since_last_ack: u16,
-    /// Connection ID for timer registration with timer actor
-    /// 连接ID，用于在定时器Actor中注册定时器
-    connection_id: ConnectionId,
-    /// Timer actor handle for batch timer operations
-    /// 定时器Actor句柄，用于批量定时器操作
-    timer_actor: TimerActorHandle,
     /// Packet timer manager for direct packet-timer binding
     /// 数据包定时器管理器，用于数据包与定时器的直接绑定
     packet_timer_manager: PacketTimerManager,
@@ -162,8 +135,6 @@ impl ReliabilityLayer {
             sequence_number_counter: 0,
             ack_pending: false,
             ack_eliciting_packets_since_last_ack: 0,
-            connection_id,
-            timer_actor,
             packet_timer_manager,
         }
     }
@@ -209,23 +180,12 @@ impl ReliabilityLayer {
             // 注意：实际的PacketTimerManager批量确认将在调用者的异步上下文中处理
             // Note: Actual PacketTimerManager batch acknowledgment will be handled in caller's async context
             
-            // 保持旧的批量取消逻辑以兼容传统重传管理器
-            // Keep old batch cancellation logic for compatibility with legacy retransmission manager
-            let mut cancel_requests = Vec::new();
-            for &seq_num in &result.newly_acked_sequences {
-                cancel_requests.push((self.connection_id, TimeoutEvent::RetransmissionTimeout));
-                trace!(seq = seq_num, "Prepared retransmission timer cancellation for ACKed packet");
-            }
-            
-            // 批量取消定时器（异步进行，不阻塞当前处理）
-            // Batch cancel timers (asynchronously, non-blocking)
-            if !cancel_requests.is_empty() {
-                let timer_actor = self.timer_actor.clone();
-                tokio::spawn(async move {
-                    let cancelled_count = timer_actor.batch_cancel_timers(cancel_requests).await;
-                    trace!(cancelled = cancelled_count, "Batch cancelled retransmission timers for ACKed packets");
-                });
-            }
+            // 在新的重传系统中，定时器取消由PacketTimerManager在ACK处理时自动完成
+            // In the new retransmission system, timer cancellation is automatically done by PacketTimerManager during ACK processing
+            trace!(
+                sequences_count = result.newly_acked_sequences.len(),
+                "Timer cancellation will be handled by PacketTimerManager during async ACK acknowledgment"
+            );
         }
 
         // Update RTT and congestion control with real samples from SACK-managed packets.
@@ -285,52 +245,6 @@ impl ReliabilityLayer {
         ack_result.frames_to_retransmit
     }
 
-    /// Checks for packets that have timed out based on the current RTO.
-    ///
-    /// If timeouts are detected, it notifies the congestion controller, backs off the RTO timer,
-    /// and returns the frames that need to be retransmitted with fresh header information.
-    ///
-    /// 根据当前RTO检查已超时的数据包。
-    ///
-    /// 如果检测到超时，它会通知拥塞控制器，退避RTO计时器，
-    /// 并返回需要重传的帧，这些帧使用新鲜的header信息重构。
-    pub fn check_for_retransmissions(
-        &mut self, 
-        now: Instant, 
-        context: &crate::packet::frame::RetransmissionContext,
-    ) -> Vec<Frame> {
-        let rto = self.rto_estimator.rto();
-        let frames_to_resend = self.retransmission_manager.check_for_retransmissions(rto, now, context);
-
-        // If packets timed out, notify congestion control and back off the RTO timer.
-        // 如果数据包超时，通知拥塞控制并退避RTO计时器。
-        if !frames_to_resend.is_empty() {
-            let old_cwnd = self.congestion_control.congestion_window();
-            self.congestion_control.on_packet_loss(now);
-            let new_cwnd = self.congestion_control.congestion_window();
-            debug!(
-                old_cwnd,
-                new_cwnd,
-                count = frames_to_resend.len(),
-                "Congestion window reduced due to retransmissions"
-            );
-            self.rto_estimator.backoff();
-        }
-
-        frames_to_resend
-    }
-
-    /// Returns the deadline for the next RTO event.
-    ///
-    /// This allows the connection's event loop to sleep efficiently until the next potential timeout.
-    ///
-    /// 返回下一个RTO事件的截止时间。
-    ///
-    /// 这允许连接的事件循环有效地休眠，直到下一个潜在的超时。
-    pub fn next_rto_deadline(&self) -> Option<Instant> {
-        self.retransmission_manager.next_retransmission_deadline(self.rto_estimator.rto())
-    }
-
     /// Takes data from the stream buffer and packetizes it into frames.
     ///
     /// This function considers the congestion window, receiver window, and MTU to
@@ -371,8 +285,8 @@ impl ReliabilityLayer {
         // After creating the frames, add them to the retransmission manager to be tracked.
         // 创建帧后，将它们添加到重传管理器中进行跟踪。
         for frame in &frames {
-            // Add all frames to the unified retransmission manager.
-            // 将所有帧添加到统一重传管理器。
+            // 在新的系统中，只使用传统重传管理器进行ACK管理，不进行重传超时管理
+            // In the new system, only use legacy retransmission manager for ACK management, not for retransmission timeout management
             self.retransmission_manager.add_in_flight_packet(frame.clone(), now);
             
             // 标记需要在异步上下文中添加到PacketTimerManager的帧
@@ -703,125 +617,6 @@ impl ReliabilityLayer {
     }
 
     // === 分层超时管理接口 Layered Timeout Management Interface ===
-
-    /// 检查可靠性相关超时事件
-    /// Check reliability-related timeout events
-    ///
-    /// 该方法检查所有可靠性相关的超时情况，返回超时检查结果。
-    /// 这是分层超时管理架构中可靠性层的统一入口。
-    ///
-    /// This method checks all reliability-related timeout conditions and returns
-    /// timeout check results. This is the unified entry point for the reliability
-    /// layer in the layered timeout management architecture.
-    pub fn check_reliability_timeouts(
-        &mut self, 
-        now: Instant, 
-        context: &crate::packet::frame::RetransmissionContext,
-    ) -> LegacyTimeoutCheckResult {
-        let mut all_events = Vec::new();
-        let mut all_frames_to_retransmit = Vec::new();
-
-        // 使用分层超时管理接口检查重传超时，使用帧重构
-        // Use layered timeout management interface to check retransmission timeout with frame reconstruction
-        let rto = self.rto_estimator.rto();
-        let (retx_events, frames_to_resend) = self.retransmission_manager.check_retransmission_timeouts(rto, now, context);
-        
-        all_events.extend(retx_events);
-        all_frames_to_retransmit.extend(frames_to_resend);
-
-        // 如果有重传超时，处理拥塞控制和RTO退避
-        // If there are retransmission timeouts, handle congestion control and RTO backoff
-        if !all_frames_to_retransmit.is_empty() {
-            let old_cwnd = self.congestion_control.congestion_window();
-            self.congestion_control.on_packet_loss(now);
-            let new_cwnd = self.congestion_control.congestion_window();
-            debug!(
-                old_cwnd,
-                new_cwnd,
-                count = all_frames_to_retransmit.len(),
-                "Congestion window reduced due to retransmissions"
-            );
-            self.rto_estimator.backoff();
-        }
-
-        LegacyTimeoutCheckResult {
-            events: all_events,
-            frames_to_retransmit: all_frames_to_retransmit,
-        }
-    }
-
-    /// 获取下一个可靠性超时的截止时间
-    /// Get the deadline for the next reliability timeout
-    ///
-    /// 该方法计算所有可靠性相关超时中最早的截止时间，用于事件循环的等待时间优化。
-    ///
-    /// This method calculates the earliest deadline among all reliability-related
-    /// timeouts, used for optimizing event loop wait times.
-    pub fn next_reliability_timeout_deadline(&self) -> Option<Instant> {
-        // 使用分层超时管理接口获取重传超时截止时间
-        // Use layered timeout management interface to get retransmission timeout deadline
-        let rto = self.rto_estimator.rto();
-        self.retransmission_manager.next_retransmission_timeout_deadline(rto)
-    }
-
-    /// 批量注册重传超时定时器
-    /// Batch register retransmission timeout timers
-    ///
-    /// 为多个序列号的数据包批量注册RTO超时定时器，利用TimerActor的批量优化
-    /// Batch register RTO timeout timers for multiple sequence number packets, utilizing TimerActor's batch optimization
-    pub async fn batch_register_retransmission_timers(&mut self, seq_nums: &[u32]) -> usize {
-        if seq_nums.is_empty() {
-            return 0;
-        }
-        
-        let rto = self.rto_estimator.rto();
-        let (timeout_tx, _) = mpsc::channel(1);
-        
-        // 准备批量注册请求
-        // Prepare batch registration requests
-        let mut registrations = Vec::new();
-        for &_seq_num in seq_nums {
-            // 在新设计中，不再需要跟踪active_retx_sequences，因为PacketTimerManager会处理
-            // In new design, no need to track active_retx_sequences as PacketTimerManager handles it
-            registrations.push(TimerRegistration::new(
-                self.connection_id,
-                rto,
-                TimeoutEvent::RetransmissionTimeout,
-                timeout_tx.clone(),
-            ));
-        }
-        
-        if registrations.is_empty() {
-            return 0;
-        }
-        
-        trace!(
-            count = registrations.len(),
-            rto = ?rto,
-            "Batch registering retransmission timers"
-        );
-        
-        // 批量注册定时器
-        // Batch register timers
-        match self.timer_actor.batch_register_timers(registrations).await {
-            Ok(_) => {
-                trace!("Successfully batch registered retransmission timers");
-                seq_nums.len()
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to batch register retransmission timers");
-                // 在新设计中，PacketTimerManager会自动处理失败的清理
-                // In new design, PacketTimerManager automatically handles failure cleanup
-                0
-            }
-        }
-    }
-    
-    /// 单个注册重传超时定时器（简化版本）
-    /// Register single retransmission timeout timer (simplified version)
-    pub async fn register_retransmission_timer(&mut self, seq_num: u32) -> bool {
-        self.batch_register_retransmission_timers(&[seq_num]).await > 0
-    }
     
     /// 使用新的数据包定时器管理器添加数据包
     /// Add packet using new packet timer manager
@@ -874,26 +669,16 @@ impl ReliabilityLayer {
             return 0;
         }
         
-        // 使用PacketTimerManager批量确认数据包
-        // Use PacketTimerManager to batch acknowledge packets
-        let _acked_count = self.packet_timer_manager.batch_acknowledge_packets(seq_nums).await;
+        // 使用PacketTimerManager批量确认数据包（这会自动取消对应的定时器）
+        // Use PacketTimerManager to batch acknowledge packets (this automatically cancels corresponding timers)
+        let acked_count = self.packet_timer_manager.batch_acknowledge_packets(seq_nums).await;
         
-        // 保持传统的批量取消逻辑用于兼容性
-        // Keep traditional batch cancellation logic for compatibility
-        let mut cancel_requests = Vec::new();
-        for &_seq_num in seq_nums {
-            cancel_requests.push((self.connection_id, TimeoutEvent::RetransmissionTimeout));
-        }
+        trace!(
+            count = acked_count,
+            "Batch cancelled retransmission timers using PacketTimerManager"
+        );
         
-        if cancel_requests.is_empty() {
-            return 0;
-        }
-        
-        trace!(count = cancel_requests.len(), "Batch cancelling retransmission timers");
-        
-        // 批量取消定时器
-        // Batch cancel timers
-        self.timer_actor.batch_cancel_timers(cancel_requests).await
+        acked_count
     }
     
     /// 单个取消重传超时定时器（简化版本）
@@ -950,73 +735,22 @@ impl ReliabilityLayer {
     }
 }
 
-// === TimeoutLayer trait 实现 TimeoutLayer trait implementation ===
-
-impl TimeoutLayer for ReliabilityLayer {
-    fn next_deadline(&self) -> Option<Instant> {
-        self.next_reliability_timeout_deadline()
-    }
-    
-    fn check_timeout_events(&mut self, now: Instant) -> TimeoutCheckResult {
-        // 检查可靠性层超时事件（职责分离：仅返回事件）
-        // Check reliability layer timeout events (separated responsibility: only events)
-        let mut events = Vec::new();
-
-        // 检查是否有重传超时
-        // Check if there are retransmission timeouts
-        let rto = self.rto_estimator.rto();
-        if self.retransmission_manager.has_retransmission_timeout(rto, now) {
-            events.push(TimeoutEvent::RetransmissionTimeout);
-        }
-
-        TimeoutCheckResult {
-            events,
-        }
-    }
-    
-    fn layer_name(&self) -> &'static str {
-        "ReliabilityLayer"
-    }
-    
-    fn stats(&self) -> Option<String> {
-        Some(format!(
-            "cwnd: {}, in_flight: {}, rto: {:?}",
-            self.congestion_window(),
-            self.retransmission_manager.total_in_flight_count(),
-            self.rto_estimator.rto()
-        ))
-    }
-}
 
 impl RetransmissionLayer for ReliabilityLayer {
-    fn check_retransmissions(&mut self, now: Instant, context: &crate::packet::frame::RetransmissionContext) -> RetransmissionCheckResult {
-        // 检查重传超时并返回需要重传的帧（职责分离：专门处理重传）
-        // Check retransmission timeouts and return frames that need retransmission (separated responsibility: specifically handles retransmission)
-        let rto = self.rto_estimator.rto();
-        let (_, frames_to_resend) = self.retransmission_manager.check_retransmission_timeouts(rto, now, context);
-
-        // 如果有重传超时，处理拥塞控制和RTO退避
-        // If there are retransmission timeouts, handle congestion control and RTO backoff
-        if !frames_to_resend.is_empty() {
-            let old_cwnd = self.congestion_control.congestion_window();
-            self.congestion_control.on_packet_loss(now);
-            let new_cwnd = self.congestion_control.congestion_window();
-            debug!(
-                old_cwnd,
-                new_cwnd,
-                count = frames_to_resend.len(),
-                "Congestion window reduced due to retransmissions"
-            );
-            self.rto_estimator.backoff();
-        }
-
+    fn check_retransmissions(&mut self, _now: Instant, _context: &crate::packet::frame::RetransmissionContext) -> RetransmissionCheckResult {
+        // 在新的重传系统中，重传由PacketTimerManager通过事件驱动方式处理
+        // In the new retransmission system, retransmissions are handled by PacketTimerManager through event-driven approach
+        trace!("check_retransmissions called on RetransmissionLayer, but retransmissions are now handled by PacketTimerManager");
+        
         RetransmissionCheckResult {
-            frames_to_retransmit: frames_to_resend,
+            frames_to_retransmit: Vec::new(),
         }
     }
     
     fn next_retransmission_deadline(&self) -> Option<Instant> {
-        let rto = self.rto_estimator.rto();
-        self.retransmission_manager.next_retransmission_timeout_deadline(rto)
+        // 在新的重传系统中，重传截止时间由PacketTimerManager管理
+        // In the new retransmission system, retransmission deadlines are managed by PacketTimerManager
+        trace!("next_retransmission_deadline called on RetransmissionLayer, but timing is now managed by PacketTimerManager");
+        None
     }
-} 
+}

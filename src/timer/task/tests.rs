@@ -133,7 +133,7 @@ mod tests {
         // 注册不同类型的定时器，使用更短的延迟
         let timeout_types = vec![
             TimeoutEvent::IdleTimeout,
-            TimeoutEvent::RetransmissionTimeout,
+            TimeoutEvent::PacketRetransmissionTimeout { sequence_number: 1, timer_id: 123 },
             TimeoutEvent::PathValidationTimeout,
             TimeoutEvent::ConnectionTimeout,
         ];
@@ -705,7 +705,10 @@ mod tests {
             let registration = TimerRegistration::new(
                 2, // 连接2
                 Duration::from_secs(70 + i),
-                TimeoutEvent::RetransmissionTimeout,
+                TimeoutEvent::PacketRetransmissionTimeout { 
+                    sequence_number: (i + 100) as u32, 
+                    timer_id: (i + 1000) as u64 
+                },
                 callback_tx.clone(),
             );
             handle.register_timer(registration).await.unwrap();
@@ -949,7 +952,10 @@ mod tests {
                     let registration = TimerRegistration::new(
                         (100000 + task_id * batch_size + i) as u32, // 避免ID冲突
                         Duration::from_secs(120),
-                        TimeoutEvent::RetransmissionTimeout,
+                        TimeoutEvent::PacketRetransmissionTimeout { 
+                            sequence_number: (task_id * batch_size + i) as u32, 
+                            timer_id: (10000 + task_id * batch_size + i) as u64 
+                        },
                         callback_tx_clone.clone(),
                     );
                     batch_registration.add(registration);

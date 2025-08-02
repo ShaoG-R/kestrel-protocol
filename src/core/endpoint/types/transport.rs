@@ -100,12 +100,6 @@ impl TransportManager {
         self.reliability.rtt_var()
     }
 
-    /// 获取下一个RTO截止时间
-    /// Get next RTO deadline
-    pub fn next_rto_deadline(&self) -> Option<tokio::time::Instant> {
-        self.reliability.next_rto_deadline()
-    }
-
     /// 清理在途数据包
     /// Clear in-flight packets
     pub fn clear_in_flight_packets(&mut self) {

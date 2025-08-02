@@ -656,35 +656,27 @@ impl TimerActor {
         Ok(timer_id)
     }
     
-    /// 注册重传定时器
-    /// Register retransmission timer
+    /// 注册重传定时器（传统方法，重定向到新的基于数据包的方法）
+    /// Register retransmission timer (legacy method, redirects to new packet-based method)
     async fn handle_register_retransmission_timer(
         &mut self,
         connection_id: ConnectionId,
         packet_id: u64,
         delay: Duration,
     ) -> Result<ActorTimerId, String> {
-        let timeout_event = TimeoutEvent::RetransmissionTimeout;
-        
-        let (callback_tx, _callback_rx) = mpsc::channel(1);
-        let registration = TimerRegistration::new(
-            connection_id,
-            delay,
-            timeout_event,
-            callback_tx,
-        );
-        
-        let timer_id = self.handle_register_timer(registration).await?;
-        
+        // 重定向到新的基于数据包的重传定时器注册方法
+        // Redirect to new packet-based retransmission timer registration method
         trace!(
-            timer_id = timer_id,
             connection_id = connection_id,
             packet_id = packet_id,
-            delay = ?delay,
-            "Registered retransmission timer"
+            "Legacy register_retransmission_timer called, redirecting to packet-based method"
         );
         
-        Ok(timer_id)
+        self.handle_register_packet_retransmission_timer(
+            connection_id,
+            packet_id as u32, // 转换为序列号
+            delay,
+        ).await
     }
     
     /// 注册基于数据包的重传定时器（新版本）

@@ -33,9 +33,6 @@ pub enum TimeoutEvent {
     /// 路径验证超时 - 路径验证过程超时
     /// Path validation timeout - path validation process timed out
     PathValidationTimeout,
-    /// 重传超时 - 数据包需要重传（传统版本，保持向后兼容）
-    /// Retransmission timeout - packets need to be retransmitted (legacy version, backward compatibility)
-    RetransmissionTimeout,
     /// 连接超时 - 连接建立超时
     /// Connection timeout - connection establishment timed out
     ConnectionTimeout,
@@ -963,7 +960,15 @@ mod tests {
         // 测试超时事件枚举的基本功能
         assert_eq!(TimeoutEvent::IdleTimeout, TimeoutEvent::IdleTimeout);
         assert_ne!(TimeoutEvent::IdleTimeout, TimeoutEvent::PathValidationTimeout);
-        assert_ne!(TimeoutEvent::RetransmissionTimeout, TimeoutEvent::ConnectionTimeout);
+        
+        // 测试新的基于数据包的重传超时事件
+        let packet_timeout1 = TimeoutEvent::PacketRetransmissionTimeout { sequence_number: 1, timer_id: 123 };
+        let packet_timeout2 = TimeoutEvent::PacketRetransmissionTimeout { sequence_number: 1, timer_id: 123 };
+        let packet_timeout3 = TimeoutEvent::PacketRetransmissionTimeout { sequence_number: 2, timer_id: 124 };
+        
+        assert_eq!(packet_timeout1, packet_timeout2);
+        assert_ne!(packet_timeout1, packet_timeout3);
+        assert_ne!(packet_timeout1, TimeoutEvent::ConnectionTimeout);
 
         // 测试Debug trait
         let event = TimeoutEvent::IdleTimeout;
