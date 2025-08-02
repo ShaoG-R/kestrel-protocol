@@ -20,7 +20,7 @@ use crate::{
     core::{endpoint::Endpoint, stream::Stream},
     error::{Error, Result},
     packet::frame::Frame,
-    timer::HybridTimerTaskHandle,
+    timer::{HybridTimerTaskHandle, task::types::SenderCallback},
 };
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc;
@@ -63,7 +63,7 @@ pub(crate) struct SocketSessionCoordinator<T: BindableTransport> {
     command_tx: mpsc::Sender<SocketActorCommand>,
     /// 混合并行定时器任务句柄
     /// Hybrid parallel timer task handle
-    timer_handle: HybridTimerTaskHandle<TimeoutEvent>,
+    timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
 }
 
 impl<T: BindableTransport> SocketSessionCoordinator<T> {
@@ -75,7 +75,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         config: Arc<Config>,
         accept_tx: mpsc::Sender<(Stream, SocketAddr)>,
         command_tx: mpsc::Sender<SocketActorCommand>,
-        timer_handle: HybridTimerTaskHandle<TimeoutEvent>,
+        timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
     ) -> Self {
         Self {
             transport_manager,

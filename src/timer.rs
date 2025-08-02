@@ -18,7 +18,11 @@ pub mod hybrid_system;
 #[cfg(test)]
 mod tests;
 
-pub use actor::{TimerActor, TimerActorHandle, TimerActorConfig, TimerActorStats, start_timer_actor};
+pub use actor::{
+    TimerActor, TimerActorHandle, TimerActorConfig, TimerActorStats, 
+    start_timer_actor, start_sender_timer_actor, start_noop_timer_actor,
+    SenderTimerActor, NoOpTimerActor, SenderTimerActorHandle, NoOpTimerActorHandle
+};
 pub use event::{TimerEvent, TimerEventData};
 pub use parallel::{
     HybridParallelTimerSystem, OptimalParallelStrategy, 

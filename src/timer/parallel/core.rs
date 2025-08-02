@@ -12,6 +12,7 @@ use crate::timer::parallel::types::{
     ProcessingResult,
 };
 use crate::timer::wheel::TimerEntry;
+use crate::timer::task::types::TimerCallback;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing;
@@ -95,9 +96,9 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
 
     /// 并行处理定时器批量（优化版本）
     /// Process timer batch in parallel (optimized version)
-    pub async fn process_timer_batch(
+    pub async fn process_timer_batch<C: TimerCallback<E>>(
         &mut self,
-        timer_entries: Vec<TimerEntry<E>>,
+        timer_entries: Vec<TimerEntry<E, C>>,
     ) -> Result<ParallelProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         let batch_size = timer_entries.len();
         let start_time = Instant::now();
@@ -138,9 +139,9 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
 
     /// 单线程直通模式处理（零异步开销）
     /// Single-thread bypass mode processing (zero async overhead)
-    async fn process_bypass_mode(
+    async fn process_bypass_mode<C: TimerCallback<E>>(
         &mut self,
-        timer_entries: Vec<TimerEntry<E>>,
+        timer_entries: Vec<TimerEntry<E, C>>,
         start_time: Instant,
     ) -> Result<ParallelProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         let batch_size = timer_entries.len();
@@ -182,9 +183,9 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
 
     /// 仅使用SIMD处理（优化版本）
     /// Process using SIMD only (optimized version)
-    async fn process_simd_only_optimized(
+    async fn process_simd_only_optimized<C: TimerCallback<E>>(
         &mut self,
-        timer_entries: Vec<TimerEntry<E>>,
+        timer_entries: Vec<TimerEntry<E, C>>,
     ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         let processed_data = self.simd_processor.process_batch(&timer_entries)?;
         
@@ -239,9 +240,9 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
 
     /// 使用SIMD + Rayon处理（优化版本）
     /// Process using SIMD + Rayon (optimized version)
-    async fn process_simd_with_rayon_optimized(
+    async fn process_simd_with_rayon_optimized<C: TimerCallback<E>>(
         &mut self,
-        timer_entries: Vec<TimerEntry<E>>,
+        timer_entries: Vec<TimerEntry<E, C>>,
     ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         // 使用Rayon并行处理数据
         let processed_data = self.rayon_executor
@@ -283,9 +284,9 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
 
     /// 使用完整混合策略处理（优化版本）
     /// Process using full hybrid strategy (optimized version)
-    async fn process_full_hybrid_optimized(
+    async fn process_full_hybrid_optimized<C: TimerCallback<E>>(
         &mut self,
-        timer_entries: Vec<TimerEntry<E>>,
+        timer_entries: Vec<TimerEntry<E, C>>,
     ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         let batch_size = timer_entries.len();
         

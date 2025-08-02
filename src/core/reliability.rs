@@ -28,14 +28,16 @@ use crate::{
     packet::{frame::Frame, sack::SackRange},
 };
 use bytes::Bytes;
-use tokio::time::Instant;
+use tokio::{sync::mpsc, time::Instant};
 use tracing::{debug, trace};
 use congestion::CongestionControl;
 use crate::core::endpoint::unified_scheduler::{RetransmissionLayer, RetransmissionCheckResult};
 use crate::timer::{
-    event::ConnectionId,
+    event::{ConnectionId, TimerEventData},
     TimerActorHandle,
 };
+use crate::core::endpoint::timing::TimeoutEvent;
+use crate::timer::task::types::SenderCallback;
 
 
 
@@ -121,9 +123,12 @@ impl ReliabilityLayer {
         config: Config, 
         congestion_control: Box<dyn CongestionControl>,
         connection_id: ConnectionId,
-        timer_actor: TimerActorHandle,
+        timer_actor: TimerActorHandle<SenderCallback<TimeoutEvent>>,
     ) -> Self {
-        let packet_timer_manager = PacketTimerManager::new(connection_id, timer_actor.clone());
+        // 创建一个临时的timeout_tx通道，稍后会被实际的通道替换
+        // Create a temporary timeout_tx channel, will be replaced with the actual channel later
+        let (temp_timeout_tx, _temp_timeout_rx) = mpsc::channel(32);
+        let packet_timer_manager = PacketTimerManager::new(connection_id, timer_actor.clone(), temp_timeout_tx);
         
         Self {
             send_buffer: SendBuffer::new(config.connection.send_buffer_capacity_bytes),
@@ -137,6 +142,12 @@ impl ReliabilityLayer {
             ack_eliciting_packets_since_last_ack: 0,
             packet_timer_manager,
         }
+    }
+
+    /// 更新PacketTimerManager的timeout_tx通道
+    /// Update PacketTimerManager's timeout_tx channel
+    pub fn update_packet_timer_timeout_tx(&mut self, timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>) {
+        self.packet_timer_manager.update_timeout_tx(timeout_tx);
     }
 
     /// Handles an incoming ACK frame and returns comprehensive result.

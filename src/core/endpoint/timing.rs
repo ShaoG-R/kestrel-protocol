@@ -636,6 +636,12 @@ impl TimingManager {
         )
     }
 
+    /// 获取定时器事件发送通道的克隆
+    /// Get a clone of the timer event sender channel
+    pub fn get_timeout_tx(&self) -> mpsc::Sender<TimerEventData<TimeoutEvent>> {
+        self.timer_manager.timeout_tx.clone()
+    }
+
     // === 超时控制逻辑封装 Timeout Control Logic Encapsulation ===
 
     /// 计算下一次唤醒时间，用于事件循环的超时控制

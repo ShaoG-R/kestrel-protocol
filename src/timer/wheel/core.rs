@@ -5,6 +5,7 @@ use crate::timer::event::traits::EventDataTrait;
 use crate::timer::event::TimerEvent;
 use crate::timer::wheel::entry::{TimerEntry, TimerEntryId};
 use crate::timer::wheel::stats::TimingWheelStats;
+use crate::timer::task::types::TimerCallback;
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -13,7 +14,7 @@ use tracing::{debug, trace, warn};
 /// 时间轮实现
 /// Timing wheel implementation
 #[derive(Debug)]
-pub struct TimingWheel<E: EventDataTrait> {
+pub struct TimingWheel<E: EventDataTrait, C: TimerCallback<E>> {
     /// 时间轮的槽位数量（必须是2的幂以支持位运算优化）
     /// Number of slots in the timing wheel (must be power of 2 for bitwise optimization)
     pub(super) slot_count: usize,
@@ -34,7 +35,7 @@ pub struct TimingWheel<E: EventDataTrait> {
     pub(super) current_time: Instant,
     /// 槽位数组，每个槽位包含该时间点到期的定时器
     /// Slot array, each slot contains timers that expire at that time
-    pub(super) slots: Vec<VecDeque<TimerEntry<E>>>,
+    pub(super) slots: Vec<VecDeque<TimerEntry<E, C>>>,
     /// 定时器ID映射，用于快速查找和删除定时器
     /// Timer ID mapping for fast lookup and deletion
     pub(super) timer_map: HashMap<TimerEntryId, (usize, usize)>, // (slot_index, position_in_slot)
@@ -46,7 +47,7 @@ pub struct TimingWheel<E: EventDataTrait> {
     pub(super) cached_next_expiry: Option<Instant>,
 }
 
-impl<E: EventDataTrait> TimingWheel<E> {
+impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
     /// 创建新的时间轮
     /// Create new timing wheel
     ///
@@ -100,7 +101,7 @@ impl<E: EventDataTrait> TimingWheel<E> {
     /// # Returns
     /// 返回定时器条目ID列表
     /// Returns list of timer entry IDs
-    pub fn batch_add_timers(&mut self, timers: Vec<(Duration, TimerEvent<E>)>) -> Vec<TimerEntryId> {
+    pub fn batch_add_timers(&mut self, timers: Vec<(Duration, TimerEvent<E, C>)>) -> Vec<TimerEntryId> {
         if timers.is_empty() {
             return Vec::new();
         }
@@ -120,7 +121,7 @@ impl<E: EventDataTrait> TimingWheel<E> {
         
         // 按槽位分组定时器，减少散列访问
         // Group timers by slot to reduce scattered access
-        let mut slot_groups: HashMap<usize, Vec<(TimerEntryId, Instant, TimerEvent<E>)>> = HashMap::new();
+        let mut slot_groups: HashMap<usize, Vec<(TimerEntryId, Instant, TimerEvent<E, C>)>> = HashMap::new();
         
         // SIMD优化：批量分析槽位分布，减少HashMap查找
         // SIMD optimization: batch analyze slot distribution to reduce HashMap lookups
@@ -282,7 +283,7 @@ impl<E: EventDataTrait> TimingWheel<E> {
     /// # Returns
     /// 返回定时器条目ID，可用于取消定时器
     /// Returns timer entry ID that can be used to cancel the timer
-    pub fn add_timer(&mut self, delay: Duration, event: TimerEvent<E>) -> TimerEntryId {
+    pub fn add_timer(&mut self, delay: Duration, event: TimerEvent<E, C>) -> TimerEntryId {
         let entry_id = self.next_entry_id;
         self.next_entry_id += 1;
 
@@ -393,7 +394,7 @@ impl<E: EventDataTrait> TimingWheel<E> {
     /// # Returns
     /// 返回已到期的定时器列表
     /// Returns list of expired timers
-    pub fn advance(&mut self, now: Instant) -> Vec<TimerEntry<E>> {
+    pub fn advance(&mut self, now: Instant) -> Vec<TimerEntry<E, C>> {
         let mut expired_timers = Vec::new();
         
         // 首先检查当前槽位是否有已到期的定时器（处理零持续时间和立即到期的情况）
@@ -594,7 +595,7 @@ impl<E: EventDataTrait> TimingWheel<E> {
 
     /// 检查当前槽位中的已到期定时器（处理零持续时间等边界情况）
     /// Check current slot for expired timers (handle zero duration and edge cases)
-    fn check_current_slot_for_expired_timers(&mut self, now: Instant, expired_timers: &mut Vec<TimerEntry<E>>) {
+    fn check_current_slot_for_expired_timers(&mut self, now: Instant, expired_timers: &mut Vec<TimerEntry<E, C>>) {
         let current_slot = &mut self.slots[self.current_slot];
         let mut i = 0;
         

@@ -4,6 +4,7 @@
 use crate::timer::event::traits::EventDataTrait;
 use crate::timer::parallel::types::ProcessedTimerData;
 use crate::timer::wheel::TimerEntry;
+use crate::timer::task::types::TimerCallback;
 use wide::{u32x8, u64x4};
 
 /// SIMD定时器处理器
@@ -32,9 +33,9 @@ impl<E: EventDataTrait> SIMDTimerProcessor<E> {
 
     /// 使用SIMD批量处理定时器
     /// Process timers in batch using SIMD
-    pub fn process_batch(
+    pub fn process_batch<C: TimerCallback<E>>(
         &mut self,
-        timer_entries: &[TimerEntry<E>],
+        timer_entries: &[TimerEntry<E, C>],
     ) -> Result<Vec<ProcessedTimerData<E>>, Box<dyn std::error::Error + Send + Sync>> {
         self.result_cache.clear();
         self.result_cache.reserve(timer_entries.len());

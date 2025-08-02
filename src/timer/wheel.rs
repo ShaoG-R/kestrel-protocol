@@ -23,17 +23,18 @@ mod tests {
     use super::*;
     use crate::timer::event::{TimerEventData, TimerEvent};
     use crate::core::endpoint::timing::TimeoutEvent;
+    use crate::timer::task::types::SenderCallback;
     use tokio::sync::mpsc;
     use tokio::time::{sleep, Duration};
     use std::collections::HashSet;
 
-    fn create_test_timer_event(id: u64) -> TimerEvent<TimeoutEvent> {
+    fn create_test_timer_event(id: u64) -> TimerEvent<TimeoutEvent, SenderCallback<TimeoutEvent>> {
         let (tx, _rx) = mpsc::channel(1);
         let data = TimerEventData::new(id as u32, TimeoutEvent::IdleTimeout);
-        TimerEvent::new(id, data, tx)
+        TimerEvent::new(id, data, SenderCallback::new(tx))
     }
 
-    fn create_test_timer_events(count: usize) -> Vec<TimerEvent<TimeoutEvent>> {
+    fn create_test_timer_events(count: usize) -> Vec<TimerEvent<TimeoutEvent, SenderCallback<TimeoutEvent>>> {
         (0..count)
             .map(|i| create_test_timer_event(i as u64))
             .collect()
@@ -41,7 +42,7 @@ mod tests {
 
     #[test]
     fn test_timing_wheel_creation() {
-        let wheel: TimingWheel<TimeoutEvent> = TimingWheel::new(8, Duration::from_millis(100));
+        let wheel: TimingWheel<TimeoutEvent, SenderCallback<TimeoutEvent>> = TimingWheel::new(8, Duration::from_millis(100));
         assert_eq!(wheel.slot_count, 8);
         assert_eq!(wheel.slot_duration, Duration::from_millis(100));
         assert_eq!(wheel.current_slot, 0);
@@ -50,7 +51,7 @@ mod tests {
 
     #[test]
     fn test_default_wheel_creation() {
-        let wheel: TimingWheel<TimeoutEvent> = TimingWheel::new_default();
+        let wheel: TimingWheel<TimeoutEvent, SenderCallback<TimeoutEvent>> = TimingWheel::new_default();
         assert_eq!(wheel.slot_count, 512);
         assert_eq!(wheel.slot_duration, Duration::from_millis(100));
         assert!(wheel.is_empty());
@@ -59,7 +60,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "slot_count must be a power of 2")]
     fn test_invalid_slot_count() {
-        TimingWheel::<TimeoutEvent>::new(7, Duration::from_millis(100)); // 不是2的幂
+        TimingWheel::<TimeoutEvent, SenderCallback<TimeoutEvent>>::new(7, Duration::from_millis(100)); // 不是2的幂
     }
 
     #[test]
@@ -161,7 +162,7 @@ mod tests {
         let mut wheel = TimingWheel::new(64, Duration::from_millis(10));
         let events = create_test_timer_events(8);
         
-        let timer_data: Vec<(Duration, TimerEvent<TimeoutEvent>)> = events
+        let timer_data: Vec<(Duration, TimerEvent<TimeoutEvent, SenderCallback<TimeoutEvent>>)> = events
             .into_iter()
             .enumerate()
             .map(|(i, event)| (Duration::from_millis(((i + 1) * 50) as u64), event))
@@ -183,7 +184,7 @@ mod tests {
         let mut wheel = TimingWheel::new(512, Duration::from_millis(10));
         let events = create_test_timer_events(128);
         
-        let timer_data: Vec<(Duration, TimerEvent<TimeoutEvent>)> = events
+        let timer_data: Vec<(Duration, TimerEvent<TimeoutEvent, SenderCallback<TimeoutEvent>>)> = events
             .into_iter()
             .enumerate()
             .map(|(i, event)| (Duration::from_millis(((i + 1) * 10) as u64), event))
@@ -206,7 +207,7 @@ mod tests {
         let mut wheel = TimingWheel::new(64, Duration::from_millis(10));
         let events = create_test_timer_events(16);
         
-        let timer_data: Vec<(Duration, TimerEvent<TimeoutEvent>)> = events
+        let timer_data: Vec<(Duration, TimerEvent<TimeoutEvent, SenderCallback<TimeoutEvent>>)> = events
             .into_iter()
             .enumerate()
             .map(|(i, event)| (Duration::from_millis(((i + 1) * 10) as u64), event))
@@ -352,7 +353,7 @@ mod tests {
         
         // 批量添加大量定时器
         let events = create_test_timer_events(timer_count);
-        let timer_data: Vec<(Duration, TimerEvent<TimeoutEvent>)> = events
+        let timer_data: Vec<(Duration, TimerEvent<TimeoutEvent, SenderCallback<TimeoutEvent>>)> = events
             .into_iter()
             .enumerate()
             .map(|(i, event)| (Duration::from_millis(((i % 100 + 1) * 10) as u64), event))
@@ -395,7 +396,7 @@ mod tests {
         // 添加大量定时器然后清空，测试内存清理
         for _ in 0..5 {
             let events = create_test_timer_events(100);
-            let timer_data: Vec<(Duration, TimerEvent<TimeoutEvent>)> = events
+            let timer_data: Vec<(Duration, TimerEvent<TimeoutEvent, SenderCallback<TimeoutEvent>>)> = events
                 .into_iter()
                 .enumerate()
                 .map(|(i, event)| (Duration::from_millis(((i + 1) * 10) as u64), event))

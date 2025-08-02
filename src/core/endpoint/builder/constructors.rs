@@ -41,7 +41,7 @@ impl<T: Transport> Endpoint<T> {
         
         // 创建定时器Actor用于批量定时器管理
         // Create timer actor for batch timer management
-        let timer_actor = crate::timer::start_timer_actor(timer_handle.clone(), None);
+        let timer_actor = crate::timer::start_sender_timer_actor(timer_handle.clone(), None);
         
         let mut reliability = ReliabilityLayer::new(config.clone(), congestion_control, local_cid, timer_actor);
         if let Some(data) = initial_data {
@@ -56,6 +56,10 @@ impl<T: Transport> Endpoint<T> {
         lifecycle_manager.initialize(local_cid, remote_addr)?;
 
         let (mut timing, timer_event_rx) = TimingManager::new(local_cid, timer_handle);
+        
+        // 更新ReliabilityLayer的PacketTimerManager使用正确的timeout_tx通道
+        // Update ReliabilityLayer's PacketTimerManager to use the correct timeout_tx channel
+        reliability.update_packet_timer_timeout_tx(timing.get_timeout_tx());
         
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer
@@ -107,9 +111,9 @@ impl<T: Transport> Endpoint<T> {
         
         // 创建定时器Actor用于批量定时器管理
         // Create timer actor for batch timer management
-        let timer_actor = crate::timer::start_timer_actor(timer_handle.clone(), None);
+        let timer_actor = crate::timer::start_sender_timer_actor(timer_handle.clone(), None);
         
-        let reliability = ReliabilityLayer::new(config.clone(), congestion_control, local_cid, timer_actor);
+        let mut reliability = ReliabilityLayer::new(config.clone(), congestion_control, local_cid, timer_actor);
 
         let mut lifecycle_manager = DefaultLifecycleManager::new(
             ConnectionState::SynReceived,
@@ -118,6 +122,10 @@ impl<T: Transport> Endpoint<T> {
         lifecycle_manager.initialize(local_cid, remote_addr)?;
 
         let (mut timing, timer_event_rx) = TimingManager::new(local_cid, timer_handle);
+        
+        // 更新ReliabilityLayer的PacketTimerManager使用正确的timeout_tx通道
+        // Update ReliabilityLayer's PacketTimerManager to use the correct timeout_tx channel
+        reliability.update_packet_timer_timeout_tx(timing.get_timeout_tx());
         
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer

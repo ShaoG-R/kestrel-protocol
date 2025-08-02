@@ -3,6 +3,7 @@
 
 use crate::timer::event::TimerEvent;
 use crate::timer::event::traits::EventDataTrait;
+use crate::timer::task::types::TimerCallback;
 use tokio::time::Instant;
 
 /// 定时器条目ID，用于在时间轮中唯一标识定时器条目
@@ -12,7 +13,7 @@ pub type TimerEntryId = u64;
 /// 时间轮中的定时器条目
 /// Timer entry in the timing wheel
 #[derive(Debug)]
-pub struct TimerEntry<E: EventDataTrait> {
+pub struct TimerEntry<E: EventDataTrait, C: TimerCallback<E>> {
     /// 条目ID
     /// Entry ID
     pub id: TimerEntryId,
@@ -21,13 +22,13 @@ pub struct TimerEntry<E: EventDataTrait> {
     pub expiry_time: Instant,
     /// 定时器事件
     /// Timer event
-    pub event: TimerEvent<E>,
+    pub event: TimerEvent<E, C>,
 }
 
-impl<E: EventDataTrait> TimerEntry<E> {
+impl<E: EventDataTrait, C: TimerCallback<E>> TimerEntry<E, C> {
     /// 创建新的定时器条目
     /// Create new timer entry
-    pub fn new(id: TimerEntryId, expiry_time: Instant, event: TimerEvent<E>) -> Self {
+    pub fn new(id: TimerEntryId, expiry_time: Instant, event: TimerEvent<E, C>) -> Self {
         Self {
             id,
             expiry_time,

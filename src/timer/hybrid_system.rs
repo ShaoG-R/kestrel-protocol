@@ -15,7 +15,7 @@ use crate::timer::{
         commands::{TimerTaskCommand, TimerError},
         types::{
             TimerRegistration, BatchTimerRegistration, BatchTimerCancellation,
-            BatchTimerResult, TimerHandle
+            BatchTimerResult, TimerHandle, TimerCallback, SenderCallback
         }
     },
     TimerTaskStats
@@ -75,19 +75,19 @@ use tracing::{debug, info, trace, warn};
 
 /// 混合并行定时器任务
 /// Hybrid parallel timer task
-pub struct HybridTimerTask<E: EventDataTrait> {
+pub struct HybridTimerTask<E: EventDataTrait, C: TimerCallback<E>> {
     /// 时间轮（保持现有的定时器管理逻辑）
     /// Timing wheel (maintain existing timer management logic)
-    timing_wheel: TimingWheel<E>,
+    timing_wheel: TimingWheel<E, C>,
     /// 混合并行处理系统
     /// Hybrid parallel processing system
     parallel_system: HybridParallelTimerSystem<E>,
     /// 命令接收通道
     /// Command receiver channel
-    command_rx: mpsc::Receiver<TimerTaskCommand<E>>,
+    command_rx: mpsc::Receiver<TimerTaskCommand<E, C>>,
     /// 命令发送通道（用于创建句柄）
     /// Command sender channel (for creating handles)
-    command_tx: mpsc::Sender<TimerTaskCommand<E>>,
+    command_tx: mpsc::Sender<TimerTaskCommand<E, C>>,
     /// 连接到定时器条目的映射
     /// Connection to timer entries mapping
     connection_timers: HashMap<ConnectionId, HashSet<TimerEntryId>>,
@@ -111,10 +111,10 @@ pub struct HybridTimerTask<E: EventDataTrait> {
     event_factory: EventFactory<E>,
 }
 
-impl<E: EventDataTrait> HybridTimerTask<E> {
+impl<E: EventDataTrait, C: TimerCallback<E>> HybridTimerTask<E, C> {
     /// 创建新的混合并行定时器任务（高性能版本）
     /// Create new hybrid parallel timer task (high-performance version)
-    pub fn new(command_buffer_size: usize, parallel_threshold: usize) -> (Self, mpsc::Sender<TimerTaskCommand<E>>) {
+    pub fn new(command_buffer_size: usize, parallel_threshold: usize) -> (Self, mpsc::Sender<TimerTaskCommand<E, C>>) {
         let (command_tx, command_rx) = mpsc::channel(command_buffer_size);
         let timing_wheel = TimingWheel::new(512, Duration::from_millis(10));
         let parallel_system = HybridParallelTimerSystem::new();
@@ -147,7 +147,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
 
     /// 创建默认配置的混合并行定时器任务
     /// Create hybrid parallel timer task with default configuration
-    pub fn new_default() -> (Self, mpsc::Sender<TimerTaskCommand<E>>) {
+    pub fn new_default() -> (Self, mpsc::Sender<TimerTaskCommand<E, C>>) {
         // 默认并行阈值为32，即超过32个定时器时使用并行处理
         // Default parallel threshold is 32, use parallel processing when more than 32 timers
         Self::new(1024, 32)
@@ -234,7 +234,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
                 entry_id,
                 entry.event.data.connection_id,
                 entry.event.data.timeout_event.clone(),
-                entry.event.callback_tx.clone(),
+                entry.event.callback.clone(),
                 entry.event.data.clone(),
             ));
             
@@ -314,7 +314,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
             crate::timer::wheel::TimerEntryId,
             crate::timer::event::ConnectionId,
             E,
-            tokio::sync::mpsc::Sender<crate::timer::event::TimerEventData<E>>,
+            C,
             crate::timer::event::TimerEventData<E>,
         )>
     ) {
@@ -345,14 +345,14 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
             crate::timer::wheel::TimerEntryId,
             crate::timer::event::ConnectionId,
             E,
-            tokio::sync::mpsc::Sender<crate::timer::event::TimerEventData<E>>,
+            C,
             crate::timer::event::TimerEventData<E>,
         )>
     ) {
         let mut successful_count = 0;
         
         for (entry_id, connection_id, event_type, callback_tx, event_data) in notification_data {
-            if callback_tx.send(event_data).await.is_ok() {
+            if callback_tx.on_timeout(event_data).await.is_ok() {
                 successful_count += 1;
                 trace!(entry_id, connection_id, event_type = ?event_type, "Timer event sent");
             } else {
@@ -371,7 +371,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
             crate::timer::wheel::TimerEntryId,
             crate::timer::event::ConnectionId,
             E,
-            tokio::sync::mpsc::Sender<crate::timer::event::TimerEventData<E>>,
+            C,
             crate::timer::event::TimerEventData<E>,
         )>
     ) {
@@ -392,7 +392,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
                     let event_data = event_data.clone();
                     
                     async move {
-                        if callback_tx.send(event_data).await.is_ok() {
+                        if callback_tx.on_timeout(event_data).await.is_ok() {
                             trace!(entry_id, connection_id, event_type = ?event_type, "Timer event sent");
                             1
                         } else {
@@ -427,7 +427,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
             crate::timer::wheel::TimerEntryId,
             crate::timer::event::ConnectionId,
             E,
-            tokio::sync::mpsc::Sender<crate::timer::event::TimerEventData<E>>,
+            SenderCallback<E>,
             crate::timer::event::TimerEventData<E>,
         )>
     ) {
@@ -439,7 +439,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
             .into_iter()
             .map(|(entry_id, connection_id, event_type, callback_tx, event_data)| {
                 async move {
-                    if let Err(e) = callback_tx.send(event_data).await {
+                    if let Err(e) = callback_tx.on_timeout(event_data).await {
                         warn!(
                             entry_id,
                             connection_id,
@@ -481,7 +481,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
             crate::timer::wheel::TimerEntryId,
             crate::timer::event::ConnectionId,
             E,
-            tokio::sync::mpsc::Sender<crate::timer::event::TimerEventData<E>>,
+            C,
             crate::timer::event::TimerEventData<E>,
         )>
     ) {
@@ -509,7 +509,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
             crate::timer::wheel::TimerEntryId,
             crate::timer::event::ConnectionId,
             E,
-            tokio::sync::mpsc::Sender<crate::timer::event::TimerEventData<E>>,
+            C,
             crate::timer::event::TimerEventData<E>,
         )>
     ) {
@@ -518,7 +518,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
         // 顺序发送所有定时器事件通知
         // Sequentially send all timer event notifications
         for (entry_id, connection_id, event_type, callback_tx, event_data) in notification_data {
-            if let Err(e) = callback_tx.send(event_data).await {
+            if let Err(e) = callback_tx.on_timeout(event_data).await {
                 warn!(
                     entry_id,
                     connection_id,
@@ -547,7 +547,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
     /// 传统顺序处理定时器（作为fallback，备用方法）
     /// Traditional sequential timer processing (as fallback, backup method)
     #[allow(dead_code)]
-    async fn process_timers_sequential(&mut self, expired_timers: Vec<TimerEntry<E>>) {
+    async fn process_timers_sequential(&mut self, expired_timers: Vec<TimerEntry<E, C>>) {
         let processed_count = expired_timers.len();
         
         // 顺序触发所有定时器
@@ -559,11 +559,10 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
             
             // 使用现有的事件触发机制
             // Use existing event trigger mechanism
-            if let Err(e) = entry.event.callback_tx.send(entry.event.data.clone()).await {
+            if let Err(_e) = entry.event.callback.on_timeout(entry.event.data.clone()).await {
                 warn!(
                     entry_id,
                     connection_id,
-                    error = ?e,
                     "Failed to send timer event"
                 );
             } else {
@@ -587,7 +586,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
 
     /// 处理定时器任务命令（复用现有逻辑）
     /// Handle timer task command (reuse existing logic)
-    async fn handle_command(&mut self, command: TimerTaskCommand<E>) -> bool {
+    async fn handle_command(&mut self, command: TimerTaskCommand<E, C>) -> bool {
         // 这里可以复用现有的GlobalTimerTask的handle_command逻辑
         // We can reuse the existing GlobalTimerTask's handle_command logic here
         match command {
@@ -654,7 +653,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
     
     /// 注册单个定时器
     /// Register single timer
-    async fn register_timer(&mut self, registration: TimerRegistration<E>) -> Result<TimerHandle<E>, TimerError> {
+    async fn register_timer(&mut self, registration: TimerRegistration<E, C>) -> Result<TimerHandle<E, C>, TimerError> {
         let event_id = self.next_event_id;
         self.next_event_id += 1;
 
@@ -666,7 +665,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
             event_id,
             registration.connection_id,
             registration.timeout_event,
-            registration.callback_tx,
+            registration.callback,
         );
 
         // 添加到时间轮
@@ -702,7 +701,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
 
     /// 高性能批量注册定时器（优化版本）
     /// High-performance batch register timers (optimized version)
-    async fn batch_register_timers(&mut self, batch_registration: BatchTimerRegistration<E>) -> BatchTimerResult<TimerHandle<E>> {
+    async fn batch_register_timers(&mut self, batch_registration: BatchTimerRegistration<E, C>) -> BatchTimerResult<TimerHandle<E, C>> {
         let registrations = batch_registration.registrations;
         let total_count = registrations.len();
         
@@ -734,7 +733,7 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
         
         for registration in &registrations {
             pool_requests.push((registration.connection_id, registration.timeout_event.clone()));
-            callback_txs.push(registration.callback_tx.clone());
+            callback_txs.push(registration.callback.clone());
         }
         
         // 批量创建定时器事件，智能策略选择，高性能优化
@@ -967,20 +966,20 @@ impl<E: EventDataTrait> HybridTimerTask<E> {
 /// 混合并行定时器任务句柄
 /// Hybrid parallel timer task handle  
 #[derive(Clone)]
-pub struct HybridTimerTaskHandle<E: EventDataTrait> {
-    command_tx: mpsc::Sender<TimerTaskCommand<E>>,
+pub struct HybridTimerTaskHandle<E: EventDataTrait, C: TimerCallback<E>> {
+    command_tx: mpsc::Sender<TimerTaskCommand<E, C>>,
 }
 
-impl<E: EventDataTrait> HybridTimerTaskHandle<E> {
+impl<E: EventDataTrait, C: TimerCallback<E>> HybridTimerTaskHandle<E, C> {
     /// 创建新的句柄
     /// Create new handle
-    pub fn new(command_tx: mpsc::Sender<TimerTaskCommand<E>>) -> Self {
+    pub fn new(command_tx: mpsc::Sender<TimerTaskCommand<E, C>>) -> Self {
         Self { command_tx }
     }
 
     /// 获取命令发送通道的克隆
     /// Get clone of command sender channel
-    pub fn command_sender(&self) -> mpsc::Sender<TimerTaskCommand<E>> {
+    pub fn command_sender(&self) -> mpsc::Sender<TimerTaskCommand<E, C>> {
         self.command_tx.clone()
     }
     
@@ -988,8 +987,8 @@ impl<E: EventDataTrait> HybridTimerTaskHandle<E> {
     /// Register timer
     pub async fn register_timer(
         &self,
-        registration: TimerRegistration<E>,
-    ) -> Result<TimerHandle<E>, TimerError> {
+        registration: TimerRegistration<E, C>,
+    ) -> Result<TimerHandle<E, C>, TimerError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         
         let command = TimerTaskCommand::RegisterTimer {
@@ -1011,8 +1010,8 @@ impl<E: EventDataTrait> HybridTimerTaskHandle<E> {
     /// Batch register timers (high-performance version)
     pub async fn batch_register_timers(
         &self,
-        batch_registration: BatchTimerRegistration<E>,
-    ) -> Result<BatchTimerResult<TimerHandle<E>>, TimerError> {
+        batch_registration: BatchTimerRegistration<E, C>,
+    ) -> Result<BatchTimerResult<TimerHandle<E, C>>, TimerError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         
         let command = TimerTaskCommand::BatchRegisterTimers {
@@ -1102,7 +1101,7 @@ impl<E: EventDataTrait> HybridTimerTaskHandle<E> {
 
 /// 启动混合并行定时器任务
 /// Start hybrid parallel timer task
-pub fn start_hybrid_timer_task<E: EventDataTrait>() -> HybridTimerTaskHandle<E> {
+pub fn start_hybrid_timer_task<E: EventDataTrait, C: TimerCallback<E>>() -> HybridTimerTaskHandle<E, C> {
     let (task, command_tx) = HybridTimerTask::new_default();
     let handle = HybridTimerTaskHandle::new(command_tx.clone());
     
@@ -1134,7 +1133,7 @@ mod tests {
     /// 创建测试用的定时器条目
     /// Create test timer entries
     #[allow(unused)]
-    fn create_test_timer_entries<E: EventDataTrait>(count: usize) -> Vec<TimerEntry<E>> {
+    fn create_test_timer_entries<E: EventDataTrait>(count: usize) -> Vec<TimerEntry<E, SenderCallback<E>>> {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let mut entries = Vec::with_capacity(count);
         let factory = crate::timer::event::traits::EventFactory::<E>::new();
@@ -1145,7 +1144,7 @@ mod tests {
                 i as u64, // id
                 (i % 10000) as u32, // connection_id
                 E::default(),
-                tx.clone(),
+                SenderCallback::new(tx.clone()),
             );
             
             entries.push(TimerEntry {
@@ -1160,7 +1159,7 @@ mod tests {
 
     /// 创建测试用的定时器注册
     /// Create test timer registrations
-    fn create_test_timer_registrations<E: EventDataTrait>(count: usize) -> Vec<TimerRegistration<E>> {
+    fn create_test_timer_registrations<E: EventDataTrait>(count: usize) -> Vec<TimerRegistration<E, SenderCallback<E>>> {
         let (tx, _rx) = tokio::sync::mpsc::channel(count);
         let mut registrations = Vec::with_capacity(count);
         
@@ -1169,7 +1168,7 @@ mod tests {
                 connection_id: (i % 1000) as u32,
                 delay: Duration::from_millis(100 + (i % 1000) as u64),
                 timeout_event: E::default(),
-                callback_tx: tx.clone(),
+                callback: SenderCallback::new(tx.clone()),
             });
         }
         
@@ -1181,7 +1180,7 @@ mod tests {
         println!("\n🏷️  基本功能测试");
         println!("================");
         
-        let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent>::new_default();
+        let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent, SenderCallback<TestTimeoutEvent>>::new_default();
         let handle = HybridTimerTaskHandle::new(command_tx);
         
         // 启动任务在后台
@@ -1198,7 +1197,7 @@ mod tests {
                 event_type: "test".to_string(),
                 payload: vec![1, 2, 3],
             },
-            callback_tx,
+            callback: SenderCallback::new(callback_tx),
         };
         
         let _timer_handle = handle.register_timer(registration).await.expect("Failed to register timer");
@@ -1221,7 +1220,7 @@ mod tests {
         println!("\n📦 批量操作测试");
         println!("================");
         
-        let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent>::new_default();
+        let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent, SenderCallback<TestTimeoutEvent>>::new_default();
         let handle = HybridTimerTaskHandle::new(command_tx);
         
         // 启动任务在后台
@@ -1266,7 +1265,7 @@ mod tests {
         println!("\n🔗 连接管理测试");
         println!("================");
         
-        let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent>::new_default();
+        let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent, SenderCallback<TestTimeoutEvent>>::new_default();
         let handle = HybridTimerTaskHandle::new(command_tx);
         
         // 启动任务在后台
@@ -1289,7 +1288,7 @@ mod tests {
                         event_type: format!("conn_{}_timer_{}", conn_id, i),
                         payload: vec![conn_id as u8, i as u8],
                     },
-                    callback_tx,
+                    callback: SenderCallback::new(callback_tx),
                 };
                 
                 let timer_handle = handle.register_timer(registration).await.expect("Failed to register timer");
@@ -1333,7 +1332,7 @@ mod tests {
         println!("对比不同批量大小下的混合处理系统性能");
         println!();
 
-        let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent>::new(2048, 32);
+        let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent, SenderCallback<TestTimeoutEvent>>::new(2048, 32);
         let handle = HybridTimerTaskHandle::new(command_tx.clone());
         
         // 启动任务在后台
@@ -1485,7 +1484,7 @@ mod tests {
         println!("\n💪 混合定时器系统压力测试");
         println!("=========================");
         
-        let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent>::new(4096, 64);
+        let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent, SenderCallback<TestTimeoutEvent>>::new(4096, 64);
         let handle = HybridTimerTaskHandle::new(command_tx);
         
         // 启动任务在后台
@@ -1581,7 +1580,7 @@ mod tests {
         println!("\n🧠 内存效率测试");
         println!("================");
         
-        let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent>::new_default();
+        let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent, SenderCallback<TestTimeoutEvent>>::new_default();
         let handle = HybridTimerTaskHandle::new(command_tx);
         
         // 启动任务在后台
@@ -1661,7 +1660,7 @@ mod tests {
         for (threshold, name) in threshold_tests {
             println!("测试 {} (阈值: {})", name, threshold);
             
-            let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent>::new(1024, threshold);
+            let (task, command_tx) = HybridTimerTask::<TestTimeoutEvent, SenderCallback<TestTimeoutEvent>>::new(1024, threshold);
             let handle = HybridTimerTaskHandle::new(command_tx);
             
             // 启动任务

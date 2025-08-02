@@ -9,12 +9,14 @@
 //! information, avoiding complex indirect mapping relationships.
 
 use crate::{core::reliability::retransmission::RetransmissionFrameInfo, timer::{
-    actor::{ActorTimerId, TimerActorHandle},
-    event::ConnectionId,
+    actor::{ActorTimerId, SenderTimerActorHandle},
+    event::{ConnectionId, TimerEventData},
+    task::types::SenderTimerRegistration,
 }};
 use crate::packet::frame::{Frame, RetransmissionContext};
+use crate::core::endpoint::timing::TimeoutEvent;
 use std::collections::BTreeMap;
-use tokio::time::{Duration, Instant};
+use tokio::{sync::mpsc, time::{Duration, Instant}};
 use tracing::{debug, trace, warn};
 
 /// 带定时器的在途数据包
@@ -97,7 +99,11 @@ pub struct PacketTimerManager {
     
     /// 定时器Actor句柄
     /// Timer actor handle
-    timer_actor: TimerActorHandle,
+    timer_actor: SenderTimerActorHandle,
+    
+    /// 定时器事件发送通道
+    /// Timer event sender channel
+    timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,
     
     /// 在途数据包映射：序列号 -> 数据包
     /// In-flight packets map: sequence number -> packet
@@ -111,10 +117,15 @@ pub struct PacketTimerManager {
 impl PacketTimerManager {
     /// 创建新的数据包定时器管理器
     /// Create new packet timer manager
-    pub fn new(connection_id: ConnectionId, timer_actor: TimerActorHandle) -> Self {
+    pub fn new(
+        connection_id: ConnectionId, 
+        timer_actor: SenderTimerActorHandle,
+        timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,
+    ) -> Self {
         Self {
             connection_id,
             timer_actor,
+            timeout_tx,
             in_flight_packets: BTreeMap::new(),
             timer_to_sequence: BTreeMap::new(),
         }
@@ -324,13 +335,25 @@ impl PacketTimerManager {
     /// 调度重传定时器（使用新的基于数据包的超时事件）
     /// Schedule retransmission timer (using new packet-based timeout event)
     async fn schedule_retransmission_timer(&mut self, seq: u32, rto: Duration) -> Result<ActorTimerId, String> {
-        // 使用新的基于数据包的重传超时定时器注册
-        // Use new packet-based retransmission timeout timer registration
-        match self.timer_actor.register_packet_retransmission_timer(
+        // 使用新的基于数据包的重传超时定时器注册，传递正确的回调通道
+        // Use new packet-based retransmission timeout timer registration with correct callback channel
+        // 使用PacketRetransmissionTimeout事件
+        // Use PacketRetransmissionTimeout event
+        let timeout_event = TimeoutEvent::PacketRetransmissionTimeout {
+            sequence_number: seq,
+            timer_id: 0, // 这里先设为0，实际的timer_id会由Actor分配
+        };
+        
+        // 创建定时器注册
+        // Create timer registration
+        let registration = SenderTimerRegistration::with_sender(
             self.connection_id,
-            seq, // 直接使用序列号，不需要转换
             rto,
-        ).await {
+            timeout_event,
+            self.timeout_tx.clone(),
+        );
+        
+        match self.timer_actor.register_timer(registration).await {
             Ok(timer_id) => {
                 trace!(
                     seq = seq,
@@ -350,15 +373,15 @@ impl PacketTimerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::timer::start_timer_actor;
     use crate::timer::start_hybrid_timer_task;
     use tokio::time::Duration;
     
     #[tokio::test]
     async fn test_packet_timer_manager_basic() {
         let timer_handle = start_hybrid_timer_task();
-        let timer_actor = start_timer_actor(timer_handle.clone(), None);
-        let mut manager = PacketTimerManager::new(123, timer_actor);
+        let timer_actor = crate::timer::actor::start_sender_timer_actor(timer_handle.clone(), None);
+        let (timeout_tx, _timeout_rx) = mpsc::channel(32);
+        let mut manager = PacketTimerManager::new(123, timer_actor, timeout_tx);
         
         // 创建测试帧
         let frame = Frame::new_push(100, 1, 1, 1024, 0, b"test".to_vec().into());
@@ -381,15 +404,16 @@ mod tests {
     #[tokio::test]
     async fn test_packet_timer_manager_retransmission() {
         let timer_handle = start_hybrid_timer_task();
-        let timer_actor = start_timer_actor(timer_handle.clone(), None);
-        let mut manager = PacketTimerManager::new(123, timer_actor);
+        let timer_actor = crate::timer::actor::start_sender_timer_actor(timer_handle.clone(), None);
+        let (timeout_tx, _timeout_rx) = mpsc::channel(32);
+        let mut manager = PacketTimerManager::new(123, timer_actor, timeout_tx);
         
         // 创建测试帧和上下文
         let frame = Frame::new_push(100, 1, 1, 1024, 0, b"test".to_vec().into());
         let now = Instant::now();
         let rto = Duration::from_millis(10); // 短超时便于测试
         
-        let context = RetransmissionContext {
+        let _context = RetransmissionContext {
             local_cid: 100,
             current_peer_cid: 200,
             protocol_version: 1,

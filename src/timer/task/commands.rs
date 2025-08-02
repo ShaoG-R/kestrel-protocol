@@ -1,11 +1,10 @@
-//! 定时器任务命令定义
-//! Timer task command definitions
+//! 定时器任务命令定义（完全泛型版本）
+//! Timer task command definitions (Fully generic version)
 //!
-//! 本模块包含定时器任务系统的命令枚举、错误类型和统计信息，
-//! 定义了客户端与定时器任务之间的通信协议。
+//! 本模块提供完全基于泛型的定时器任务命令系统，支持零成本抽象。
 //!
-//! This module contains command enums, error types, and statistics for the timer task system,
-//! defining the communication protocol between clients and the timer task.
+//! This module provides a fully generic-based timer task command system
+//! that supports zero-cost abstractions.
 
 use crate::timer::{
     event::ConnectionId,
@@ -16,24 +15,28 @@ use tokio::sync::oneshot;
 
 use super::types::{
     TimerRegistration, BatchTimerRegistration, BatchTimerCancellation,
-    BatchTimerResult, TimerHandle,
+    BatchTimerResult, TimerHandle, TimerCallback,
 };
 
-/// 定时器任务命令
-/// Timer task commands
+/// 定时器任务命令（泛型版本）
+/// Timer task commands (generic version)
 #[derive(Debug)]
-pub enum TimerTaskCommand<E: EventDataTrait> {
+pub enum TimerTaskCommand<E, C> 
+where
+    E: EventDataTrait,
+    C: TimerCallback<E>,
+{
     /// 注册定时器
     /// Register timer
     RegisterTimer {
-        registration: TimerRegistration<E>,
-        response_tx: oneshot::Sender<Result<TimerHandle<E>, TimerError>>,
+        registration: TimerRegistration<E, C>,
+        response_tx: oneshot::Sender<Result<TimerHandle<E, C>, TimerError>>,
     },
     /// 批量注册定时器
     /// Batch register timers
     BatchRegisterTimers {
-        batch_registration: BatchTimerRegistration<E>,
-        response_tx: oneshot::Sender<BatchTimerResult<TimerHandle<E>>>,
+        batch_registration: BatchTimerRegistration<E, C>,
+        response_tx: oneshot::Sender<BatchTimerResult<TimerHandle<E, C>>>,
     },
     /// 取消定时器
     /// Cancel timer
@@ -109,3 +112,12 @@ impl std::fmt::Display for TimerTaskStats {
         )
     }
 }
+
+/// 常用的命令类型别名
+/// Common command type aliases
+pub type SenderTimerTaskCommand<E> = TimerTaskCommand<E, super::types::SenderCallback<E>>;
+pub type NoOpTimerTaskCommand<E> = TimerTaskCommand<E, super::types::NoOpCallback<E>>;
+
+/// 闭包回调的命令类型（需要在使用时指定具体的闭包类型）
+/// Closure callback command type (specific closure type needs to be specified when used)
+pub type ClosureTimerTaskCommand<E, F> = TimerTaskCommand<E, super::types::ClosureCallback<E, F>>;

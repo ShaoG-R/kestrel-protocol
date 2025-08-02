@@ -53,6 +53,7 @@ pub use async_dispatcher::AsyncEventDispatcher;
 
 #[cfg(test)]
 mod tests {
+    use crate::timer::task::types::SenderCallback;
     use super::*;
     use crate::timer::event::TimerEvent;
     use crate::timer::event::traits::{EventDataTrait, EventFactory};
@@ -100,13 +101,13 @@ mod tests {
         
         // 测试空批量
         let empty_entries = vec![];
-        let result = processor.process_batch(&empty_entries);
+        let result = processor.process_batch::<SenderCallback<TimeoutEvent>>(&empty_entries);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
         
         // 测试小批量（触发SIMD优化）
         let small_entries = create_test_timer_entries(8);
-        let result = processor.process_batch(&small_entries);
+        let result = processor.process_batch::<SenderCallback<TimeoutEvent>>(&small_entries);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 8);
         
@@ -301,7 +302,7 @@ mod tests {
         
         // 测试空批量处理
         let empty_batch = vec![];
-        let result = system.process_timer_batch(empty_batch).await;
+        let result = system.process_timer_batch::<SenderCallback<TimeoutEvent>>(empty_batch).await;
         assert!(result.is_ok());
         let processed = result.unwrap();
         assert_eq!(processed.processed_count, 0);
@@ -354,14 +355,14 @@ mod tests {
         // 创建测试数据 - 简化版本，不依赖TimerEvent结构
         let test_entries = vec![];  // 空测试，避免复杂的依赖关系
 
-        let result = processor.process_batch(&test_entries);
+        let result = processor.process_batch::<SenderCallback<TimeoutEvent>>(&test_entries);
         assert!(result.is_ok());
         let processed = result.unwrap();
         assert_eq!(processed.len(), 0);
     }
 
     /// 创建测试用的定时器条目 (使用智能工厂)
-    fn create_test_timer_entries<E: EventDataTrait>(count: usize) -> Vec<TimerEntry<E>> {
+    fn create_test_timer_entries<E: EventDataTrait>(count: usize) -> Vec<TimerEntry<E, SenderCallback<E>>> {
         let (tx, _rx) = mpsc::channel(1);
         let mut entries = Vec::with_capacity(count);
         let factory = EventFactory::<E>::new(); // 智能策略选择工厂
@@ -372,7 +373,7 @@ mod tests {
                 i as u64, // id
                 (i % 10000) as u32, // connection_id
                 E::default(),
-                tx.clone(),
+                SenderCallback::new(tx.clone()),
             );
             
             entries.push(TimerEntry {

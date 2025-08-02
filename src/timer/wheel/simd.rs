@@ -4,13 +4,14 @@
 use crate::timer::event::traits::EventDataTrait;
 use crate::timer::event::{ConnectionId, TimerEvent};
 use crate::timer::wheel::entry::TimerEntryId;
+use crate::timer::task::types::TimerCallback;
 use std::time::Duration;
 use tokio::time::Instant;
 use wide::{u32x8, u64x4};
 
 /// SIMD优化相关的实现
 /// SIMD optimization implementations
-impl<E: EventDataTrait> super::core::TimingWheel<E> {
+impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
     /// SIMD优化的批量元数据计算（高性能安全实现）
     /// SIMD optimized batch metadata calculation (high-performance safe implementation)
     ///
@@ -18,7 +19,7 @@ impl<E: EventDataTrait> super::core::TimingWheel<E> {
     /// Use vectorization-friendly operations and memory layout optimization for automatic SIMD
     pub(super) fn simd_calculate_batch_metadata(
         &self,
-        timers: &[(Duration, TimerEvent<E>)],
+        timers: &[(Duration, TimerEvent<E, C>)],
         start_id: TimerEntryId,
     ) -> (Vec<TimerEntryId>, Vec<Instant>, Vec<usize>) {
         let len = timers.len();

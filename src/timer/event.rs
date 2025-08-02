@@ -20,9 +20,9 @@ pub mod memory_pool;
 
 use std::fmt;
 use std::fmt::Debug;
-use tokio::sync::mpsc;
 use crate::timer::event::traits::EventDataTrait;
 use crate::timer::event::pool::TimerEventPool;
+use crate::timer::task::types::TimerCallback;
 
 /// 定时器事件ID，用于唯一标识一个定时器
 /// Timer event ID, used to uniquely identify a timer
@@ -101,7 +101,7 @@ impl<E: EventDataTrait> TimerEventData<E> {
 /// 定时器事件（优化版本，支持对象池）
 /// Timer event (optimized version with object pool support)
 #[derive(Debug)]
-pub struct TimerEvent<E: EventDataTrait> {
+pub struct TimerEvent<E: EventDataTrait, C: TimerCallback<E>> {
     /// 事件ID
     /// Event ID
     pub id: TimerEventId,
@@ -110,21 +110,21 @@ pub struct TimerEvent<E: EventDataTrait> {
     pub data: TimerEventData<E>,
     /// 回调通道，用于向注册者发送超时通知
     /// Callback channel, used to send timeout notifications to registrant
-    pub callback_tx: mpsc::Sender<TimerEventData<E>>,
+    pub callback: C,
 }
 
-impl<E: EventDataTrait> TimerEvent<E> {
+impl<E: EventDataTrait, C: TimerCallback<E>> TimerEvent<E, C> {
     /// 创建新的定时器事件（传统方式）
     /// Create new timer event (traditional way)
     pub fn new(
         id: TimerEventId,
         data: TimerEventData<E>,
-        callback_tx: mpsc::Sender<TimerEventData<E>>,
+        callback: C,
     ) -> Self {
         Self {
             id,
             data,
-            callback_tx,
+            callback,
         }
     }
 
@@ -135,12 +135,12 @@ impl<E: EventDataTrait> TimerEvent<E> {
         id: TimerEventId,
         connection_id: ConnectionId,
         timeout_event: E,
-        callback_tx: mpsc::Sender<TimerEventData<E>>,
+        callback: C,
     ) -> Self {
         Self {
             id,
             data: factory.create_event(connection_id, timeout_event),
-            callback_tx,
+            callback,
         }
     }
 
@@ -151,7 +151,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
         factory: &traits::EventFactory<E>,
         start_id: TimerEventId,
         requests: &[(ConnectionId, E)],
-        callback_txs: &[mpsc::Sender<TimerEventData<E>>],
+        callback_txs: &[C],
     ) -> Vec<Self> {
         if requests.len() != callback_txs.len() {
             panic!("Requests and callback_txs must have the same length");
@@ -170,7 +170,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
             .map(|(index, (data, callback_tx))| Self {
                 id: start_id + index as u64,
                 data,
-                callback_tx: callback_tx.clone(),
+                callback: callback_tx.clone(),
             })
             .collect()
     }
@@ -186,10 +186,9 @@ impl<E: EventDataTrait> TimerEvent<E> {
         // Use smart factory to create data for sending (zero-cost for Copy types, smart management for non-Copy types)
         let data_for_send = factory.create_event(connection_id, event_type);
         
-        if let Err(err) = self.callback_tx.send(data_for_send).await {
+        if let Err(_err) = self.callback.on_timeout(data_for_send).await {
             tracing::warn!(
                 timer_id,
-                error = %err,
                 "Failed to send timer event to callback channel"
             );
         } else {
@@ -207,7 +206,7 @@ impl<E: EventDataTrait> TimerEvent<E> {
 
 }
 
-impl<E: EventDataTrait> fmt::Display for TimerEvent<E> {
+impl<E: EventDataTrait, C: TimerCallback<E>> fmt::Display for TimerEvent<E, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,

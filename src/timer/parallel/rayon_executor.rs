@@ -5,6 +5,7 @@ use crate::timer::event::traits::EventDataTrait;
 use crate::timer::parallel::simd_processor::SIMDTimerProcessor;
 use crate::timer::parallel::types::ProcessedTimerData;
 use crate::timer::wheel::TimerEntry;
+use crate::timer::task::types::TimerCallback;
 use rayon::prelude::*;
 
 /// Rayon批量执行器
@@ -26,9 +27,9 @@ impl RayonBatchExecutor {
 
     /// 使用Rayon + SIMD并行处理 (异步版本)
     /// Parallel processing using Rayon + SIMD (async version)
-    pub async fn parallel_process_with_simd<E: EventDataTrait>(
+    pub async fn parallel_process_with_simd<E: EventDataTrait, C: TimerCallback<E>>(
         &mut self,
-        timer_entries: Vec<TimerEntry<E>>,
+        timer_entries: Vec<TimerEntry<E, C>>,
         simd_processor: &mut SIMDTimerProcessor<E>,
     ) -> Result<Vec<ProcessedTimerData<E>>, Box<dyn std::error::Error + Send + Sync>> {
         self.parallel_process_with_simd_sync(timer_entries, simd_processor)
@@ -36,9 +37,9 @@ impl RayonBatchExecutor {
 
     /// 使用Rayon + SIMD并行处理 (同步版本)
     /// Parallel processing using Rayon + SIMD (sync version)
-    pub fn parallel_process_with_simd_sync<E: EventDataTrait>(
+    pub fn parallel_process_with_simd_sync<E: EventDataTrait, C: TimerCallback<E>>(
         &mut self,
-        timer_entries: Vec<TimerEntry<E>>,
+        timer_entries: Vec<TimerEntry<E, C>>,
         simd_processor: &mut SIMDTimerProcessor<E>,
     ) -> Result<Vec<ProcessedTimerData<E>>, Box<dyn std::error::Error + Send + Sync>> {
         // 使用Rayon并行处理多个块

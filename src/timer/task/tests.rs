@@ -1,29 +1,25 @@
-//! 全局定时器任务测试
-//! Global timer task tests
+//! 全局定时器任务测试（完全泛型版本）
+//! Global timer task tests (Fully generic version)
 //!
-//! 本模块包含全局定时器任务系统的完整测试套件，包括基本功能测试、
-//! 性能基准测试、SIMD优化验证和兼容性测试。
+//! 本模块包含适应完全泛型系统的定时器任务测试套件。
 //!
-//! This module contains comprehensive test suites for the global timer task system,
-//! including basic functionality tests, performance benchmarks, SIMD optimization
-//! verification, and compatibility tests.
+//! This module contains timer task test suites adapted for the fully generic system.
 
 #[cfg(test)]
 mod tests {
     use super::super::{
-        types::{TimerRegistration, BatchTimerRegistration, BatchTimerCancellation},
+        types::{SenderTimerRegistration, BatchTimerRegistration, BatchTimerCancellation},
         commands::TimerError,
-        // Removed old global timer task import
     };
     use crate::core::endpoint::timing::TimeoutEvent;
     use crate::timer::hybrid_system::start_hybrid_timer_task;
     use tokio::{sync::mpsc, time::{sleep, Duration, Instant}};
-
+    use crate::timer::task::types::SenderCallback;
     #[tokio::test]
     async fn test_timer_task_creation() {
         use crate::timer::hybrid_system::HybridTimerTask;
         
-        let (_task, _command_tx) = HybridTimerTask::<TimeoutEvent>::new_default();
+        let (_task, _command_tx) = HybridTimerTask::<TimeoutEvent, SenderCallback<TimeoutEvent>>::new_default();
         // Note: We can't directly access timing_wheel.timer_count() and connection_timers
         // due to private fields. This would need getters in the implementation.
         // For now, we'll just test that the task was created successfully.
@@ -31,11 +27,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_and_cancel_timer() {
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, mut callback_rx) = mpsc::channel(1);
         
         // 注册定时器
-        let registration = TimerRegistration::new(
+        let registration = SenderTimerRegistration::with_sender(
             1,
             Duration::from_millis(100),
             TimeoutEvent::IdleTimeout,
@@ -57,11 +53,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_timer_expiration() {
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, mut callback_rx) = mpsc::channel(1);
         
         // 注册定时器
-        let registration = TimerRegistration::new(
+        let registration = SenderTimerRegistration::with_sender(
             1,
             Duration::from_millis(100),
             TimeoutEvent::IdleTimeout,
@@ -80,12 +76,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear_connection_timers() {
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, _callback_rx) = mpsc::channel(1);
         
         // 为同一个连接注册多个定时器
         for i in 0..3 {
-            let registration = TimerRegistration::new(
+            let registration = SenderTimerRegistration::with_sender(
                 1,
                 Duration::from_millis(1000 + i * 100),
                 TimeoutEvent::IdleTimeout,
@@ -103,12 +99,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_timer_stats() {
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, _callback_rx) = mpsc::channel(1);
         
         // 注册几个定时器
         for i in 1..=3 {
-            let registration = TimerRegistration::new(
+            let registration = SenderTimerRegistration::with_sender(
                 i,
                 Duration::from_secs(10),
                 TimeoutEvent::IdleTimeout,
@@ -127,7 +123,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_timer_types() {
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, mut callback_rx) = mpsc::channel(10);
         
         // 注册不同类型的定时器，使用更短的延迟
@@ -139,7 +135,7 @@ mod tests {
         ];
         
         for (i, timeout_type) in timeout_types.iter().enumerate() {
-            let registration = TimerRegistration::new(
+            let registration = SenderTimerRegistration::with_sender(
                 i as u32 + 1,
                 Duration::from_millis(120 + i as u64 * 50), // 120ms, 170ms, 220ms, 270ms - 跨越多个槽位
                 timeout_type.clone(),
@@ -178,11 +174,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_timer_replacement() {
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, mut callback_rx) = mpsc::channel(10);
         
         // 注册一个长时间的定时器
-        let registration1 = TimerRegistration::new(
+        let registration1 = SenderTimerRegistration::with_sender(
             1,
             Duration::from_secs(5),
             TimeoutEvent::IdleTimeout,
@@ -191,7 +187,7 @@ mod tests {
         handle.register_timer(registration1).await.unwrap();
         
         // 立即注册一个短时间的同类型定时器（应该替换前一个）
-        let registration2 = TimerRegistration::new(
+        let registration2 = SenderTimerRegistration::with_sender(
             1,
             Duration::from_millis(100),
             TimeoutEvent::IdleTimeout,
@@ -220,7 +216,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_timer_performance() {
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, _callback_rx) = mpsc::channel(1000);
         
         // 注册大量定时器
@@ -228,7 +224,7 @@ mod tests {
         let start_time = Instant::now();
         
         for i in 0..timer_count {
-            let registration = TimerRegistration::new(
+            let registration = SenderTimerRegistration::with_sender(
                 i,
                 Duration::from_secs(60), // 长时间定时器
                 TimeoutEvent::IdleTimeout,
@@ -257,7 +253,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_timer_performance() {
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, mut callback_rx) = mpsc::channel(10000);
         
         // 测试批量到期处理的性能
@@ -268,7 +264,7 @@ mod tests {
         // 注册相同延迟的定时器以确保它们同时到期（测试批量处理）
         // Register timers with same delay to ensure they expire together (test batch processing)
         for i in 0..timer_count {
-            let registration = TimerRegistration::new(
+            let registration = SenderTimerRegistration::with_sender(
                 i,
                 Duration::from_millis(200), // 统一200ms延迟
                 TimeoutEvent::IdleTimeout,
@@ -326,7 +322,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_performance() {
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, _callback_rx) = mpsc::channel(1000);
         
         // 测试缓存优化的性能
@@ -335,7 +331,7 @@ mod tests {
         
         // 注册定时器
         for i in 0..timer_count {
-            let registration = TimerRegistration::new(
+            let registration = SenderTimerRegistration::with_sender(
                 i,
                 Duration::from_secs(60 + i as u64), // 不同到期时间
                 TimeoutEvent::IdleTimeout,
@@ -362,7 +358,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_batch_timer_performance_comparison() {
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, _callback_rx) = mpsc::channel(1000);
         
         let timer_count = 1000;
@@ -373,7 +369,7 @@ mod tests {
         let mut individual_handles = Vec::with_capacity(timer_count);
         
         for i in 0..timer_count {
-            let registration = TimerRegistration::new(
+            let registration = SenderTimerRegistration::with_sender(
                 i as u32,
                 Duration::from_secs(60), // 长时间定时器
                 TimeoutEvent::IdleTimeout,
@@ -401,7 +397,7 @@ mod tests {
         // 创建批量注册请求
         let mut batch_registration = BatchTimerRegistration::with_capacity(timer_count);
         for i in 0..timer_count {
-            let registration = TimerRegistration::new(
+            let registration = SenderTimerRegistration::with_sender(
                 (i + timer_count) as u32, // 避免ID冲突
                 Duration::from_secs(60),
                 TimeoutEvent::IdleTimeout,
@@ -463,7 +459,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_ultra_high_performance_batch_operations() {
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, _callback_rx) = mpsc::channel(10000);
         
         // 测试超大批量操作性能
@@ -476,7 +472,7 @@ mod tests {
             // 创建批量注册请求
             let mut batch_registration = BatchTimerRegistration::with_capacity(batch_size);
             for i in 0..batch_size {
-                let registration = TimerRegistration::new(
+                let registration = SenderTimerRegistration::with_sender(
                     i as u32,
                     Duration::from_secs(60), // 长时间定时器避免触发
                     TimeoutEvent::IdleTimeout,
@@ -541,7 +537,7 @@ mod tests {
         
         // 测试1：正常启动和关闭
         println!("\n📋 测试1: 正常启动和关闭");
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         
         // 验证任务能够正常响应
         let stats = handle.get_stats().await.unwrap();
@@ -555,7 +551,7 @@ mod tests {
         
         // 测试2：重复关闭的容错性
         println!("\n📋 测试2: 重复关闭的容错性");
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         
         // 第一次关闭
         handle.shutdown().await.unwrap();
@@ -577,7 +573,7 @@ mod tests {
         // 测试3：关闭后的操作应该失败
         println!("\n📋 测试3: 关闭后的操作应该失败");
         let (callback_tx, _callback_rx) = mpsc::channel(1);
-        let registration = TimerRegistration::new(
+        let registration = SenderTimerRegistration::with_sender(
             1,
             Duration::from_millis(100),
             TimeoutEvent::IdleTimeout,
@@ -606,7 +602,7 @@ mod tests {
         println!("\n🛠️ 全局定时器任务错误恢复测试");
         println!("========================================");
         
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         
         // 测试1：无效定时器ID的批量取消
         println!("\n📋 测试1: 无效定时器ID的批量取消");
@@ -634,7 +630,7 @@ mod tests {
         // 先注册一些有效的定时器
         let mut valid_handles = Vec::new();
         for i in 0..3 {
-            let registration = TimerRegistration::new(
+            let registration = SenderTimerRegistration::with_sender(
                 i,
                 Duration::from_secs(60), // 长时间避免自动触发
                 TimeoutEvent::IdleTimeout,
@@ -683,7 +679,7 @@ mod tests {
         println!("\n🔗 连接生命周期管理测试");
         println!("========================================");
         
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, mut callback_rx) = mpsc::channel(100);
         
         // 测试1：连接的定时器隔离
@@ -691,7 +687,7 @@ mod tests {
         
         // 为连接1注册定时器
         for i in 0..5 {
-            let registration = TimerRegistration::new(
+            let registration = SenderTimerRegistration::with_sender(
                 1, // 连接1
                 Duration::from_secs(60 + i), // 不同的超时时间
                 TimeoutEvent::IdleTimeout,
@@ -702,7 +698,7 @@ mod tests {
         
         // 为连接2注册定时器
         for i in 0..3 {
-            let registration = TimerRegistration::new(
+            let registration = SenderTimerRegistration::with_sender(
                 2, // 连接2
                 Duration::from_secs(70 + i),
                 TimeoutEvent::PacketRetransmissionTimeout { 
@@ -750,7 +746,7 @@ mod tests {
         handle.clear_connection_timers(2).await.unwrap();
         
         // 重新使用连接ID 1
-        let registration = TimerRegistration::new(
+        let registration = SenderTimerRegistration::with_sender(
             1, // 重用连接1的ID
             Duration::from_millis(100),
             TimeoutEvent::ConnectionTimeout,
@@ -779,7 +775,7 @@ mod tests {
         println!("\n⚡ 高负载批量处理测试");
         println!("========================================");
         
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, _callback_rx) = mpsc::channel(50000);
         
         // 测试1：极大批量注册
@@ -788,7 +784,7 @@ mod tests {
         let mut batch_registration = BatchTimerRegistration::with_capacity(batch_size);
         
         for i in 0..batch_size {
-            let registration = TimerRegistration::new(
+            let registration = SenderTimerRegistration::with_sender(
                 (i % 1000) as u32, // 1000个不同连接
                 Duration::from_secs(3600), // 1小时超时，避免触发
                 TimeoutEvent::IdleTimeout,
@@ -845,7 +841,7 @@ mod tests {
             // 注册
             let mut batch_registration = BatchTimerRegistration::with_capacity(batch_size_per_iteration);
             for i in 0..batch_size_per_iteration {
-                let registration = TimerRegistration::new(
+                let registration = SenderTimerRegistration::with_sender(
                     (iteration * batch_size_per_iteration + i) as u32,
                     Duration::from_secs(3600),
                     TimeoutEvent::IdleTimeout,
@@ -880,7 +876,7 @@ mod tests {
         println!("\n🔒 并发访问安全性测试");
         println!("========================================");
         
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, _callback_rx) = mpsc::channel(10000);
         
         // 测试1：并发注册和取消
@@ -900,7 +896,7 @@ mod tests {
                 
                 // 注册定时器
                 for i in 0..timers_per_task {
-                    let registration = TimerRegistration::new(
+                    let registration = SenderTimerRegistration::with_sender(
                         (task_id * timers_per_task + i) as u32,
                         Duration::from_secs(60),
                         TimeoutEvent::IdleTimeout,
@@ -949,7 +945,7 @@ mod tests {
                 let mut batch_registration = BatchTimerRegistration::with_capacity(batch_size);
                 
                 for i in 0..batch_size {
-                    let registration = TimerRegistration::new(
+                    let registration = SenderTimerRegistration::with_sender(
                         (100000 + task_id * batch_size + i) as u32, // 避免ID冲突
                         Duration::from_secs(120),
                         TimeoutEvent::PacketRetransmissionTimeout { 
@@ -1059,7 +1055,7 @@ mod tests {
         println!("  ✅ u64x4运算结果正确");
         
         // 测试我们的定时器系统在当前平台的工作情况
-        let handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let handle = start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>();
         let (callback_tx, _callback_rx) = mpsc::channel(100);
         
         // 小批量测试确保基本功能工作
@@ -1067,7 +1063,7 @@ mod tests {
         let mut batch = BatchTimerRegistration::with_capacity(batch_size);
         
         for i in 0..batch_size {
-            let registration = TimerRegistration::new(
+            let registration = SenderTimerRegistration::with_sender(
                 i as u32,
                 Duration::from_millis(1000),
                 TimeoutEvent::IdleTimeout,

@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::timer::event::traits::EventDataTrait;
 use crate::timer::{ProcessedTimerData, TimerEntry};
+use crate::timer::task::types::TimerCallback;
 
 /// 预分配内存池
 /// Pre-allocated memory pool  
@@ -86,7 +87,7 @@ impl<E: EventDataTrait> ZeroAllocProcessor<E> {
     
     /// 处理小批量（使用栈分配）
     /// Process small batch (using stack allocation)
-    pub fn process_small_batch(&mut self, timer_entries: &[TimerEntry<E>]) -> &[ProcessedTimerData<E>] {
+    pub fn process_small_batch<C: TimerCallback<E>>(&mut self, timer_entries: &[TimerEntry<E, C>]) -> &[ProcessedTimerData<E>] {
         if timer_entries.len() <= 64 {
             self.stack_usage = timer_entries.len();
             
@@ -108,7 +109,7 @@ impl<E: EventDataTrait> ZeroAllocProcessor<E> {
     
     /// 处理大批量（使用内存池）
     /// Process large batch (using memory pool)
-    pub fn process_large_batch(&mut self, timer_entries: &[TimerEntry<E>]) -> &[ProcessedTimerData<E>] {
+    pub fn process_large_batch<C: TimerCallback<E>>(&mut self, timer_entries: &[TimerEntry<E, C>]) -> &[ProcessedTimerData<E>] {
         let buffer = self.memory_pool.get_data_buffer();
         buffer.reserve(timer_entries.len());
         
