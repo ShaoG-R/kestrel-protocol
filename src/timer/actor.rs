@@ -515,6 +515,7 @@ impl TimerActor {
             self.remove_timer_from_indices(timer_id, &buffered_timer);
             
             self.stats.optimized_operations += 1;
+            self.stats.total_cancel_requests += 1; // 所有成功的取消操作都应该计数
             trace!(timer_id = timer_id, "Timer cancellation optimized - removed from register buffer");
             return true;
         }
@@ -1300,7 +1301,7 @@ mod tests {
         
         // 测试批量取消
         let cancelled_count = actor_handle.batch_cancel_timers(cancel_entries).await;
-        assert_eq!(cancelled_count, 5); // 应该返回5（全部处理成功）
+        assert_eq!(cancelled_count, 3); // 只有3个实际存在的定时器被取消
         
         // 检查统计信息
         let stats = actor_handle.get_stats().await.unwrap();
@@ -1311,6 +1312,373 @@ mod tests {
         
         // 应该有3个优化操作（从注册缓冲区中移除）
         assert!(stats.optimized_operations >= 3);
+        
+        actor_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_timer_actor_query_timer_info() {
+        let config = TimerActorConfig::default();
+        let timer_handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let actor_handle = start_timer_actor(timer_handle, Some(config));
+        
+        let (callback_tx, _callback_rx) = mpsc::channel(1);
+        
+        // 注册一个定时器
+        let registration = TimerRegistration::new(
+            100,
+            Duration::from_secs(30),
+            TimeoutEvent::IdleTimeout,
+            callback_tx.clone(),
+        );
+        
+        let timer_id = actor_handle.register_timer(registration).await.unwrap();
+        
+        // 查询定时器信息
+        let timer_info = actor_handle.query_timer(timer_id).await;
+        assert!(timer_info.is_some());
+        
+        let info = timer_info.unwrap();
+        assert_eq!(info.timer_id, timer_id);
+        assert_eq!(info.connection_id, 100);
+        assert_eq!(info.timeout_event, TimeoutEvent::IdleTimeout);
+        assert_eq!(info.delay, Duration::from_secs(30));
+        assert!(info.in_buffer); // 应该还在缓冲区中
+        assert!(info.entry_id.is_none()); // 还没有全局条目ID
+        
+        // 查询不存在的定时器
+        let nonexistent_info = actor_handle.query_timer(999999).await;
+        assert!(nonexistent_info.is_none());
+        
+        actor_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_timer_actor_specialized_timers() {
+        let config = TimerActorConfig::default();
+        let timer_handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let actor_handle = start_timer_actor(timer_handle, Some(config));
+        
+        // 测试路径验证定时器
+        let path_timer_id = actor_handle
+            .register_path_validation_timer(100, 1, Duration::from_millis(500))
+            .await.unwrap();
+        assert!(path_timer_id > 0);
+        
+        // 测试重传定时器
+        let retx_timer_id = actor_handle
+            .register_retransmission_timer(100, 12345, Duration::from_millis(100))
+            .await.unwrap();
+        assert!(retx_timer_id > 0);
+        
+        // 测试FIN处理定时器
+        let fin_timer_id = actor_handle
+            .register_fin_processing_timer(100, Duration::from_millis(50))
+            .await.unwrap();
+        assert!(fin_timer_id > 0);
+        
+        // 验证所有定时器都有不同的ID
+        assert_ne!(path_timer_id, retx_timer_id);
+        assert_ne!(retx_timer_id, fin_timer_id);
+        assert_ne!(path_timer_id, fin_timer_id);
+        
+        // 测试统计信息
+        let stats = actor_handle.get_stats().await.unwrap();
+        assert!(stats.total_register_requests > 0);
+        
+        actor_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_timer_actor_cancel_by_id() {
+        let config = TimerActorConfig::default();
+        let timer_handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let actor_handle = start_timer_actor(timer_handle, Some(config));
+        
+        let (callback_tx, _callback_rx) = mpsc::channel(1);
+        
+        // 注册多个定时器
+        let mut timer_ids = Vec::new();
+        for i in 0..3 {
+            let registration = TimerRegistration::new(
+                100 + i,
+                Duration::from_secs(30),
+                TimeoutEvent::IdleTimeout,
+                callback_tx.clone(),
+            );
+            let timer_id = actor_handle.register_timer(registration).await.unwrap();
+            timer_ids.push(timer_id);
+        }
+        
+        // 通过ID取消定时器
+        let cancelled1 = actor_handle.cancel_timer_by_id(timer_ids[0]).await;
+        assert!(cancelled1);
+        
+        let cancelled2 = actor_handle.cancel_timer_by_id(timer_ids[1]).await;
+        assert!(cancelled2);
+        
+        // 再次取消同一个定时器应该返回false
+        let cancelled_again = actor_handle.cancel_timer_by_id(timer_ids[0]).await;
+        assert!(!cancelled_again);
+        
+        // 取消不存在的定时器应该返回false
+        let cancelled_nonexistent = actor_handle.cancel_timer_by_id(999999).await;
+        assert!(!cancelled_nonexistent);
+        
+        actor_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_timer_actor_batch_cancel_by_ids() {
+        let config = TimerActorConfig::default();
+        let timer_handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let actor_handle = start_timer_actor(timer_handle, Some(config));
+        
+        let (callback_tx, _callback_rx) = mpsc::channel(1);
+        
+        // 注册多个定时器
+        let mut timer_ids = Vec::new();
+        for i in 0..5 {
+            let registration = TimerRegistration::new(
+                100 + i,
+                Duration::from_secs(30),
+                TimeoutEvent::IdleTimeout,
+                callback_tx.clone(),
+            );
+            let timer_id = actor_handle.register_timer(registration).await.unwrap();
+            timer_ids.push(timer_id);
+        }
+        
+        // 批量取消定时器（包含一些存在的和一些不存在的ID）
+        let mut cancel_ids = timer_ids[0..3].to_vec(); // 前3个存在的
+        cancel_ids.push(999999); // 不存在的
+        cancel_ids.push(999998); // 不存在的
+        
+        let cancelled_count = actor_handle.batch_cancel_timers_by_ids(cancel_ids).await;
+        assert_eq!(cancelled_count, 3); // 只有3个存在的被取消
+        
+        // 验证剩余的定时器仍然存在
+        let remaining_info = actor_handle.query_timer(timer_ids[3]).await;
+        assert!(remaining_info.is_some());
+        
+        actor_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_timer_actor_connection_cleanup() {
+        let config = TimerActorConfig::default();
+        let timer_handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let actor_handle = start_timer_actor(timer_handle, Some(config));
+        
+        let (callback_tx, _callback_rx) = mpsc::channel(1);
+        
+        // 为同一个连接注册多种类型的定时器
+        let connection_id = 100;
+        let mut timer_ids = Vec::new();
+        
+        // 空闲超时定时器
+        timer_ids.push(actor_handle.register_timer(TimerRegistration::new(
+            connection_id,
+            Duration::from_secs(30),
+            TimeoutEvent::IdleTimeout,
+            callback_tx.clone(),
+        )).await.unwrap());
+        
+        // 路径验证定时器
+        timer_ids.push(actor_handle.register_path_validation_timer(
+            connection_id, 1, Duration::from_millis(500)
+        ).await.unwrap());
+        
+        // 重传定时器
+        timer_ids.push(actor_handle.register_retransmission_timer(
+            connection_id, 12345, Duration::from_millis(100)
+        ).await.unwrap());
+        
+        // 验证所有定时器都存在
+        for &timer_id in &timer_ids {
+            let info = actor_handle.query_timer(timer_id).await;
+            assert!(info.is_some());
+        }
+        
+        // 取消该连接的所有定时器
+        let cancelled_count = actor_handle.cancel_all_timers(connection_id).await;
+        assert_eq!(cancelled_count, 3);
+        
+        // 验证所有定时器都被取消
+        for &timer_id in &timer_ids {
+            let info = actor_handle.query_timer(timer_id).await;
+            assert!(info.is_none());
+        }
+        
+        actor_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_timer_actor_auto_flush() {
+        let config = TimerActorConfig {
+            batch_threshold: 100, // 设置很高的阈值，不会触发自动批量
+            flush_interval: Duration::from_millis(50), // 短的刷新间隔
+        };
+        
+        let timer_handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let actor_handle = start_timer_actor(timer_handle, Some(config));
+        
+        let (callback_tx, _callback_rx) = mpsc::channel(1);
+        
+        // 注册几个定时器
+        for i in 0..3 {
+            let registration = TimerRegistration::new(
+                100 + i,
+                Duration::from_secs(30),
+                TimeoutEvent::IdleTimeout,
+                callback_tx.clone(),
+            );
+            let _ = actor_handle.register_timer(registration).await.unwrap();
+        }
+        
+        // 等待自动刷新
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        
+        // 检查统计信息
+        let stats = actor_handle.get_stats().await.unwrap();
+        println!("Auto flush stats:");
+        println!("  Auto flush count: {}", stats.auto_flush_count);
+        println!("  Register buffer size: {}", stats.register_buffer_size);
+        
+        // 应该发生了自动刷新
+        assert!(stats.auto_flush_count > 0 || stats.register_buffer_size == 0);
+        
+        actor_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_timer_actor_manual_flush() {
+        let config = TimerActorConfig {
+            batch_threshold: 100, // 设置很高的阈值，不会触发自动批量
+            flush_interval: Duration::from_secs(60), // 长的刷新间隔，不会自动刷新
+        };
+        
+        let timer_handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let actor_handle = start_timer_actor(timer_handle, Some(config));
+        
+        let (callback_tx, _callback_rx) = mpsc::channel(1);
+        
+        // 注册几个定时器
+        for i in 0..3 {
+            let registration = TimerRegistration::new(
+                100 + i,
+                Duration::from_secs(30),
+                TimeoutEvent::IdleTimeout,
+                callback_tx.clone(),
+            );
+            let _ = actor_handle.register_timer(registration).await.unwrap();
+        }
+        
+        // 检查缓冲区有内容
+        let stats_before = actor_handle.get_stats().await.unwrap();
+        assert!(stats_before.register_buffer_size > 0);
+        
+        // 手动刷新
+        let flush_result = actor_handle.flush_buffers().await;
+        assert!(flush_result);
+        
+        // 检查缓冲区被清空
+        let stats_after = actor_handle.get_stats().await.unwrap();
+        assert_eq!(stats_after.register_buffer_size, 0);
+        
+        actor_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_timer_actor_error_handling() {
+        let config = TimerActorConfig::default();
+        let timer_handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let actor_handle = start_timer_actor(timer_handle.clone(), Some(config));
+        
+        // 先关闭actor
+        actor_handle.shutdown().await;
+        
+        // 关闭底层定时器任务
+        timer_handle.shutdown().await.unwrap();
+        
+        let (callback_tx, _callback_rx) = mpsc::channel(1);
+        
+        // 尝试在关闭后注册定时器应该失败
+        let registration = TimerRegistration::new(
+            100,
+            Duration::from_secs(30),
+            TimeoutEvent::IdleTimeout,
+            callback_tx.clone(),
+        );
+        
+        let result = actor_handle.register_timer(registration).await;
+        assert!(result.is_err());
+        
+        // 其他操作也应该失败或返回默认值
+        let stats = actor_handle.get_stats().await;
+        assert!(stats.is_none());
+        
+        let query_result = actor_handle.query_timer(1).await;
+        assert!(query_result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_timer_actor_statistics_tracking() {
+        let config = TimerActorConfig::default();
+        let timer_handle = start_hybrid_timer_task::<TimeoutEvent>();
+        let actor_handle = start_timer_actor(timer_handle, Some(config));
+        
+        let (callback_tx, _callback_rx) = mpsc::channel(1);
+        
+        // 初始统计信息
+        let initial_stats = actor_handle.get_stats().await.unwrap();
+        assert_eq!(initial_stats.total_register_requests, 0);
+        assert_eq!(initial_stats.total_cancel_requests, 0);
+        assert_eq!(initial_stats.optimized_operations, 0);
+        
+        // 注册一些定时器
+        let mut timer_ids = Vec::new();
+        for i in 0..5 {
+            let registration = TimerRegistration::new(
+                100 + i,
+                Duration::from_secs(30),
+                TimeoutEvent::IdleTimeout,
+                callback_tx.clone(),
+            );
+            let timer_id = actor_handle.register_timer(registration).await.unwrap();
+            timer_ids.push(timer_id);
+        }
+        
+        // 批量注册一些定时器
+        let mut batch_registrations = Vec::new();
+        for i in 0..3 {
+            batch_registrations.push(TimerRegistration::new(
+                200 + i,
+                Duration::from_secs(20),
+                TimeoutEvent::PathValidationTimeout,
+                callback_tx.clone(),
+            ));
+        }
+        let _batch_ids = actor_handle.batch_register_timers(batch_registrations).await.unwrap();
+        
+        // 取消一些定时器
+        let cancelled1 = actor_handle.cancel_timer_by_id(timer_ids[0]).await;
+        assert!(cancelled1);
+        
+        let cancelled2 = actor_handle.cancel_all_timers(101).await;
+        assert!(cancelled2 > 0);
+        
+        // 检查最终统计信息
+        let final_stats = actor_handle.get_stats().await.unwrap();
+        println!("Final statistics:");
+        println!("  Total register requests: {}", final_stats.total_register_requests);
+        println!("  Total cancel requests: {}", final_stats.total_cancel_requests);
+        println!("  Active timer count: {}", final_stats.active_timer_count);
+        println!("  Optimized operations: {}", final_stats.optimized_operations);
+        
+        // 验证统计信息的合理性
+        assert!(final_stats.total_register_requests >= 8); // 至少注册了8个定时器
+        assert!(final_stats.total_cancel_requests > 0); // 至少有一些取消操作
         
         actor_handle.shutdown().await;
     }
