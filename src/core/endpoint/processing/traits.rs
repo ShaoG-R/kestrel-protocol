@@ -250,10 +250,14 @@ mod tests {
                 peer_recv_window: 1000,
                 current_state: ConnectionState::Established,
                 sent_frames: Arc::new(Mutex::new(VecDeque::new())),
-                reliability: ReliabilityLayer::new(
-                    crate::config::Config::default(),
-                    Box::new(crate::core::reliability::congestion::vegas::Vegas::new(crate::config::Config::default()))
-                ),
+                reliability: {
+                    let config = crate::config::Config::default();
+                    let congestion_control = Box::new(crate::core::reliability::congestion::vegas::Vegas::new(config.clone()));
+                    let connection_id = 1; // Test connection ID
+                    let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent>();
+                    let timer_actor = crate::timer::start_timer_actor(timer_handle, None);
+                    ReliabilityLayer::new(config, congestion_control, connection_id, timer_actor)
+                },
                 command_tx,
             };
             (mock, command_rx)

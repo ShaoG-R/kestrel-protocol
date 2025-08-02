@@ -319,15 +319,32 @@ impl ReliabilityLayer {
             // 为需要可靠传输的帧注册重传超时定时器
             // Register retransmission timeout timer for frames that need reliable transmission
             if frame.needs_reliability_tracking() {
-                // Note: Timer registration will be done asynchronously via endpoint
-                // We'll need to modify the caller to handle timer registration
-                // 注意：定时器注册将通过端点异步完成
-                // 我们需要修改调用者来处理定时器注册
-                trace!(seq = frame.sequence_number(), "Frame needs retransmission timer");
+                if let Some(seq) = frame.sequence_number() {
+                    self.active_retx_sequences.insert(seq);
+                    trace!(seq = seq, "Frame marked for retransmission timer registration");
+                }
             }
         }
 
         frames
+    }
+
+    /// 为刚刚打包的帧注册重传定时器
+    /// Register retransmission timers for just packetized frames
+    pub async fn register_timers_for_packetized_frames(&mut self) -> usize {
+        // 收集需要注册定时器的序列号
+        // Collect sequence numbers that need timer registration
+        let seq_nums: Vec<u32> = self.active_retx_sequences.iter().copied().collect();
+        
+        if seq_nums.is_empty() {
+            return 0;
+        }
+        
+        trace!(count = seq_nums.len(), "Registering timers for packetized frames");
+        
+        // 批量注册定时器
+        // Batch register timers
+        self.batch_register_retransmission_timers(&seq_nums).await
     }
 
     /// Packetize stream data for 0-RTT scenario with intelligent packet splitting.

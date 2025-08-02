@@ -79,7 +79,7 @@ impl<T: Transport> Endpoint<T> {
             if fin_seen {
                 // The FIN has been reached in the byte stream. No more data will arrive.
                 // We can now set the flag to schedule the EOF signal for the user stream.
-                self.timing.set_fin_pending_eof(true);
+                self.timing.set_fin_pending_eof(true).await;
             }
             if let Some(data_vec) = data_to_send {
                 if !data_vec.is_empty() {
@@ -140,21 +140,9 @@ impl<T: Transport> Endpoint<T> {
                 self.packetize_and_send().await?;
             }
 
-            // 8. Check if we need to send a deferred EOF.
-            // This happens after a FIN has been received and all data that came before
-            // the FIN has been passed to the user's stream.
-            if self.timing.is_fin_pending_eof()
-                && self.transport.reliability().is_recv_buffer_empty()
-            {
-                if let Some(tx) = self.channels.tx_to_stream_mut().take() {
-                    trace!(
-                        cid = self.identity.local_cid(),
-                        "All data drained after FIN, closing user stream (sending EOF)."
-                    );
-                    drop(tx); // This closes the channel, signaling EOF.
-                    self.timing.clear_fin_pending_eof(); // Reset the flag.
-                }
-            }
+            // 8. FIN pending EOF check is now handled by timer-driven architecture
+            // The check for sending deferred EOF is now managed by FinProcessingTimeout
+            // instead of polling in every event loop iteration
 
             // 9. Check if we need to close the connection
             if self.should_close() {

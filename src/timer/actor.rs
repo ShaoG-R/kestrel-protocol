@@ -12,7 +12,7 @@
 use crate::core::endpoint::timing::TimeoutEvent;
 use crate::timer::{
     event::ConnectionId,
-    task::{TimerHandle, TimerRegistration, BatchTimerRegistration, BatchTimerCancellation},
+    task::{TimerRegistration, BatchTimerRegistration, BatchTimerCancellation},
     wheel::TimerEntryId,
     HybridTimerTaskHandle,
 };
@@ -24,37 +24,88 @@ use tokio::{
 };
 use tracing::{debug, trace, warn};
 
+/// TimerActor内部定时器ID，用于唯一标识每个定时器
+/// Internal timer ID for TimerActor, used to uniquely identify each timer
+pub type ActorTimerId = u64;
+
 /// 定时器Actor命令类型
 /// Timer Actor command types
 #[derive(Debug)]
 pub enum TimerActorCommand {
-    /// 注册单个定时器
-    /// Register a single timer
+    /// 注册单个定时器（返回内部ID）
+    /// Register a single timer (returns internal ID)
     RegisterTimer {
         registration: TimerRegistration<TimeoutEvent>,
-        response_tx: oneshot::Sender<Result<TimerHandle<TimeoutEvent>, String>>,
+        response_tx: oneshot::Sender<Result<ActorTimerId, String>>,
     },
     
-    /// 取消单个定时器
-    /// Cancel a single timer
+    /// 根据内部ID取消特定定时器
+    /// Cancel specific timer by internal ID
+    CancelTimerById {
+        timer_id: ActorTimerId,
+        response_tx: oneshot::Sender<bool>,
+    },
+    
+    /// 取消连接的所有特定类型定时器（兼容旧接口）
+    /// Cancel all timers of specific type for connection (backward compatibility)
     CancelTimer {
         connection_id: ConnectionId,
         timeout_event: TimeoutEvent,
-        response_tx: oneshot::Sender<bool>,
+        response_tx: oneshot::Sender<usize>, // 返回取消的数量
+    },
+    
+    /// 取消连接的所有定时器
+    /// Cancel all timers for connection
+    CancelAllTimers {
+        connection_id: ConnectionId,
+        response_tx: oneshot::Sender<usize>,
     },
     
     /// 批量注册定时器（大批量，直接处理，不经过缓冲区）
     /// Batch register timers (large batch, direct processing, bypass buffer)
     BatchRegisterTimers {
         registrations: Vec<TimerRegistration<TimeoutEvent>>,
-        response_tx: oneshot::Sender<Result<Vec<TimerHandle<TimeoutEvent>>, String>>,
+        response_tx: oneshot::Sender<Result<Vec<ActorTimerId>, String>>,
     },
     
-    /// 批量取消定时器（大批量，直接处理，不经过缓冲区）
-    /// Batch cancel timers (large batch, direct processing, bypass buffer)
+    /// 批量取消定时器（通过内部ID）
+    /// Batch cancel timers (by internal IDs)
+    BatchCancelTimersByIds {
+        timer_ids: Vec<ActorTimerId>,
+        response_tx: oneshot::Sender<usize>,
+    },
+    
+    /// 批量取消定时器（兼容旧接口）
+    /// Batch cancel timers (backward compatibility)
     BatchCancelTimers {
         entries: Vec<(ConnectionId, TimeoutEvent)>,
-        response_tx: oneshot::Sender<usize>, // 返回成功取消的数量
+        response_tx: oneshot::Sender<usize>,
+    },
+    
+    /// 注册路径验证定时器
+    /// Register path validation timer
+    RegisterPathValidationTimer {
+        connection_id: ConnectionId,
+        path_id: u32, // 路径标识符
+        delay: Duration,
+        response_tx: oneshot::Sender<Result<ActorTimerId, String>>,
+    },
+    
+    /// 注册重传定时器
+    /// Register retransmission timer
+    RegisterRetransmissionTimer {
+        connection_id: ConnectionId,
+        packet_id: u64, // 数据包标识符
+        delay: Duration,
+        response_tx: oneshot::Sender<Result<ActorTimerId, String>>,
+    },
+    
+    /// 注册FIN处理定时器
+    /// Register FIN processing timer
+    RegisterFinProcessingTimer {
+        connection_id: ConnectionId,
+        delay: Duration,
+        response_tx: oneshot::Sender<Result<ActorTimerId, String>>,
     },
     
     /// 强制刷新所有缓冲区
@@ -67,9 +118,43 @@ pub enum TimerActorCommand {
         response_tx: oneshot::Sender<TimerActorStats>,
     },
     
+    /// 查询定时器信息
+    /// Query timer information
+    QueryTimer {
+        timer_id: ActorTimerId,
+        response_tx: oneshot::Sender<Option<TimerInfo>>,
+    },
+    
     /// 关闭Actor
     /// Shutdown Actor
     Shutdown,
+}
+
+/// 定时器信息
+/// Timer information
+#[derive(Debug, Clone)]
+pub struct TimerInfo {
+    /// 内部定时器ID
+    /// Internal timer ID
+    pub timer_id: ActorTimerId,
+    /// 连接ID
+    /// Connection ID
+    pub connection_id: ConnectionId,
+    /// 超时事件类型
+    /// Timeout event type
+    pub timeout_event: TimeoutEvent,
+    /// 延迟时间
+    /// Delay duration
+    pub delay: Duration,
+    /// 创建时间
+    /// Creation time
+    pub created_at: Instant,
+    /// 是否在缓冲区中（未提交）
+    /// Whether in buffer (uncommitted)
+    pub in_buffer: bool,
+    /// 全局定时器条目ID（如果已提交）
+    /// Global timer entry ID (if committed)
+    pub entry_id: Option<TimerEntryId>,
 }
 
 /// 定时器Actor统计信息
@@ -82,6 +167,9 @@ pub struct TimerActorStats {
     /// 取消缓冲区大小
     /// Cancel buffer size
     pub cancel_buffer_size: usize,
+    /// 活跃定时器总数
+    /// Total active timers
+    pub active_timer_count: usize,
     /// 处理的总注册请求数
     /// Total processed register requests
     pub total_register_requests: u64,
@@ -94,6 +182,9 @@ pub struct TimerActorStats {
     /// 缓冲区优化避免的操作数（注册后立即取消）
     /// Operations avoided by buffer optimization (register then immediate cancel)
     pub optimized_operations: u64,
+    /// 下一个分配的定时器ID
+    /// Next timer ID to allocate
+    pub next_timer_id: ActorTimerId,
 }
 
 impl Default for TimerActorStats {
@@ -101,10 +192,12 @@ impl Default for TimerActorStats {
         Self {
             register_buffer_size: 0,
             cancel_buffer_size: 0,
+            active_timer_count: 0,
             total_register_requests: 0,
             total_cancel_requests: 0,
             auto_flush_count: 0,
             optimized_operations: 0,
+            next_timer_id: 1,
         }
     }
 }
@@ -130,6 +223,22 @@ impl Default for TimerActorConfig {
     }
 }
 
+/// 内部定时器信息（缓冲区中的）
+/// Internal timer information (in buffer)
+#[derive(Debug, Clone)]
+struct BufferedTimer {
+    /// 内部定时器ID
+    /// Internal timer ID
+    #[allow(dead_code)] // 保留以备将来使用和调试 // Kept for future use and debugging
+    timer_id: ActorTimerId,
+    /// 定时器注册信息
+    /// Timer registration
+    registration: TimerRegistration<TimeoutEvent>,
+    /// 创建时间
+    /// Creation time
+    created_at: Instant,
+}
+
 /// 定时器Actor - 批量定时器管理器
 /// Timer Actor - Batch Timer Manager
 pub struct TimerActor {
@@ -141,21 +250,33 @@ pub struct TimerActor {
     /// Configuration
     config: TimerActorConfig,
     
-    /// 注册缓冲区 - 使用HashMap避免重复注册同一个定时器
-    /// Register buffer - using HashMap to avoid duplicate registration of the same timer
-    register_buffer: HashMap<(ConnectionId, TimeoutEvent), TimerRegistration<TimeoutEvent>>,
+    /// 下一个分配的内部定时器ID
+    /// Next internal timer ID to allocate
+    next_timer_id: ActorTimerId,
     
-    /// 取消缓冲区 - 使用HashSet去重
-    /// Cancel buffer - using HashSet for deduplication
-    cancel_buffer: HashSet<(ConnectionId, TimeoutEvent)>,
+    /// 注册缓冲区 - 使用内部ID索引
+    /// Register buffer - indexed by internal ID
+    register_buffer: HashMap<ActorTimerId, BufferedTimer>,
     
-    /// 键到定时器条目ID的映射 - 用于跟踪已注册的定时器
-    /// Key to timer entry ID mapping - for tracking registered timers
-    key_to_entry_id: HashMap<(ConnectionId, TimeoutEvent), TimerEntryId>,
+    /// 取消缓冲区 - 等待取消的内部ID
+    /// Cancel buffer - internal IDs waiting to be cancelled
+    cancel_buffer: HashSet<ActorTimerId>,
     
-    /// 定时器条目ID到键的反向映射 - 用于快速查找
-    /// Timer entry ID to key reverse mapping - for quick lookup
-    entry_id_to_key: HashMap<TimerEntryId, (ConnectionId, TimeoutEvent)>,
+    /// 活跃定时器映射 - 内部ID到全局条目ID的映射
+    /// Active timer mapping - internal ID to global entry ID
+    active_timers: HashMap<ActorTimerId, TimerEntryId>,
+    
+    /// 反向映射 - 全局条目ID到内部ID的映射
+    /// Reverse mapping - global entry ID to internal ID
+    entry_to_timer_id: HashMap<TimerEntryId, ActorTimerId>,
+    
+    /// 连接定时器索引 - 按连接ID索引的定时器列表
+    /// Connection timer index - timer lists indexed by connection ID
+    connection_timers: HashMap<ConnectionId, HashSet<ActorTimerId>>,
+    
+    /// 类型定时器索引 - 按类型索引的定时器列表（用于兼容性API）
+    /// Type timer index - timer lists indexed by type (for compatibility API)
+    type_timers: HashMap<(ConnectionId, TimeoutEvent), HashSet<ActorTimerId>>,
     
     /// Actor统计信息
     /// Actor statistics
@@ -176,10 +297,13 @@ impl TimerActor {
         Self {
             timer_handle,
             config,
+            next_timer_id: 1,
             register_buffer: HashMap::new(),
             cancel_buffer: HashSet::new(),
-            key_to_entry_id: HashMap::new(),
-            entry_id_to_key: HashMap::new(),
+            active_timers: HashMap::new(),
+            entry_to_timer_id: HashMap::new(),
+            connection_timers: HashMap::new(),
+            type_timers: HashMap::new(),
             stats: TimerActorStats::default(),
             last_flush_time: Instant::now(),
         }
@@ -244,8 +368,18 @@ impl TimerActor {
                 let _ = response_tx.send(result);
             }
             
+            TimerActorCommand::CancelTimerById { timer_id, response_tx } => {
+                let result = self.handle_cancel_timer_by_id(timer_id).await;
+                let _ = response_tx.send(result);
+            }
+            
             TimerActorCommand::CancelTimer { connection_id, timeout_event, response_tx } => {
-                let result = self.handle_cancel_timer(connection_id, timeout_event).await;
+                let result = self.handle_cancel_timer_by_type(connection_id, timeout_event).await;
+                let _ = response_tx.send(result);
+            }
+            
+            TimerActorCommand::CancelAllTimers { connection_id, response_tx } => {
+                let result = self.handle_cancel_all_timers(connection_id).await;
                 let _ = response_tx.send(result);
             }
             
@@ -254,8 +388,28 @@ impl TimerActor {
                 let _ = response_tx.send(result);
             }
             
+            TimerActorCommand::BatchCancelTimersByIds { timer_ids, response_tx } => {
+                let result = self.handle_batch_cancel_timers_by_ids(timer_ids).await;
+                let _ = response_tx.send(result);
+            }
+            
             TimerActorCommand::BatchCancelTimers { entries, response_tx } => {
-                let result = self.handle_batch_cancel_timers(entries).await;
+                let result = self.handle_batch_cancel_timers_by_type(entries).await;
+                let _ = response_tx.send(result);
+            }
+            
+            TimerActorCommand::RegisterPathValidationTimer { connection_id, path_id, delay, response_tx } => {
+                let result = self.handle_register_path_validation_timer(connection_id, path_id, delay).await;
+                let _ = response_tx.send(result);
+            }
+            
+            TimerActorCommand::RegisterRetransmissionTimer { connection_id, packet_id, delay, response_tx } => {
+                let result = self.handle_register_retransmission_timer(connection_id, packet_id, delay).await;
+                let _ = response_tx.send(result);
+            }
+            
+            TimerActorCommand::RegisterFinProcessingTimer { connection_id, delay, response_tx } => {
+                let result = self.handle_register_fin_processing_timer(connection_id, delay).await;
                 let _ = response_tx.send(result);
             }
             
@@ -264,10 +418,13 @@ impl TimerActor {
             }
             
             TimerActorCommand::GetStats { response_tx } => {
-                let mut stats = self.stats.clone();
-                stats.register_buffer_size = self.register_buffer.len();
-                stats.cancel_buffer_size = self.cancel_buffer.len();
+                let stats = self.get_current_stats();
                 let _ = response_tx.send(stats);
+            }
+            
+            TimerActorCommand::QueryTimer { timer_id, response_tx } => {
+                let info = self.query_timer_info(timer_id);
+                let _ = response_tx.send(info);
             }
             
             TimerActorCommand::Shutdown => {
@@ -278,28 +435,65 @@ impl TimerActor {
         Ok(())
     }
     
+    /// 分配新的定时器ID
+    /// Allocate new timer ID
+    fn allocate_timer_id(&mut self) -> ActorTimerId {
+        let id = self.next_timer_id;
+        self.next_timer_id += 1;
+        self.stats.next_timer_id = self.next_timer_id;
+        id
+    }
+    
     /// 处理单个定时器注册
     /// Handle single timer registration
     async fn handle_register_timer(
         &mut self,
         registration: TimerRegistration<TimeoutEvent>,
-    ) -> Result<TimerHandle<TimeoutEvent>, String> {
-        let key = (registration.connection_id, registration.timeout_event);
+    ) -> Result<ActorTimerId, String> {
+        let timer_id = self.allocate_timer_id();
         
         // 检查是否在取消缓冲区中，如果是则直接抵消
         // Check if in cancel buffer, if so, directly cancel out
-        if self.cancel_buffer.remove(&key) {
+        if self.cancel_buffer.remove(&timer_id) {
             self.stats.optimized_operations += 1;
-            trace!(key = ?key, "Timer registration cancelled out by pending cancellation");
+            trace!(timer_id = timer_id, "Timer registration cancelled out by pending cancellation");
             return Err("Timer registration cancelled by pending cancellation".to_string());
         }
         
+        // 创建缓冲定时器
+        // Create buffered timer
+        let buffered_timer = BufferedTimer {
+            timer_id,
+            registration: registration.clone(),
+            created_at: Instant::now(),
+        };
+        
         // 添加到注册缓冲区
         // Add to register buffer
-        self.register_buffer.insert(key, registration);
+        self.register_buffer.insert(timer_id, buffered_timer);
+        
+        // 更新索引
+        // Update indices
+        self.connection_timers
+            .entry(registration.connection_id)
+            .or_default()
+            .insert(timer_id);
+            
+        let type_key = (registration.connection_id, registration.timeout_event);
+        self.type_timers
+            .entry(type_key)
+            .or_default()
+            .insert(timer_id);
+        
         self.stats.total_register_requests += 1;
         
-        trace!(key = ?key, buffer_size = self.register_buffer.len(), "Added timer to register buffer");
+        trace!(
+            timer_id = timer_id,
+            connection_id = registration.connection_id,
+            timeout_event = ?registration.timeout_event,
+            buffer_size = self.register_buffer.len(),
+            "Added timer to register buffer"
+        );
         
         // 检查是否需要自动刷新
         // Check if auto flush is needed
@@ -307,140 +501,324 @@ impl TimerActor {
             self.flush_buffers().await;
         }
         
-        // 返回一个占位符句柄 - 实际的句柄将在刷新时创建
-        // Return a placeholder handle - actual handle will be created on flush
-        // TODO: 这里需要一个更好的设计来处理异步句柄返回
-        Err("Timer registered to buffer, handle will be available after flush".to_string())
+        Ok(timer_id)
     }
     
-    /// 处理单个定时器取消
-    /// Handle single timer cancellation
-    async fn handle_cancel_timer(&mut self, connection_id: ConnectionId, timeout_event: TimeoutEvent) -> bool {
-        let key = (connection_id, timeout_event);
-        
+    /// 根据内部ID取消特定定时器
+    /// Cancel specific timer by internal ID
+    async fn handle_cancel_timer_by_id(&mut self, timer_id: ActorTimerId) -> bool {
         // 优先检查注册缓冲区，如果找到就直接移除
         // First check register buffer, remove directly if found
-        if self.register_buffer.remove(&key).is_some() {
+        if let Some(buffered_timer) = self.register_buffer.remove(&timer_id) {
+            // 从索引中移除
+            // Remove from indices
+            self.remove_timer_from_indices(timer_id, &buffered_timer);
+            
             self.stats.optimized_operations += 1;
-            trace!(key = ?key, "Timer cancellation optimized - removed from register buffer");
+            trace!(timer_id = timer_id, "Timer cancellation optimized - removed from register buffer");
             return true;
         }
         
-        // 添加到取消缓冲区
-        // Add to cancel buffer
-        self.cancel_buffer.insert(key);
-        self.stats.total_cancel_requests += 1;
-        
-        trace!(key = ?key, buffer_size = self.cancel_buffer.len(), "Added timer to cancel buffer");
-        
-        // 检查是否需要自动刷新
-        // Check if auto flush is needed
-        if self.cancel_buffer.len() >= self.config.batch_threshold {
-            self.flush_buffers().await;
+        // 检查是否是活跃定时器
+        // Check if it's an active timer
+        if self.active_timers.contains_key(&timer_id) {
+            // 添加到取消缓冲区
+            // Add to cancel buffer
+            self.cancel_buffer.insert(timer_id);
+            self.stats.total_cancel_requests += 1;
+            
+            trace!(timer_id = timer_id, buffer_size = self.cancel_buffer.len(), "Added timer to cancel buffer");
+            
+            // 检查是否需要自动刷新
+            // Check if auto flush is needed
+            if self.cancel_buffer.len() >= self.config.batch_threshold {
+                self.flush_buffers().await;
+            }
+            
+            return true;
         }
         
-        true // 假设成功 - 实际结果将在刷新时确定
+        false // 定时器不存在
     }
     
-    /// 处理批量定时器注册（与缓冲区合并处理）
-    /// Handle batch timer registration (merge with buffer processing)
+    /// 取消连接的所有特定类型定时器（兼容性方法）
+    /// Cancel all timers of specific type for connection (compatibility method)
+    async fn handle_cancel_timer_by_type(&mut self, connection_id: ConnectionId, timeout_event: TimeoutEvent) -> usize {
+        let type_key = (connection_id, timeout_event);
+        
+        // 获取该类型的所有定时器ID
+        // Get all timer IDs of this type
+        let timer_ids: Vec<ActorTimerId> = self.type_timers
+            .get(&type_key)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default();
+        
+        let mut cancelled_count = 0;
+        
+        for timer_id in timer_ids {
+            if self.handle_cancel_timer_by_id(timer_id).await {
+                cancelled_count += 1;
+            }
+        }
+        
+        cancelled_count
+    }
+    
+    /// 取消连接的所有定时器
+    /// Cancel all timers for connection
+    async fn handle_cancel_all_timers(&mut self, connection_id: ConnectionId) -> usize {
+        // 获取该连接的所有定时器ID
+        // Get all timer IDs for this connection
+        let timer_ids: Vec<ActorTimerId> = self.connection_timers
+            .get(&connection_id)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default();
+        
+        let mut cancelled_count = 0;
+        
+        for timer_id in timer_ids {
+            if self.handle_cancel_timer_by_id(timer_id).await {
+                cancelled_count += 1;
+            }
+        }
+        
+        cancelled_count
+    }
+    
+    /// 从索引中移除定时器
+    /// Remove timer from indices
+    fn remove_timer_from_indices(&mut self, timer_id: ActorTimerId, buffered_timer: &BufferedTimer) {
+        // 从连接索引中移除
+        // Remove from connection index
+        if let Some(connection_set) = self.connection_timers.get_mut(&buffered_timer.registration.connection_id) {
+            connection_set.remove(&timer_id);
+            if connection_set.is_empty() {
+                self.connection_timers.remove(&buffered_timer.registration.connection_id);
+            }
+        }
+        
+        // 从类型索引中移除
+        // Remove from type index
+        let type_key = (buffered_timer.registration.connection_id, buffered_timer.registration.timeout_event);
+        if let Some(type_set) = self.type_timers.get_mut(&type_key) {
+            type_set.remove(&timer_id);
+            if type_set.is_empty() {
+                self.type_timers.remove(&type_key);
+            }
+        }
+    }
+    
+    /// 注册路径验证定时器
+    /// Register path validation timer
+    async fn handle_register_path_validation_timer(
+        &mut self,
+        connection_id: ConnectionId,
+        path_id: u32,
+        delay: Duration,
+    ) -> Result<ActorTimerId, String> {
+        // 创建带路径ID信息的PathValidationTimeout事件
+        // Create PathValidationTimeout event with path ID information
+        let timeout_event = TimeoutEvent::PathValidationTimeout;
+        
+        let (callback_tx, _callback_rx) = mpsc::channel(1); // 临时通道，将被TimerActor处理
+        let registration = TimerRegistration::new(
+            connection_id,
+            delay,
+            timeout_event,
+            callback_tx,
+        );
+        
+        let timer_id = self.handle_register_timer(registration).await?;
+        
+        trace!(
+            timer_id = timer_id,
+            connection_id = connection_id,
+            path_id = path_id,
+            delay = ?delay,
+            "Registered path validation timer"
+        );
+        
+        Ok(timer_id)
+    }
+    
+    /// 注册重传定时器
+    /// Register retransmission timer
+    async fn handle_register_retransmission_timer(
+        &mut self,
+        connection_id: ConnectionId,
+        packet_id: u64,
+        delay: Duration,
+    ) -> Result<ActorTimerId, String> {
+        let timeout_event = TimeoutEvent::RetransmissionTimeout;
+        
+        let (callback_tx, _callback_rx) = mpsc::channel(1);
+        let registration = TimerRegistration::new(
+            connection_id,
+            delay,
+            timeout_event,
+            callback_tx,
+        );
+        
+        let timer_id = self.handle_register_timer(registration).await?;
+        
+        trace!(
+            timer_id = timer_id,
+            connection_id = connection_id,
+            packet_id = packet_id,
+            delay = ?delay,
+            "Registered retransmission timer"
+        );
+        
+        Ok(timer_id)
+    }
+    
+    /// 注册FIN处理定时器
+    /// Register FIN processing timer
+    async fn handle_register_fin_processing_timer(
+        &mut self,
+        connection_id: ConnectionId,
+        delay: Duration,
+    ) -> Result<ActorTimerId, String> {
+        // 使用ConnectionTimeout来处理FIN处理超时
+        // Use ConnectionTimeout to handle FIN processing timeout
+        let timeout_event = TimeoutEvent::ConnectionTimeout;
+        
+        let (callback_tx, _callback_rx) = mpsc::channel(1);
+        let registration = TimerRegistration::new(
+            connection_id,
+            delay,
+            timeout_event,
+            callback_tx,
+        );
+        
+        let timer_id = self.handle_register_timer(registration).await?;
+        
+        trace!(
+            timer_id = timer_id,
+            connection_id = connection_id,
+            delay = ?delay,
+            "Registered FIN processing timer"
+        );
+        
+        Ok(timer_id)
+    }
+    
+    /// 获取当前统计信息
+    /// Get current statistics
+    fn get_current_stats(&self) -> TimerActorStats {
+        let mut stats = self.stats.clone();
+        stats.register_buffer_size = self.register_buffer.len();
+        stats.cancel_buffer_size = self.cancel_buffer.len();
+        stats.active_timer_count = self.active_timers.len();
+        stats.next_timer_id = self.next_timer_id;
+        stats
+    }
+    
+    /// 查询定时器信息
+    /// Query timer information
+    fn query_timer_info(&self, timer_id: ActorTimerId) -> Option<TimerInfo> {
+        // 首先检查缓冲区
+        // First check buffer
+        if let Some(buffered_timer) = self.register_buffer.get(&timer_id) {
+            return Some(TimerInfo {
+                timer_id,
+                connection_id: buffered_timer.registration.connection_id,
+                timeout_event: buffered_timer.registration.timeout_event,
+                delay: buffered_timer.registration.delay,
+                created_at: buffered_timer.created_at,
+                in_buffer: true,
+                entry_id: None,
+            });
+        }
+        
+        // 然后检查活跃定时器
+        // Then check active timers
+        if let Some(&entry_id) = self.active_timers.get(&timer_id) {
+            // 从反向映射中查找连接信息（这需要遍历，不太高效，但用于调试）
+            // Find connection info from reverse mapping (requires iteration, not efficient, but for debugging)
+            for ((connection_id, timeout_event), timer_set) in &self.type_timers {
+                if timer_set.contains(&timer_id) {
+                    return Some(TimerInfo {
+                        timer_id,
+                        connection_id: *connection_id,
+                        timeout_event: *timeout_event,
+                        delay: Duration::from_secs(0), // 无法从活跃定时器中获取原始延迟
+                        created_at: Instant::now(), // 无法获取确切创建时间
+                        in_buffer: false,
+                        entry_id: Some(entry_id),
+                    });
+                }
+            }
+        }
+        
+        None
+    }
+    
+    /// 处理批量定时器注册
+    /// Handle batch timer registration
     async fn handle_batch_register_timers(
         &mut self,
         registrations: Vec<TimerRegistration<TimeoutEvent>>,
-    ) -> Result<Vec<TimerHandle<TimeoutEvent>>, String> {
-        trace!(count = registrations.len(), "Processing batch registration with buffer merge");
+    ) -> Result<Vec<ActorTimerId>, String> {
+        trace!(count = registrations.len(), "Processing batch registration");
         
-        let mut successful_keys = Vec::new();
+        let mut timer_ids = Vec::with_capacity(registrations.len());
         
-        // 将所有注册请求加入缓冲区，检查取消缓冲区中的重复项
-        // Add all registration requests to buffer, check for duplicates in cancel buffer
+        // 逐个注册定时器
+        // Register timers one by one
         for registration in registrations {
-            let key = (registration.connection_id, registration.timeout_event);
-            
-            // 检查是否在取消缓冲区中，如果是则直接抵消
-            // Check if in cancel buffer, if so, directly cancel out
-            if self.cancel_buffer.remove(&key) {
-                self.stats.optimized_operations += 1;
-                trace!(key = ?key, "Timer registration cancelled out by pending cancellation");
-                continue; // 跳过这个注册
+            match self.handle_register_timer(registration).await {
+                Ok(timer_id) => {
+                    timer_ids.push(timer_id);
+                }
+                Err(_) => {
+                    // 继续处理其他注册，不因单个失败而停止
+                    // Continue processing others, don't stop for single failure
+                    continue;
+                }
             }
-            
-            // 添加到注册缓冲区
-            // Add to register buffer
-            self.register_buffer.insert(key, registration);
-            successful_keys.push(key);
-            self.stats.total_register_requests += 1;
         }
         
         trace!(
-            added = successful_keys.len(),
-            buffer_size = self.register_buffer.len(),
-            "Added batch registrations to buffer"
+            registered = timer_ids.len(),
+            "Batch registration completed"
         );
         
-        // 检查是否需要刷新缓冲区
-        // Check if buffer flush is needed
-        if self.register_buffer.len() >= self.config.batch_threshold {
-            self.flush_buffers().await;
-        }
-        
-        // 由于使用缓冲区处理，返回空的句柄列表
-        // Since using buffer processing, return empty handle list
-        // TODO: 实际的句柄将在刷新时创建，这里需要更好的异步句柄管理设计
-        Ok(Vec::new())
+        Ok(timer_ids)
     }
     
-    /// 处理批量定时器取消（优先检查注册缓冲区）
-    /// Handle batch timer cancellation (prioritize checking register buffer)
-    async fn handle_batch_cancel_timers(&mut self, entries: Vec<(ConnectionId, TimeoutEvent)>) -> usize {
-        trace!(count = entries.len(), "Processing batch cancellation with register buffer check");
+    /// 处理批量定时器取消（通过内部ID）
+    /// Handle batch timer cancellation (by internal IDs)
+    async fn handle_batch_cancel_timers_by_ids(&mut self, timer_ids: Vec<ActorTimerId>) -> usize {
+        trace!(count = timer_ids.len(), "Processing batch cancellation by IDs");
         
-        let mut optimized_count = 0;
-        let mut pending_cancellations = Vec::new();
+        let mut cancelled_count = 0;
         
-        // 遍历每个取消请求，先检查注册缓冲区
-        // Iterate through each cancellation request, check register buffer first
-        for (connection_id, timeout_event) in entries {
-            let key = (connection_id, timeout_event);
-            
-            // 优先检查注册缓冲区，如果找到就直接移除
-            // First check register buffer, remove directly if found
-            if self.register_buffer.remove(&key).is_some() {
-                optimized_count += 1;
-                self.stats.optimized_operations += 1;
-                trace!(key = ?key, "Timer cancellation optimized - removed from register buffer");
-            } else {
-                // 如果不在注册缓冲区，加入取消缓冲区
-                // If not in register buffer, add to cancel buffer
-                pending_cancellations.push(key);
+        for timer_id in timer_ids {
+            if self.handle_cancel_timer_by_id(timer_id).await {
+                cancelled_count += 1;
             }
         }
         
-        // 将未在注册缓冲区找到的加入取消缓冲区
-        // Add those not found in register buffer to cancel buffer
-        let pending_count = pending_cancellations.len();
-        if !pending_cancellations.is_empty() {
-            for key in pending_cancellations {
-                self.cancel_buffer.insert(key);
-                self.stats.total_cancel_requests += 1;
-            }
-            
-            trace!(
-                pending = self.cancel_buffer.len(),
-                "Added pending cancellations to cancel buffer"
-            );
-        }
-        
-        // 检查取消缓冲区是否需要刷新
-        // Check if cancel buffer needs flushing
-        if self.cancel_buffer.len() >= self.config.batch_threshold {
-            self.flush_buffers().await;
-        }
-        
-        // 返回成功处理的数量（包括优化的和待处理的）
-        // Return successful processing count (including optimized and pending)
-        optimized_count + pending_count
+        trace!(cancelled = cancelled_count, "Batch cancellation by IDs completed");
+        cancelled_count
     }
+    
+    /// 处理批量定时器取消（兼容性方法）
+    /// Handle batch timer cancellation (compatibility method)
+    async fn handle_batch_cancel_timers_by_type(&mut self, entries: Vec<(ConnectionId, TimeoutEvent)>) -> usize {
+        trace!(count = entries.len(), "Processing batch cancellation by type");
+        
+        let mut cancelled_count = 0;
+        
+        for (connection_id, timeout_event) in entries {
+            cancelled_count += self.handle_cancel_timer_by_type(connection_id, timeout_event).await;
+        }
+        
+        trace!(cancelled = cancelled_count, "Batch cancellation by type completed");
+        cancelled_count
+    }
+
     
     /// 刷新所有缓冲区
     /// Flush all buffers
@@ -450,8 +828,8 @@ impl TimerActor {
         // 刷新注册缓冲区
         // Flush register buffer
         if !self.register_buffer.is_empty() {
-            let registration_entries: Vec<_> = self.register_buffer.drain().collect();
-            let registrations: Vec<_> = registration_entries.iter().map(|(_, reg)| reg.clone()).collect();
+            let buffered_timers: Vec<_> = self.register_buffer.drain().collect();
+            let registrations: Vec<_> = buffered_timers.iter().map(|(_, bt)| bt.registration.clone()).collect();
             let count = registrations.len();
             
             trace!(count = count, "Flushing register buffer");
@@ -461,11 +839,11 @@ impl TimerActor {
                 Ok(result) => {
                     // 更新映射关系
                     // Update mappings
-                    for (i, (key, _)) in registration_entries.iter().enumerate() {
+                    for (i, (timer_id, _)) in buffered_timers.iter().enumerate() {
                         if i < result.successes.len() {
                             let entry_id = result.successes[i].entry_id;
-                            self.key_to_entry_id.insert(*key, entry_id);
-                            self.entry_id_to_key.insert(entry_id, *key);
+                            self.active_timers.insert(*timer_id, entry_id);
+                            self.entry_to_timer_id.insert(entry_id, *timer_id);
                         }
                     }
                     
@@ -477,6 +855,12 @@ impl TimerActor {
                 }
                 Err(e) => {
                     warn!(error = %e, count = count, "Failed to flush register buffer");
+                    
+                    // 失败时需要清理索引
+                    // Clean up indices on failure
+                    for (timer_id, buffered_timer) in buffered_timers {
+                        self.remove_timer_from_indices(timer_id, &buffered_timer);
+                    }
                 }
             }
         }
@@ -484,25 +868,30 @@ impl TimerActor {
         // 刷新取消缓冲区
         // Flush cancel buffer
         if !self.cancel_buffer.is_empty() {
-            let keys: Vec<_> = self.cancel_buffer.drain().collect();
-            let count = keys.len();
+            let timer_ids: Vec<_> = self.cancel_buffer.drain().collect();
+            let count = timer_ids.len();
             
             trace!(count = count, "Flushing cancel buffer");
             
-            // 将键转换为entry_ids
-            let entry_ids: Vec<TimerEntryId> = keys.iter()
-                .filter_map(|key| self.key_to_entry_id.get(key).copied())
+            // 将内部ID转换为entry_ids
+            // Convert internal IDs to entry_ids
+            let entry_ids: Vec<TimerEntryId> = timer_ids.iter()
+                .filter_map(|timer_id| self.active_timers.get(timer_id).copied())
                 .collect();
             
             if !entry_ids.is_empty() {
                 let batch_cancellation = BatchTimerCancellation { entry_ids: entry_ids.clone() };
                 match self.timer_handle.batch_cancel_timers(batch_cancellation).await {
                     Ok(result) => {
-                        // 清理映射关系
-                        // Clean up mappings
+                        // 清理映射关系和索引
+                        // Clean up mappings and indices
                         for entry_id in &entry_ids {
-                            if let Some(key) = self.entry_id_to_key.remove(entry_id) {
-                                self.key_to_entry_id.remove(&key);
+                            if let Some(timer_id) = self.entry_to_timer_id.remove(entry_id) {
+                                self.active_timers.remove(&timer_id);
+                                
+                                // 从索引中移除（需要重构这部分以避免需要buffered_timer参数）
+                                // Remove from indices (need to refactor this part to avoid needing buffered_timer parameter)
+                                self.remove_timer_from_all_indices(timer_id);
                             }
                         }
                         
@@ -524,6 +913,36 @@ impl TimerActor {
         let flush_duration = self.last_flush_time.duration_since(start_time);
         
         trace!(duration = ?flush_duration, "Buffer flush completed");
+    }
+    
+    /// 从所有索引中移除定时器（通过遍历）
+    /// Remove timer from all indices (by iteration)
+    fn remove_timer_from_all_indices(&mut self, timer_id: ActorTimerId) {
+        // 从连接索引中移除
+        // Remove from connection index
+        let mut connections_to_remove = Vec::new();
+        for (connection_id, timer_set) in &mut self.connection_timers {
+            timer_set.remove(&timer_id);
+            if timer_set.is_empty() {
+                connections_to_remove.push(*connection_id);
+            }
+        }
+        for connection_id in connections_to_remove {
+            self.connection_timers.remove(&connection_id);
+        }
+        
+        // 从类型索引中移除
+        // Remove from type index
+        let mut types_to_remove = Vec::new();
+        for (type_key, timer_set) in &mut self.type_timers {
+            timer_set.remove(&timer_id);
+            if timer_set.is_empty() {
+                types_to_remove.push(*type_key);
+            }
+        }
+        for type_key in types_to_remove {
+            self.type_timers.remove(&type_key);
+        }
     }
     
     /// 检查是否应该自动刷新
@@ -557,7 +976,7 @@ impl TimerActorHandle {
     pub async fn register_timer(
         &self,
         registration: TimerRegistration<TimeoutEvent>,
-    ) -> Result<TimerHandle<TimeoutEvent>, String> {
+    ) -> Result<ActorTimerId, String> {
         let (response_tx, response_rx) = oneshot::channel();
         let command = TimerActorCommand::RegisterTimer { registration, response_tx };
         
@@ -568,11 +987,11 @@ impl TimerActorHandle {
         response_rx.await.unwrap_or_else(|_| Err("Response channel closed".to_string()))
     }
     
-    /// 取消单个定时器
-    /// Cancel a single timer
-    pub async fn cancel_timer(&self, connection_id: ConnectionId, timeout_event: TimeoutEvent) -> bool {
+    /// 根据内部ID取消特定定时器
+    /// Cancel specific timer by internal ID
+    pub async fn cancel_timer_by_id(&self, timer_id: ActorTimerId) -> bool {
         let (response_tx, response_rx) = oneshot::channel();
-        let command = TimerActorCommand::CancelTimer { connection_id, timeout_event, response_tx };
+        let command = TimerActorCommand::CancelTimerById { timer_id, response_tx };
         
         if self.command_tx.send(command).await.is_err() {
             return false;
@@ -581,12 +1000,38 @@ impl TimerActorHandle {
         response_rx.await.unwrap_or(false)
     }
     
+    /// 取消连接的所有特定类型定时器（兼容性方法）
+    /// Cancel all timers of specific type for connection (compatibility method)
+    pub async fn cancel_timer(&self, connection_id: ConnectionId, timeout_event: TimeoutEvent) -> usize {
+        let (response_tx, response_rx) = oneshot::channel();
+        let command = TimerActorCommand::CancelTimer { connection_id, timeout_event, response_tx };
+        
+        if self.command_tx.send(command).await.is_err() {
+            return 0;
+        }
+        
+        response_rx.await.unwrap_or(0)
+    }
+    
+    /// 取消连接的所有定时器
+    /// Cancel all timers for connection
+    pub async fn cancel_all_timers(&self, connection_id: ConnectionId) -> usize {
+        let (response_tx, response_rx) = oneshot::channel();
+        let command = TimerActorCommand::CancelAllTimers { connection_id, response_tx };
+        
+        if self.command_tx.send(command).await.is_err() {
+            return 0;
+        }
+        
+        response_rx.await.unwrap_or(0)
+    }
+    
     /// 批量注册定时器
     /// Batch register timers
     pub async fn batch_register_timers(
         &self,
         registrations: Vec<TimerRegistration<TimeoutEvent>>,
-    ) -> Result<Vec<TimerHandle<TimeoutEvent>>, String> {
+    ) -> Result<Vec<ActorTimerId>, String> {
         let (response_tx, response_rx) = oneshot::channel();
         let command = TimerActorCommand::BatchRegisterTimers { registrations, response_tx };
         
@@ -616,6 +1061,86 @@ impl TimerActorHandle {
         self.command_tx.send(TimerActorCommand::FlushBuffers).await.is_ok()
     }
     
+    /// 批量取消定时器（通过内部ID）
+    /// Batch cancel timers (by internal IDs)
+    pub async fn batch_cancel_timers_by_ids(&self, timer_ids: Vec<ActorTimerId>) -> usize {
+        let (response_tx, response_rx) = oneshot::channel();
+        let command = TimerActorCommand::BatchCancelTimersByIds { timer_ids, response_tx };
+        
+        if self.command_tx.send(command).await.is_err() {
+            return 0;
+        }
+        
+        response_rx.await.unwrap_or(0)
+    }
+    
+    /// 注册路径验证定时器
+    /// Register path validation timer
+    pub async fn register_path_validation_timer(
+        &self,
+        connection_id: ConnectionId,
+        path_id: u32,
+        delay: Duration,
+    ) -> Result<ActorTimerId, String> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let command = TimerActorCommand::RegisterPathValidationTimer { 
+            connection_id, 
+            path_id, 
+            delay, 
+            response_tx 
+        };
+        
+        if self.command_tx.send(command).await.is_err() {
+            return Err("TimerActor is not available".to_string());
+        }
+        
+        response_rx.await.unwrap_or_else(|_| Err("Response channel closed".to_string()))
+    }
+    
+    /// 注册重传定时器
+    /// Register retransmission timer
+    pub async fn register_retransmission_timer(
+        &self,
+        connection_id: ConnectionId,
+        packet_id: u64,
+        delay: Duration,
+    ) -> Result<ActorTimerId, String> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let command = TimerActorCommand::RegisterRetransmissionTimer { 
+            connection_id, 
+            packet_id, 
+            delay, 
+            response_tx 
+        };
+        
+        if self.command_tx.send(command).await.is_err() {
+            return Err("TimerActor is not available".to_string());
+        }
+        
+        response_rx.await.unwrap_or_else(|_| Err("Response channel closed".to_string()))
+    }
+    
+    /// 注册FIN处理定时器
+    /// Register FIN processing timer
+    pub async fn register_fin_processing_timer(
+        &self,
+        connection_id: ConnectionId,
+        delay: Duration,
+    ) -> Result<ActorTimerId, String> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let command = TimerActorCommand::RegisterFinProcessingTimer { 
+            connection_id, 
+            delay, 
+            response_tx 
+        };
+        
+        if self.command_tx.send(command).await.is_err() {
+            return Err("TimerActor is not available".to_string());
+        }
+        
+        response_rx.await.unwrap_or_else(|_| Err("Response channel closed".to_string()))
+    }
+    
     /// 获取统计信息
     /// Get statistics
     pub async fn get_stats(&self) -> Option<TimerActorStats> {
@@ -627,6 +1152,19 @@ impl TimerActorHandle {
         }
         
         response_rx.await.ok()
+    }
+    
+    /// 查询定时器信息
+    /// Query timer information
+    pub async fn query_timer(&self, timer_id: ActorTimerId) -> Option<TimerInfo> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let command = TimerActorCommand::QueryTimer { timer_id, response_tx };
+        
+        if self.command_tx.send(command).await.is_err() {
+            return None;
+        }
+        
+        response_rx.await.ok().flatten()
     }
     
     /// 关闭Actor
@@ -716,8 +1254,8 @@ mod tests {
         
         // 先注册再立即取消，测试优化功能
         let _ = actor_handle.register_timer(registration).await;
-        let cancelled = actor_handle.cancel_timer(123, TimeoutEvent::IdleTimeout).await;
-        assert!(cancelled);
+        let cancelled_count = actor_handle.cancel_timer(123, TimeoutEvent::IdleTimeout).await;
+        assert!(cancelled_count > 0);
         
         // 检查统计信息
         let stats = actor_handle.get_stats().await.unwrap();

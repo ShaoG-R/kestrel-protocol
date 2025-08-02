@@ -127,21 +127,11 @@ impl<T: Transport> Endpoint<T> {
         // 3. Now that all mutable operations are done, create the builder and send.
         // 3. 所有可变操作都完成后，创建构建器并发送。
         if !frames_to_send.is_empty() {
-            // 4. 为需要重传的帧批量注册定时器（在发送前）
-            // 4. Batch register timers for frames that need retransmission (before sending)
-            let seq_nums_to_register: Vec<u32> = frames_to_send.iter()
-                .filter(|frame| frame.needs_reliability_tracking())
-                .filter_map(|frame| frame.sequence_number())
-                .collect();
-            
-            if !seq_nums_to_register.is_empty() {
-                let registered_count = self.transport.reliability_mut()
-                    .batch_register_retransmission_timers(&seq_nums_to_register).await;
-                trace!(
-                    registered = registered_count,
-                    total = seq_nums_to_register.len(),
-                    "Batch registered retransmission timers"
-                );
+            // 4. Register retransmission timers for frames that need reliability tracking
+            // 4. 为需要可靠传输跟踪的帧注册重传定时器
+            let timer_count = self.transport.reliability_mut().register_timers_for_packetized_frames().await;
+            if timer_count > 0 {
+                trace!(count = timer_count, "Registered retransmission timers for packetized frames");
             }
             
             let sender = |p: Vec<Frame>| self.send_raw_frames(p);

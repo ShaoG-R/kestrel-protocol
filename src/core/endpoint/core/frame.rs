@@ -92,7 +92,10 @@ mod tests {
     fn create_test_reliability_layer() -> ReliabilityLayer {
         let config = Config::default();
         let congestion_control = Box::new(Vegas::new(config.clone()));
-        ReliabilityLayer::new(config, congestion_control)
+        let connection_id = 1; // Test connection ID
+        let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent>();
+        let timer_actor = crate::timer::start_timer_actor(timer_handle, None);
+        ReliabilityLayer::new(config, congestion_control, connection_id, timer_actor)
     }
 
     #[test]

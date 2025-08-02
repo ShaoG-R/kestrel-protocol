@@ -126,6 +126,12 @@ pub struct ConnectionConfig {
     ///
     /// 套接字actor检查并清理已完成 `drain_timeout` 的CID的间隔。
     pub draining_cleanup_interval: Duration,
+    /// The timeout for path validation process.
+    /// If path validation doesn't complete within this time, it will be considered failed.
+    ///
+    /// 路径验证过程的超时时间。
+    /// 如果路径验证在此时间内没有完成，将被认为失败。
+    pub path_validation_timeout: Duration,
 }
 
 impl Default for Config {
@@ -178,6 +184,7 @@ impl Default for ConnectionConfig {
             recv_buffer_capacity_packets: 256,
             drain_timeout: Duration::from_secs(3),
             draining_cleanup_interval: Duration::from_secs(1),
+            path_validation_timeout: Duration::from_secs(5), // 5 seconds for path validation
         }
     }
 } 

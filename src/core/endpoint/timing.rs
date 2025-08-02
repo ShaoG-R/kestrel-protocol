@@ -13,6 +13,7 @@ use crate::timer::{
     task::TimerRegistration,
     HybridTimerTaskHandle,
     TimerActorHandle,
+    actor::ActorTimerId,
 };
 use crate::core::endpoint::unified_scheduler::{TimeoutLayer, TimeoutCheckResult, UnifiedTimeoutScheduler};
 use std::collections::HashMap;
@@ -20,7 +21,7 @@ use tokio::{
     sync::mpsc,
     time::{Duration, Instant},
 };
-use tracing::trace;
+use tracing::{trace, warn};
 
 /// 超时事件类型枚举
 /// Timeout event type enumeration
@@ -38,12 +39,36 @@ pub enum TimeoutEvent {
     /// 连接超时 - 连接建立超时
     /// Connection timeout - connection establishment timed out
     ConnectionTimeout,
+    /// FIN处理超时 - 检查是否可以发送EOF
+    /// FIN processing timeout - check if EOF can be sent
+    FinProcessingTimeout,
 }
 
 impl Default for TimeoutEvent {
     fn default() -> Self {
         Self::IdleTimeout
     }
+}
+
+/// 路径验证统计信息
+/// Path validation statistics
+#[derive(Debug, Clone, Default)]
+pub struct PathValidationStats {
+    /// 总验证次数
+    /// Total validations
+    pub total_validations: u64,
+    /// 成功次数
+    /// Successful validations
+    pub successful_validations: u64,
+    /// 超时次数
+    /// Timeout count
+    pub timeout_count: u64,
+    /// 挑战失败次数
+    /// Challenge failure count
+    pub challenge_failure_count: u64,
+    /// 平均验证时间
+    /// Average validation time
+    pub average_validation_time: Duration,
 }
 
 /// 定时器管理器 - 封装全局定时器相关逻辑
@@ -172,8 +197,9 @@ impl TimerManager {
     /// Cancel timer of specified type
     pub async fn cancel_timer(&mut self, timeout_event: &TimeoutEvent) -> bool {
         if self.active_timer_types.remove(timeout_event).is_some() {
-            let success = self.timer_actor.cancel_timer(self.connection_id, *timeout_event).await;
-            trace!(timeout_event = ?timeout_event, success = success, "Cancelled timer via TimerActor");
+            let cancelled_count = self.timer_actor.cancel_timer(self.connection_id, *timeout_event).await;
+            let success = cancelled_count > 0;
+            trace!(timeout_event = ?timeout_event, cancelled_count = cancelled_count, success = success, "Cancelled timer via TimerActor");
             success
         } else {
             false
@@ -248,9 +274,17 @@ pub struct TimingManager {
     /// FIN pending EOF flag, indicates FIN received but EOF not yet sent to user
     fin_pending_eof: bool,
 
+    /// FIN处理定时器ID（如果有活跃的FIN处理定时器）
+    /// FIN processing timer ID (if there's an active FIN processing timer)
+    fin_processing_timer_id: Option<ActorTimerId>,
+
     /// 定时器管理器
     /// Timer manager
     timer_manager: TimerManager,
+
+    /// 路径验证统计信息
+    /// Path validation statistics
+    path_validation_stats: PathValidationStats,
 
     /// 统一超时事件调度器
     /// Unified timeout event scheduler
@@ -265,13 +299,15 @@ impl TimingManager {
     /// Returns timing manager and timer event receiver channel for event-driven architecture
     pub fn new(connection_id: ConnectionId, timer_handle: HybridTimerTaskHandle<TimeoutEvent>) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
         let now = Instant::now();
-        let (timer_manager, timer_rx) = TimerManager::new_with_receiver(connection_id, timer_handle);
+        let (timer_manager, timer_rx) = TimerManager::new_with_receiver(connection_id, timer_handle.clone());
 
         let timing_manager = Self {
             start_time: now,
             last_recv_time: now,
             fin_pending_eof: false,
+            fin_processing_timer_id: None,
             timer_manager,
+            path_validation_stats: PathValidationStats::default(),
             unified_scheduler: UnifiedTimeoutScheduler::new(),
         };
 
@@ -288,13 +324,15 @@ impl TimingManager {
         connection_id: ConnectionId,
         timer_handle: HybridTimerTaskHandle<TimeoutEvent>,
     ) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
-        let (timer_manager, timer_rx) = TimerManager::new_with_receiver(connection_id, timer_handle);
+        let (timer_manager, timer_rx) = TimerManager::new_with_receiver(connection_id, timer_handle.clone());
 
         let timing_manager = Self {
             start_time,
             last_recv_time: start_time,
             fin_pending_eof: false,
+            fin_processing_timer_id: None,
             timer_manager,
+            path_validation_stats: PathValidationStats::default(),
             unified_scheduler: UnifiedTimeoutScheduler::new(),
         };
 
@@ -305,6 +343,38 @@ impl TimingManager {
     /// Check for expired timer events
     pub fn check_timer_events(&mut self) -> Vec<TimeoutEvent> {
         self.timer_manager.check_timer_events()
+    }
+
+    /// 处理超时事件（包含路径验证和FIN处理超时）
+    /// Handle timeout event (including path validation and FIN processing timeout handling)
+    pub async fn handle_timeout_event(&mut self, timeout_event: TimeoutEvent) -> Result<(), &'static str> {
+        match timeout_event {
+            TimeoutEvent::PathValidationTimeout => {
+                // 路径验证超时已由lifecycle manager处理，这里只记录统计信息
+                // Path validation timeout is handled by lifecycle manager, only record statistics here
+                self.path_validation_stats.timeout_count += 1;
+                warn!("Path validation timeout occurred, statistics updated");
+                Ok(())
+            }
+            TimeoutEvent::FinProcessingTimeout => {
+                // 清除定时器ID，因为定时器已触发
+                // Clear timer ID since timer has fired
+                self.fin_processing_timer_id = None;
+                
+                trace!("FIN processing timeout triggered, checking if EOF can be sent");
+                
+                // 这里我们只是设置一个标志，实际的EOF处理会在上层代码中完成
+                // Here we just set a flag, actual EOF handling will be done in upper layer code
+                // 因为EOF处理需要访问channels等Endpoint的其他字段
+                // Because EOF handling requires access to channels and other Endpoint fields
+                Ok(())
+            }
+            _ => {
+                // 其他超时事件的处理保持不变
+                // Other timeout event handling remains unchanged
+                Ok(())
+            }
+        }
     }
 
     /// 注册定时器到全局定时器任务
@@ -407,39 +477,142 @@ impl TimingManager {
         self.fin_pending_eof
     }
 
-    /// 设置FIN挂起EOF标志
-    /// Set FIN pending EOF flag
-    pub fn set_fin_pending_eof(&mut self, pending: bool) {
-        self.fin_pending_eof = pending;
+    /// 设置FIN挂起EOF标志（异步版本，用于注册定时器）
+    /// Set FIN pending EOF flag (async version for timer registration)
+    pub async fn set_fin_pending_eof(&mut self, pending: bool) {
+        if pending && !self.fin_pending_eof {
+            // 设置FIN pending EOF时，注册一个短期定时器来检查EOF条件
+            // When setting FIN pending EOF, register a short-term timer to check EOF conditions
+            self.fin_pending_eof = true;
+            self.schedule_fin_processing_check().await;
+        } else if !pending {
+            // 清除FIN pending EOF时，取消定时器
+            // When clearing FIN pending EOF, cancel the timer
+            self.fin_pending_eof = false;
+            if let Some(timer_id) = self.fin_processing_timer_id.take() {
+                self.timer_manager.timer_actor.cancel_timer_by_id(timer_id).await;
+            }
+        }
     }
 
-    /// 标记FIN已处理，等待EOF
-    /// Mark FIN processed, waiting for EOF
-    pub fn mark_fin_processed(&mut self) {
-        self.fin_pending_eof = true;
+    /// 标记FIN已处理，等待EOF（异步版本）
+    /// Mark FIN processed, waiting for EOF (async version)
+    pub async fn mark_fin_processed(&mut self) {
+        self.set_fin_pending_eof(true).await;
     }
 
-    /// 清除FIN挂起EOF标志
-    /// Clear FIN pending EOF flag
-    pub fn clear_fin_pending_eof(&mut self) {
-        self.fin_pending_eof = false;
+    /// 清除FIN挂起EOF标志（异步版本）
+    /// Clear FIN pending EOF flag (async version)
+    pub async fn clear_fin_pending_eof(&mut self) {
+        self.set_fin_pending_eof(false).await;
+    }
+
+    /// 调度FIN处理检查
+    /// Schedule FIN processing check
+    async fn schedule_fin_processing_check(&mut self) {
+        // 如果已有活跃的定时器，先取消
+        // If there's already an active timer, cancel it first
+        if let Some(timer_id) = self.fin_processing_timer_id.take() {
+            self.timer_manager.timer_actor.cancel_timer_by_id(timer_id).await;
+        }
+        
+        // 注册新的FIN处理定时器（10ms后检查）
+        // Register new FIN processing timer (check after 10ms)
+        let delay = Duration::from_millis(10);
+        match self.timer_manager.timer_actor.register_fin_processing_timer(
+            self.timer_manager.connection_id,
+            delay
+        ).await {
+            Ok(timer_id) => {
+                self.fin_processing_timer_id = Some(timer_id);
+                trace!("Scheduled FIN processing check in {:?}", delay);
+            }
+            Err(e) => {
+                warn!("Failed to schedule FIN processing check: {}", e);
+            }
+        }
+    }
+
+    /// 检查是否应该发送EOF（供上层调用）
+    /// Check if EOF should be sent (for upper layer to call)
+    pub fn should_send_eof(&self, is_recv_buffer_empty: bool) -> bool {
+        self.fin_pending_eof && is_recv_buffer_empty
+    }
+
+    // === 路径验证方法 Path Validation Methods ===
+    // 注意：路径验证状态现在由 lifecycle manager 管理
+    // Note: Path validation state is now managed by lifecycle manager
+
+    /// 获取路径验证统计信息
+    /// Get path validation statistics
+    pub fn path_validation_stats(&self) -> &PathValidationStats {
+        &self.path_validation_stats
+    }
+
+    /// 更新路径验证统计信息 - 验证开始
+    /// Update path validation statistics - validation started
+    pub fn on_path_validation_started(&mut self) {
+        self.path_validation_stats.total_validations += 1;
+    }
+
+    /// 更新路径验证统计信息 - 验证成功
+    /// Update path validation statistics - validation succeeded  
+    pub fn on_path_validation_succeeded(&mut self, validation_time: Duration) {
+        self.update_average_validation_time(validation_time);
+        self.path_validation_stats.successful_validations += 1;
+    }
+
+    /// 更新路径验证统计信息 - 验证失败
+    /// Update path validation statistics - validation failed
+    pub fn on_path_validation_failed(&mut self, is_challenge_failed: bool) {
+        if is_challenge_failed {
+            self.path_validation_stats.challenge_failure_count += 1;
+        }
+    }
+
+    /// 更新平均验证时间
+    /// Update average validation time
+    fn update_average_validation_time(&mut self, new_time: Duration) {
+        if self.path_validation_stats.successful_validations == 0 {
+            self.path_validation_stats.average_validation_time = new_time;
+        } else {
+            let total_time = self.path_validation_stats.average_validation_time * (self.path_validation_stats.successful_validations as u32)
+                + new_time;
+            self.path_validation_stats.average_validation_time = total_time / ((self.path_validation_stats.successful_validations + 1) as u32);
+        }
     }
 
     /// 重置时间管理器（保持开始时间不变）
     /// Reset timing manager (keep start time unchanged)
-    pub fn reset(&mut self) {
+    pub async fn reset(&mut self) {
         let now = Instant::now();
         self.last_recv_time = now;
         self.fin_pending_eof = false;
+        
+        // 取消FIN处理定时器
+        // Cancel FIN processing timer
+        if let Some(timer_id) = self.fin_processing_timer_id.take() {
+            self.timer_manager.timer_actor.cancel_timer_by_id(timer_id).await;
+        }
+        
+        // 重置路径验证统计信息（可选）
+        // Reset path validation statistics (optional)
+        // self.path_validation_stats = PathValidationStats::default();
     }
 
-    /// 重置所有时间为当前时间
-    /// Reset all times to current time
-    pub fn reset_all(&mut self) {
+    /// 重置所有时间为当前时间（异步版本）
+    /// Reset all times to current time (async version)
+    pub async fn reset_all(&mut self) {
         let now = Instant::now();
         self.start_time = now;
         self.last_recv_time = now;
         self.fin_pending_eof = false;
+        
+        // 取消FIN处理定时器
+        // Cancel FIN processing timer
+        if let Some(timer_id) = self.fin_processing_timer_id.take() {
+            self.timer_manager.timer_actor.cancel_timer_by_id(timer_id).await;
+        }
     }
 
     /// 获取统计信息的字符串表示
@@ -495,10 +668,14 @@ impl TimingManager {
     /// Check if path validation has timed out
     ///
     /// 该方法封装了路径验证超时检查逻辑，用于判断路径验证过程是否超时。
+    /// 注意：实际的路径验证状态现在由lifecycle manager管理
     ///
     /// This method encapsulates path validation timeout checking logic to determine
     /// if the path validation process has timed out.
+    /// Note: Actual path validation state is now managed by lifecycle manager
     pub fn check_path_validation_timeout(&self, config: &Config, now: Instant) -> bool {
+        // 这里使用通用的空闲超时检查，实际的路径验证超时由lifecycle manager和定时器系统处理
+        // Use generic idle timeout check here, actual path validation timeout is handled by lifecycle manager and timer system
         now.saturating_duration_since(self.last_recv_time) > config.connection.idle_timeout
     }
 
@@ -701,653 +878,307 @@ impl TimeoutLayer for TimingManager {
 // 注意：TimingManager 不再实现 Default 和 Clone，因为它需要明确的参数
 // Note: TimingManager no longer implements Default and Clone as it requires explicit parameters
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use tokio::time::{Duration, sleep};
-//     use crate::timer::task::{GlobalTimerTaskHandle, start_global_timer_task};
+#[cfg(test)]
+mod tests {
+    //! Tests for timing module after refactoring to use lifecycle manager for path validation
+    //! 
+    //! 重构后使用lifecycle manager管理路径验证的timing模块测试
 
-//     // 创建测试用的定时器句柄
-//     fn create_test_timer_handle() -> HybridTimerTaskHandle<TimeoutEvent> {
-//         // 为测试创建真实的全局定时器任务
-//         crate::timer::task::start_global_timer_task()
-//     }
+    use super::*;
+    use crate::config::Config;
+    use tokio::time::{sleep, Duration};
 
-//     #[tokio::test]
-//     async fn test_timing_manager_creation() {
-//         let connection_id = 1;
-//         let timer_handle = create_test_timer_handle();
-//         let manager = TimingManager::new(connection_id, timer_handle.clone());
+    // 创建测试用的定时器句柄
+    fn create_test_timer_handle() -> HybridTimerTaskHandle<TimeoutEvent> {
+        crate::timer::start_hybrid_timer_task::<TimeoutEvent>()
+    }
 
-//         assert!(manager.connection_duration() <= Duration::from_millis(1));
-//         assert!(manager.time_since_last_recv() <= Duration::from_millis(1));
-//         assert!(!manager.is_fin_pending_eof());
+    #[tokio::test]
+    async fn test_timing_manager_creation() {
+        let connection_id = 1;
+        let timer_handle = create_test_timer_handle();
+        let (manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
+
+        assert!(manager.connection_duration() <= Duration::from_millis(1));
+        assert!(manager.time_since_last_recv() <= Duration::from_millis(1));
+        assert!(!manager.is_fin_pending_eof());
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
+        // 清理定时器任务
+        let _ = timer_handle.shutdown().await;
+    }
 
-//     #[tokio::test]
-//     async fn test_timing_manager_with_start_time() {
-//         let start = Instant::now();
-//         let connection_id = 1;
-//         let timer_handle = create_test_timer_handle();
-//         let manager = TimingManager::with_start_time(start, connection_id, timer_handle.clone());
+    #[tokio::test]
+    async fn test_timing_manager_with_start_time() {
+        let start = Instant::now();
+        let connection_id = 1;
+        let timer_handle = create_test_timer_handle();
+        let (manager, _timer_rx) = TimingManager::with_start_time(start, connection_id, timer_handle.clone());
 
-//         assert_eq!(manager.start_time(), start);
-//         assert_eq!(manager.last_recv_time(), start);
+        assert_eq!(manager.start_time(), start);
+        assert_eq!(manager.last_recv_time(), start);
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
+        // 清理定时器任务
+        let _ = timer_handle.shutdown().await;
+    }
 
-//     #[tokio::test]
-//     async fn test_timing_manager_updates() {
-//         let connection_id = 1;
-//         let timer_handle = create_test_timer_handle();
-//         let mut manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let initial_start = manager.start_time();
+    #[tokio::test]
+    async fn test_timing_manager_updates() {
+        let connection_id = 1;
+        let timer_handle = create_test_timer_handle();
+        let (mut manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
+        let initial_start = manager.start_time();
 
-//         // 等待一小段时间
-//         sleep(Duration::from_millis(10)).await;
+        // 等待一小段时间
+        sleep(Duration::from_millis(10)).await;
 
-//         // 更新最后接收时间
-//         manager.touch_last_recv_time();
+        // 更新最后接收时间
+        manager.touch_last_recv_time();
 
-//         // 检查连接持续时间是否增加
-//         assert!(manager.connection_duration() >= Duration::from_millis(10));
-//         assert!(manager.time_since_last_recv() <= Duration::from_millis(1));
+        // 检查连接持续时间是否增加
+        assert!(manager.connection_duration() >= Duration::from_millis(10));
+        assert!(manager.time_since_last_recv() <= Duration::from_millis(1));
 
-//         // 检查开始时间没有改变
-//         assert_eq!(manager.start_time(), initial_start);
+        // 检查开始时间没有改变
+        assert_eq!(manager.start_time(), initial_start);
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
+        // 清理定时器任务
+        let _ = timer_handle.shutdown().await;
+    }
 
-//     // 为了测试基本的时间功能，我们创建一个不需要定时器的简化测试结构
-//     struct SimpleTimingState {
-//         start_time: Instant,
-//         last_recv_time: Instant,
-//         fin_pending_eof: bool,
-//     }
+    #[test]
+    fn test_timeout_event_enum() {
+        // 测试超时事件枚举的基本功能
+        assert_eq!(TimeoutEvent::IdleTimeout, TimeoutEvent::IdleTimeout);
+        assert_ne!(TimeoutEvent::IdleTimeout, TimeoutEvent::PathValidationTimeout);
+        assert_ne!(TimeoutEvent::RetransmissionTimeout, TimeoutEvent::ConnectionTimeout);
 
-//     impl SimpleTimingState {
-//         fn new() -> Self {
-//             let now = Instant::now();
-//             Self {
-//                 start_time: now,
-//                 last_recv_time: now,
-//                 fin_pending_eof: false,
-//             }
-//         }
+        // 测试Debug trait
+        let event = TimeoutEvent::IdleTimeout;
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("IdleTimeout"));
 
-//         fn connection_duration(&self) -> Duration {
-//             self.last_recv_time.duration_since(self.start_time)
-//         }
+        // 测试Clone trait
+        let event1 = TimeoutEvent::PathValidationTimeout;
+        let event2 = event1.clone();
+        assert_eq!(event1, event2);
+    }
 
-//         fn time_since_last_recv(&self) -> Duration {
-//             Instant::now().duration_since(self.last_recv_time)
-//         }
+    #[tokio::test]
+    async fn test_fin_pending_eof_operations() {
+        let connection_id = 1;
+        let timer_handle = create_test_timer_handle();
+        let (mut manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
 
-//         fn is_idle_timeout(&self, idle_timeout: Duration) -> bool {
-//             self.time_since_last_recv() > idle_timeout
-//         }
+        // 初始状态
+        assert!(!manager.is_fin_pending_eof());
 
-//         fn touch_last_recv_time(&mut self) {
-//             self.last_recv_time = Instant::now();
-//         }
-//     }
+        // 设置FIN挂起
+        manager.set_fin_pending_eof(true).await;
+        assert!(manager.is_fin_pending_eof());
 
-//     #[tokio::test]
-//     async fn test_timeout_checks() {
-//         let mut state = SimpleTimingState::new();
-
-//         // 测试空闲超时
-//         assert!(!state.is_idle_timeout(Duration::from_secs(1)));
-
-//         // 等待一段时间后检查超时
-//         sleep(Duration::from_millis(50)).await;
-//         assert!(state.is_idle_timeout(Duration::from_millis(10)));
-
-//         // 更新接收时间后应该不再超时
-//         state.touch_last_recv_time();
-//         assert!(!state.is_idle_timeout(Duration::from_millis(10)));
-//     }
-
-//     #[test]
-//     fn test_fin_pending_eof_operations() {
-//         let mut state = SimpleTimingState::new();
-
-//         // 初始状态
-//         assert!(!state.fin_pending_eof);
-
-//         // 设置FIN挂起
-//         state.fin_pending_eof = true;
-//         assert!(state.fin_pending_eof);
-
-//         // 清除FIN挂起
-//         state.fin_pending_eof = false;
-//         assert!(!state.fin_pending_eof);
-//     }
-
-//     #[tokio::test]
-//     async fn test_timing_state_updates() {
-//         let mut state = SimpleTimingState::new();
-//         let initial_start = state.start_time;
-
-//         // 等待一小段时间
-//         sleep(Duration::from_millis(10)).await;
-
-//         // 更新最后接收时间
-//         state.touch_last_recv_time();
-
-//         // 检查连接持续时间是否增加
-//         assert!(state.connection_duration() >= Duration::from_millis(10));
-//         assert!(state.time_since_last_recv() <= Duration::from_millis(1));
-
-//         // 检查开始时间没有改变
-//         assert_eq!(state.start_time, initial_start);
-//     }
-
-//     // === 超时控制逻辑测试 Timeout Control Logic Tests ===
-
-//     #[tokio::test]
-//     async fn test_calculate_next_wakeup_syn_received() {
-//         use crate::config::Config;
-
-//         let connection_id = 1;
-//         let timer_handle = create_test_timer_handle();
-//         let manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let config = Config::default();
-//         let now = Instant::now();
-
-//         // 在SynReceived状态下，应该使用idle_timeout
-//         // In SynReceived state, should use idle_timeout
-//         let wakeup = manager.calculate_next_wakeup(&config, true, None);
-//         let expected = now + config.connection.idle_timeout;
-
-//         // 允许一些时间误差
-//         // Allow some time tolerance
-//         assert!(wakeup >= expected - Duration::from_millis(100));
-//         assert!(wakeup <= expected + Duration::from_millis(100));
+        // 清除FIN挂起
+        manager.clear_fin_pending_eof().await;
+        assert!(!manager.is_fin_pending_eof());
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
+        // 清理定时器任务
+        let _ = timer_handle.shutdown().await;
+    }
 
-//     #[tokio::test]
-//     async fn test_calculate_next_wakeup_with_rto() {
-//         use crate::config::Config;
+    #[tokio::test]
+    async fn test_timer_operations() {
+        let connection_id = 1;
+        let timer_handle = create_test_timer_handle();
+        let (mut manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
+        let config = Config::default();
 
-//         let connection_id = 1;
-//         let timer_handle = create_test_timer_handle();
-//         let manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let config = Config::default();
-//         let now = Instant::now();
-//         let rto_deadline = now + Duration::from_millis(500);
+        // 注册空闲超时定时器
+        let result = manager.register_idle_timeout(&config).await;
+        assert!(result.is_ok());
 
-//         // 有RTO截止时间时，应该使用RTO截止时间
-//         // When RTO deadline exists, should use RTO deadline
-//         let wakeup = manager.calculate_next_wakeup(&config, false, Some(rto_deadline));
-//         assert_eq!(wakeup, rto_deadline);
+        // 注册路径验证超时定时器
+        let result = manager.register_path_validation_timeout(Duration::from_millis(100)).await;
+        assert!(result.is_ok());
+
+        // 取消定时器
+        let cancelled = manager.cancel_timer(&TimeoutEvent::IdleTimeout).await;
+        assert!(cancelled);
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
+        // 清理定时器任务
+        let _ = timer_handle.shutdown().await;
+    }
 
-//     #[tokio::test]
-//     async fn test_calculate_next_wakeup_without_rto() {
-//         use crate::config::Config;
+    #[tokio::test]
+    async fn test_timeout_event_handling() {
+        let connection_id = 1;
+        let timer_handle = create_test_timer_handle();
+        let (mut manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
 
-//         let connection_id = 1;
-//         let timer_handle = create_test_timer_handle();
-//         let manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let config = Config::default();
-//         let now = Instant::now();
+        // 测试FIN处理超时
+        let result = manager.handle_timeout_event(TimeoutEvent::FinProcessingTimeout).await;
+        assert!(result.is_ok());
 
-//         // 没有RTO截止时间时，应该使用idle_timeout
-//         // When no RTO deadline, should use idle_timeout
-//         let wakeup = manager.calculate_next_wakeup(&config, false, None);
-//         let expected = now + config.connection.idle_timeout;
-
-//         // 允许一些时间误差
-//         // Allow some time tolerance
-//         assert!(wakeup >= expected - Duration::from_millis(100));
-//         assert!(wakeup <= expected + Duration::from_millis(100));
+        // 测试路径验证超时
+        let result = manager.handle_timeout_event(TimeoutEvent::PathValidationTimeout).await;
+        assert!(result.is_ok());
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
-
-//     #[tokio::test]
-//     async fn test_check_idle_timeout() {
-//         use crate::config::Config;
-
-//         // 使用简化的状态测试超时逻辑
-//         let mut state = SimpleTimingState::new();
-//         let config = Config::default();
-//         let now = Instant::now();
-
-//         // 刚创建时不应该超时
-//         // Should not timeout when just created
-//         let time_since_recv = now.saturating_duration_since(state.last_recv_time);
-//         assert!(time_since_recv <= config.connection.idle_timeout);
-
-//         // 等待超过idle_timeout时间
-//         // Wait longer than idle_timeout
-//         sleep(Duration::from_millis(50)).await;
-//         assert!(state.is_idle_timeout(Duration::from_millis(10)));
-
-//         // 更新接收时间后不应该超时
-//         // Should not timeout after updating receive time
-//         state.touch_last_recv_time();
-//         assert!(!state.is_idle_timeout(Duration::from_millis(10)));
-//     }
-
-//     #[tokio::test]
-//     async fn test_global_timer_integration() {
-//         let connection_id = 1;
-//         let timer_handle = create_test_timer_handle();
-//         let mut manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let config = Config::default();
-
-//         // 注册空闲超时定时器
-//         let result = manager.register_idle_timeout(&config).await;
-//         assert!(result.is_ok());
-
-//         // 注册路径验证超时定时器
-//         let result = manager.register_path_validation_timeout(Duration::from_millis(100)).await;
-//         assert!(result.is_ok());
-
-//         // 等待定时器到期
-//         sleep(Duration::from_millis(150)).await;
-
-//         // 检查定时器事件
-//         let events = manager.check_timer_events();
-//         assert!(!events.is_empty());
-//         assert!(events.contains(&TimeoutEvent::PathValidationTimeout));
+        // 验证统计信息更新
+        assert_eq!(manager.path_validation_stats().timeout_count, 1);
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
+        // 清理定时器任务
+        let _ = timer_handle.shutdown().await;
+    }
 
-//     #[tokio::test]
-//     async fn test_timer_cancellation() {
-//         let connection_id = 2;
-//         let timer_handle = create_test_timer_handle();
-//         let mut manager = TimingManager::new(connection_id, timer_handle.clone());
+    #[tokio::test]
+    async fn test_path_validation_statistics() {
+        let connection_id = 1;
+        let timer_handle = create_test_timer_handle();
+        let (mut manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
 
-//         // 注册定时器
-//         let result = manager.register_timer(TimeoutEvent::IdleTimeout, Duration::from_millis(200)).await;
-//         assert!(result.is_ok());
+        // 初始统计信息
+        let stats = manager.path_validation_stats();
+        assert_eq!(stats.total_validations, 0);
+        assert_eq!(stats.successful_validations, 0);
+        assert_eq!(stats.timeout_count, 0);
+        assert_eq!(stats.challenge_failure_count, 0);
 
-//         // 立即取消定时器
-//         let cancelled = manager.cancel_timer(&TimeoutEvent::IdleTimeout).await;
-//         assert!(cancelled);
+        // 模拟路径验证开始
+        manager.on_path_validation_started();
+        assert_eq!(manager.path_validation_stats().total_validations, 1);
 
-//         // 等待一段时间，确保定时器不会触发
-//         sleep(Duration::from_millis(250)).await;
+        // 模拟路径验证成功
+        let validation_time = Duration::from_millis(100);
+        manager.on_path_validation_succeeded(validation_time);
+        assert_eq!(manager.path_validation_stats().successful_validations, 1);
+        assert_eq!(manager.path_validation_stats().average_validation_time, validation_time);
 
-//         // 检查没有事件
-//         let events = manager.check_timer_events();
-//         assert!(events.is_empty());
+        // 模拟路径验证失败
+        manager.on_path_validation_failed(true);
+        assert_eq!(manager.path_validation_stats().challenge_failure_count, 1);
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
+        // 清理定时器任务
+        let _ = timer_handle.shutdown().await;
+    }
 
-//     #[tokio::test]
-//     async fn test_timer_reset_functionality() {
-//         let connection_id = 3;
-//         let timer_handle = create_test_timer_handle();
-//         let mut manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let config = Config::default();
+    #[tokio::test]
+    async fn test_timeout_checking() {
+        let connection_id = 1;
+        let timer_handle = create_test_timer_handle();
+        let (manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
+        let config = Config::default();
+        let now = Instant::now();
 
-//         // 注册空闲超时定时器
-//         manager.register_idle_timeout(&config).await.unwrap();
+        // 刚创建时不应该超时
+        assert!(!manager.check_idle_timeout(&config, now));
+        assert!(!manager.should_trigger_timeout_handling(&config, now));
 
-//         // 等待一半时间
-//         sleep(Duration::from_millis(config.connection.idle_timeout.as_millis() as u64 / 4)).await;
-
-//         // 重置空闲超时定时器（模拟收到数据包）
-//         let result = manager.reset_idle_timeout(&config).await;
-//         assert!(result.is_ok());
-
-//         // 再等待一半时间（总共等待了原始超时时间的3/4，但重置后应该不会超时）
-//         sleep(Duration::from_millis(config.connection.idle_timeout.as_millis() as u64 / 2)).await;
-
-//         // 检查事件（应该没有超时事件）
-//         let events = manager.check_timer_events();
-//         assert!(events.is_empty());
+        // 模拟超时情况
+        let timeout_time = now + config.connection.idle_timeout + Duration::from_millis(100);
+        assert!(manager.check_idle_timeout(&config, timeout_time));
+        assert!(manager.should_trigger_timeout_handling(&config, timeout_time));
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
+        // 清理定时器任务
+        let _ = timer_handle.shutdown().await;
+    }
 
-//     #[tokio::test]
-//     async fn test_on_packet_received() {
-//         let connection_id = 4;
-//         let timer_handle = create_test_timer_handle();
-//         let mut manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let initial_time = manager.last_recv_time();
+    #[tokio::test]
+    async fn test_packet_received_handling() {
+        let connection_id = 1;
+        let timer_handle = create_test_timer_handle();
+        let (mut manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
+        let initial_time = manager.last_recv_time();
 
-//         // 等待一小段时间
-//         sleep(Duration::from_millis(10)).await;
+        // 等待一小段时间
+        sleep(Duration::from_millis(10)).await;
 
-//         // 模拟收到数据包
-//         let now = Instant::now();
-//         manager.on_packet_received(now);
+        // 模拟收到数据包
+        let now = Instant::now();
+        manager.on_packet_received(now);
 
-//         // 检查最后接收时间是否更新
-//         assert!(manager.last_recv_time() > initial_time);
-//         assert!((manager.last_recv_time() - now).as_millis() < 5); // 允许小误差
+        // 检查最后接收时间是否更新
+        assert!(manager.last_recv_time() > initial_time);
+        assert!((manager.last_recv_time() - now).as_millis() < 5); // 允许小误差
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
+        // 清理定时器任务
+        let _ = timer_handle.shutdown().await;
+    }
 
-//     #[tokio::test]
-//     async fn test_time_until_next_timeout() {
-//         use crate::config::Config;
+    #[tokio::test]
+    async fn test_connection_timeout_deadline() {
+        let connection_id = 1;
+        let timer_handle = create_test_timer_handle();
+        let (mut manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
+        let config = Config::default();
 
-//         let connection_id = 5;
-//         let timer_handle = create_test_timer_handle();
-//         let manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let config = Config::default();
+        let initial_deadline = manager.next_connection_timeout_deadline(&config);
+        assert!(initial_deadline.is_some());
 
-//         // 刚创建时，剩余时间应该接近完整的idle_timeout
-//         let remaining = manager.time_until_next_timeout(&config);
-//         assert!(remaining <= config.connection.idle_timeout);
-//         assert!(remaining >= config.connection.idle_timeout - Duration::from_millis(10));
+        // 等待一段时间后更新活动时间
+        sleep(Duration::from_millis(50)).await;
+        manager.touch_last_recv_time();
+
+        let updated_deadline = manager.next_connection_timeout_deadline(&config);
+        assert!(updated_deadline.is_some());
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
-
-//     #[tokio::test]
-//     async fn test_time_until_next_timeout_after_delay() {
-//         use crate::config::Config;
-
-//         let connection_id = 6;
-//         let timer_handle = create_test_timer_handle();
-//         let mut manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let config = Config::default();
-
-//         // 等待一段时间
-//         sleep(Duration::from_millis(100)).await;
-
-//         // 剩余时间应该减少
-//         let remaining = manager.time_until_next_timeout(&config);
-//         assert!(remaining < config.connection.idle_timeout);
-
-//         // 更新接收时间后，剩余时间应该重置
-//         manager.touch_last_recv_time();
-//         let remaining_after_update = manager.time_until_next_timeout(&config);
-//         assert!(remaining_after_update > remaining);
+        // 新的截止时间应该比初始截止时间晚
+        assert!(updated_deadline.unwrap() > initial_deadline.unwrap());
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
+        // 清理定时器任务
+        let _ = timer_handle.shutdown().await;
+    }
 
-//     #[tokio::test]
-//     async fn test_should_trigger_timeout_handling() {
-//         use crate::config::Config;
+    #[tokio::test]
+    async fn test_reset_operations() {
+        let connection_id = 1;
+        let timer_handle = create_test_timer_handle();
+        let (mut manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
+        let original_start = manager.start_time();
 
-//         let connection_id = 7;
-//         let timer_handle = create_test_timer_handle();
-//         let manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let config = Config::default();
-//         let now = Instant::now();
+        // 设置一些状态
+        manager.set_fin_pending_eof(true).await;
+        sleep(Duration::from_millis(10)).await;
 
-//         // 刚创建时不应该触发超时处理
-//         assert!(!manager.should_trigger_timeout_handling(&config, now));
-
-//         // 模拟超时情况
-//         let future_time = now + config.connection.idle_timeout + Duration::from_millis(100);
-//         assert!(manager.should_trigger_timeout_handling(&config, future_time));
+        // 重置管理器
+        manager.reset().await;
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
+        // 检查重置后的状态
+        assert!(!manager.is_fin_pending_eof());
+        assert_eq!(manager.start_time(), original_start); // 开始时间应该保持不变
 
-//     #[tokio::test]
-//     async fn test_timeout_debug_info() {
-//         use crate::config::Config;
-
-//         let connection_id = 8;
-//         let timer_handle = create_test_timer_handle();
-//         let manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let config = Config::default();
-
-//         let debug_info = manager.timeout_debug_info(&config);
-//         assert!(debug_info.contains("TimeoutDebug"));
-//         assert!(debug_info.contains("time_since_last_recv"));
-//         assert!(debug_info.contains("idle_timeout"));
-//         assert!(debug_info.contains("remaining"));
+        // 测试完全重置
+        manager.reset_all().await;
+        assert!(manager.start_time() > original_start); // 开始时间应该更新
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
+        // 清理定时器任务
+        let _ = timer_handle.shutdown().await;
+    }
 
-//     // === 分层超时管理接口测试 Layered Timeout Management Interface Tests ===
+    #[test]
+    fn test_path_validation_stats() {
+        let stats = PathValidationStats::default();
+        assert_eq!(stats.total_validations, 0);
+        assert_eq!(stats.successful_validations, 0);
+        assert_eq!(stats.timeout_count, 0);
+        assert_eq!(stats.challenge_failure_count, 0);
+        assert_eq!(stats.average_validation_time, Duration::ZERO);
+    }
 
-//     #[tokio::test]
-//     async fn test_check_connection_timeouts_no_timeout() {
-//         use crate::config::Config;
+    #[tokio::test]
+    async fn test_unified_scheduler_integration() {
+        let connection_id = 1;
+        let timer_handle = create_test_timer_handle();
+        let (mut manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
 
-//         let connection_id = 9;
-//         let timer_handle = create_test_timer_handle();
-//         let manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let config = Config::default();
-//         let now = Instant::now();
+        // 测试统一调度器的基本功能
+        let stats = manager.unified_scheduler_stats();
+        assert!(stats.contains("UnifiedScheduler"));
 
-//         // 刚创建时不应该有超时事件
-//         let events = manager.check_connection_timeouts(&config, now);
-//         assert!(events.is_empty());
+        // 清理过期数据
+        manager.cleanup_unified_scheduler();
+
+        // 重置统计信息
+        manager.reset_unified_scheduler_stats();
         
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
-
-//     #[tokio::test]
-//     async fn test_check_connection_timeouts_idle_timeout() {
-//         use crate::config::Config;
-
-//         let connection_id = 10;
-//         let timer_handle = create_test_timer_handle();
-//         let manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let config = Config::default();
-
-//         // 模拟空闲超时
-//         let timeout_time = manager.last_recv_time() + config.connection.idle_timeout + Duration::from_millis(100);
-//         let events = manager.check_connection_timeouts(&config, timeout_time);
-        
-//         assert_eq!(events.len(), 2); // IdleTimeout 和 PathValidationTimeout
-//         assert!(events.contains(&TimeoutEvent::IdleTimeout));
-//         assert!(events.contains(&TimeoutEvent::PathValidationTimeout));
-        
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
-
-//     #[tokio::test]
-//     async fn test_next_connection_timeout_deadline() {
-//         use crate::config::Config;
-
-//         let connection_id = 11;
-//         let timer_handle = create_test_timer_handle();
-//         let manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let config = Config::default();
-
-//         let deadline = manager.next_connection_timeout_deadline(&config);
-//         assert!(deadline.is_some());
-        
-//         let expected_deadline = manager.last_recv_time() + config.connection.idle_timeout;
-//         assert_eq!(deadline.unwrap(), expected_deadline);
-        
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
-
-//     #[tokio::test]
-//     async fn test_connection_timeout_deadline_after_activity() {
-//         use crate::config::Config;
-
-//         let connection_id = 12;
-//         let timer_handle = create_test_timer_handle();
-//         let mut manager = TimingManager::new(connection_id, timer_handle.clone());
-//         let config = Config::default();
-
-//         let initial_deadline = manager.next_connection_timeout_deadline(&config).unwrap();
-
-//         // 等待一段时间后更新活动时间
-//         sleep(Duration::from_millis(50)).await;
-//         manager.touch_last_recv_time();
-
-//         let updated_deadline = manager.next_connection_timeout_deadline(&config).unwrap();
-        
-//         // 新的截止时间应该比初始截止时间晚
-//         assert!(updated_deadline > initial_deadline);
-        
-//         // 清理定时器任务
-//         let _ = timer_handle.shutdown().await;
-//     }
-
-//     #[test]
-//     fn test_timeout_event_enum() {
-//         // 测试超时事件枚举的基本功能
-//         // Test basic functionality of timeout event enum
-//         assert_eq!(TimeoutEvent::IdleTimeout, TimeoutEvent::IdleTimeout);
-//         assert_ne!(
-//             TimeoutEvent::IdleTimeout,
-//             TimeoutEvent::PathValidationTimeout
-//         );
-//         assert_ne!(
-//             TimeoutEvent::RetransmissionTimeout,
-//             TimeoutEvent::ConnectionTimeout
-//         );
-
-//         // 测试Debug trait
-//         // Test Debug trait
-//         let event = TimeoutEvent::IdleTimeout;
-//         let debug_str = format!("{:?}", event);
-//         assert!(debug_str.contains("IdleTimeout"));
-
-//         // 测试Clone trait
-//         // Test Clone trait
-//         let event1 = TimeoutEvent::PathValidationTimeout;
-//         let event2 = event1.clone();
-//         assert_eq!(event1, event2);
-//     }
-
-//     #[tokio::test]
-//     async fn test_caller_side_performance() {
-//         let handle = start_global_timer_task();
-//         let mut manager = TimerManager::new(1, handle.clone());
-//         let config = Config::default();
-
-//         // 性能测试：频繁的定时器重置操作
-//         // Performance test: frequent timer reset operations
-//         let start_time = tokio::time::Instant::now();
-        
-//         for _ in 0..100 {
-//             // 这个操作现在应该更高效，因为：
-//             // 1. 减少了不必要的克隆
-//             // 2. 异步取消不阻塞注册
-//             // 3. 使用了对象池
-//             // This operation should now be more efficient because:
-//             // 1. Reduced unnecessary cloning
-//             // 2. Async cancellation doesn't block registration  
-//             // 3. Uses object pool
-//             manager.reset_idle_timeout(&config).await.unwrap();
-//         }
-        
-//         let duration = start_time.elapsed();
-//         println!("100次定时器重置耗时: {:?}", duration);
-//         println!("平均每次重置: {:?}", duration / 100);
-
-//         // 性能断言：100次重置应该在100ms内完成（debug模式下的宽松要求）
-//         // Performance assertion: 100 resets should complete within 100ms (lenient for debug mode)
-//         assert!(duration < Duration::from_millis(100), 
-//             "调用端性能不达标: {:?}", duration);
-
-//         // 测试事件检查的性能
-//         // Test event checking performance  
-//         let start_time = tokio::time::Instant::now();
-//         for _ in 0..1000 {
-//             manager.check_timer_events();
-//         }
-//         let check_duration = start_time.elapsed();
-//         println!("1000次事件检查耗时: {:?}", check_duration);
-//         println!("平均每次检查: {:?}", check_duration / 1000);
-
-//         handle.shutdown().await.unwrap();
-//     }
-
-//     #[tokio::test]
-//     async fn test_unified_scheduler_performance() {
-//         let handle = start_global_timer_task();
-//         let mut timing_manager = TimingManager::new(1, handle.clone());
-
-//         // 性能测试：统一调度器的性能
-//         // Performance test: unified scheduler performance
-//         let start_time = tokio::time::Instant::now();
-        
-//         // 模拟多个层的超时检查
-//         // Simulate timeout checking for multiple layers
-//         for _ in 0..100 {
-//             // 创建一个临时的 TimingManager 作为层
-//             // Create a temporary TimingManager as a layer
-//                     // 使用统一调度器计算唤醒时间（直接测试）
-//         // Use unified scheduler to calculate wakeup time (direct test)
-//         let temp_manager = TimingManager::new(2, handle.clone());
-//         let layers: Vec<&dyn TimeoutLayer> = vec![&temp_manager];
-//         let _wakeup_time = timing_manager.calculate_unified_wakeup(&layers);
-//         }
-        
-//         let duration = start_time.elapsed();
-//         println!("100次统一调度器唤醒计算耗时: {:?}", duration);
-//         println!("平均每次计算: {:?}", duration / 100);
-
-//         // 检查缓存命中率
-//         // Check cache hit rate
-//         let stats = timing_manager.unified_scheduler_stats();
-//         println!("统一调度器统计: {}", stats);
-
-//         // 性能断言：100次计算应该在50ms内完成
-//         // Performance assertion: 100 calculations should complete within 50ms
-//         assert!(duration < Duration::from_millis(50), 
-//             "统一调度器性能不达标: {:?}", duration);
-
-//         handle.shutdown().await.unwrap();
-//     }
-
-//     #[tokio::test]
-//     async fn test_unified_scheduler_cache_efficiency() {
-//         let handle = start_global_timer_task();
-//         let mut timing_manager = TimingManager::new(1, handle.clone());
-
-//         // 测试缓存效率（使用新的分离接口）
-//         // Test cache efficiency (using new separated interfaces)
-//         let temp_manager = TimingManager::new(2, handle.clone());
-//         let layers: Vec<&dyn TimeoutLayer> = vec![&temp_manager];
-        
-//         // 连续多次调用应该命中缓存
-//         // Multiple consecutive calls should hit cache
-//         for _ in 0..10 {
-//             let _wakeup_time = timing_manager.calculate_unified_wakeup(&layers);
-//         }
-        
-//         // 检查缓存命中率应该很高
-//         // Cache hit rate should be high
-//         let cache_hit_rate = timing_manager.unified_scheduler.cache_hit_rate();
-//         println!("缓存命中率: {:.2}%", cache_hit_rate * 100.0);
-        
-//         // 除了第一次，其他都应该命中缓存
-//         // All calls except the first should hit cache
-//         assert!(cache_hit_rate >= 0.8, "缓存命中率过低: {:.2}%", cache_hit_rate * 100.0);
-
-//         handle.shutdown().await.unwrap();
-//     }
-// }
+        // 清理定时器任务
+        let _ = timer_handle.shutdown().await;
+    }
+}

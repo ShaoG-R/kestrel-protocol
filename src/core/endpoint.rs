@@ -156,10 +156,42 @@ impl<T: Transport> Endpoint<T> {
                 // Handle path validation timeout
                 trace!(cid = self.identity.local_cid(), "Processing path validation timeout");
                 
-                // 当前实现暂时不处理路径验证超时
-                // Currently not handling path validation timeout
-                // 未来可以在这里添加路径验证逻辑
-                // Path validation logic can be added here in the future
+                // 委托给TimingManager处理路径验证超时
+                // Delegate to TimingManager to handle path validation timeout
+                if let Err(e) = self.timing.handle_timeout_event(timeout_event).await {
+                    tracing::warn!(cid = self.identity.local_cid(), error = e, "Failed to handle path validation timeout");
+                }
+            }
+            
+            TimeoutEvent::FinProcessingTimeout => {
+                // 处理FIN处理超时 - 检查是否可以发送EOF
+                // Handle FIN processing timeout - check if EOF can be sent
+                trace!(cid = self.identity.local_cid(), "Processing FIN processing timeout");
+                
+                // 委托给TimingManager处理FIN处理超时
+                // Delegate to TimingManager to handle FIN processing timeout
+                if let Err(e) = self.timing.handle_timeout_event(timeout_event).await {
+                    tracing::warn!(cid = self.identity.local_cid(), error = e, "Failed to handle FIN processing timeout");
+                }
+                
+                // 检查是否可以发送EOF
+                // Check if EOF can be sent
+                if self.timing.should_send_eof(self.transport.reliability().is_recv_buffer_empty()) {
+                    if let Some(tx) = self.channels.tx_to_stream_mut().take() {
+                        trace!(
+                            cid = self.identity.local_cid(),
+                            "All data drained after FIN, closing user stream (sending EOF)."
+                        );
+                        drop(tx); // This closes the channel, signaling EOF.
+                        self.timing.clear_fin_pending_eof().await; // Reset the flag.
+                    }
+                } else {
+                    // 如果还不能发送EOF，重新调度检查
+                    // If EOF can't be sent yet, reschedule the check
+                    if self.timing.is_fin_pending_eof() {
+                        self.timing.set_fin_pending_eof(true).await;
+                    }
+                }
             }
         }
 

@@ -29,12 +29,17 @@ impl<T: Transport> Endpoint<T> {
             let (tx, _rx) = tokio::sync::oneshot::channel();
             self.start_path_validation(src_addr, challenge_data, tx)?;
             
-            // 注册路径验证超时定时器 (30秒超时)
-            // Register path validation timeout timer (30 seconds timeout)
-            let validation_timeout = tokio::time::Duration::from_secs(30);
-            if let Err(e) = self.timing.register_path_validation_timeout(validation_timeout).await {
+            // 注册路径验证超时定时器
+            // Register path validation timeout timer
+            let path_validation_timeout = self.config.connection.path_validation_timeout;
+            if let Err(e) = self.timing.register_path_validation_timeout(path_validation_timeout).await {
                 tracing::warn!("Failed to register path validation timeout: {}", e);
             }
+            
+            // 使用新的路径验证管理器启动验证
+            // Use new path validation manager to start validation
+            // 注意：路径验证现在由 lifecycle manager 管理，而不是 timing manager
+            // Note: Path validation is now managed by lifecycle manager, not timing manager
             
             let challenge_frame = create_path_challenge_frame(
                 self.identity.peer_cid(),
