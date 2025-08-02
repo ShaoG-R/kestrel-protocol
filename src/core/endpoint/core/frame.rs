@@ -89,7 +89,7 @@ mod tests {
     use crate::core::reliability::congestion::vegas::Vegas;
     use bytes::Bytes;
 
-    fn create_test_reliability_layer() -> ReliabilityLayer {
+    async fn create_test_reliability_layer() -> ReliabilityLayer {
         let config = Config::default();
         let congestion_control = Box::new(Vegas::new(config.clone()));
         let connection_id = 1; // Test connection ID
@@ -110,9 +110,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_create_fin_frame() {
-        let mut reliability = create_test_reliability_layer();
+    #[tokio::test]
+    async fn test_create_fin_frame() {
+        let mut reliability = create_test_reliability_layer().await;
         reliability.receive_push(0, Bytes::new());
         let _ = reliability.reassemble();
 
@@ -128,9 +128,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_create_ack_frame() {
-        let mut reliability = create_test_reliability_layer();
+    #[tokio::test]
+    async fn test_create_ack_frame() {
+        let mut reliability = create_test_reliability_layer().await;
         // Simulate receiving a packet to generate ACK info
         reliability.receive_push(0, Bytes::new());
         // Call reassemble to update the internal state of the receive buffer,

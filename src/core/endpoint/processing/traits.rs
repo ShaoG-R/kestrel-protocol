@@ -240,7 +240,7 @@ mod tests {
     }
 
     impl MockEndpointOperations {
-        pub fn new() -> (Self, mpsc::Receiver<SocketActorCommand>) {
+        pub async fn new() -> (Self, mpsc::Receiver<SocketActorCommand>) {
             let (command_tx, command_rx) = mpsc::channel(100);
             let mock = Self {
                 local_cid: 1,
@@ -312,7 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_endpoint_operations() {
-        let (mut mock, _rx) = MockEndpointOperations::new();
+        let (mut mock, _rx) = MockEndpointOperations::new().await;
         
         // 测试基础操作
         assert_eq!(mock.local_cid(), 1);

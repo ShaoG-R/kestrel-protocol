@@ -201,7 +201,7 @@ mod tests {
     use super::*;
     use crate::{config::Config, core::reliability::congestion::vegas::Vegas};
 
-    fn create_test_reliability() -> ReliabilityLayer {
+    async fn create_test_reliability() -> ReliabilityLayer {
         let config = Config::default();
         let congestion_control = Box::new(Vegas::new(config.clone()));
         let connection_id = 1; // Test connection ID
@@ -210,9 +210,9 @@ mod tests {
         ReliabilityLayer::new(config, congestion_control, connection_id, timer_actor)
     }
 
-    #[test]
-    fn test_transport_manager_creation() {
-        let reliability = create_test_reliability();
+    #[tokio::test]
+    async fn test_transport_manager_creation() {
+        let reliability = create_test_reliability().await;
         let manager = TransportManager::new(reliability);
         
         assert_eq!(manager.peer_recv_window(), 32);
@@ -221,17 +221,17 @@ mod tests {
         assert!(manager.is_in_flight_empty());
     }
 
-    #[test]
-    fn test_transport_manager_with_window() {
-        let reliability = create_test_reliability();
+    #[tokio::test]
+    async fn test_transport_manager_with_window() {
+        let reliability = create_test_reliability().await;
         let manager = TransportManager::with_peer_window(reliability, 64);
         
         assert_eq!(manager.peer_recv_window(), 64);
     }
 
-    #[test]
-    fn test_peer_window_operations() {
-        let reliability = create_test_reliability();
+    #[tokio::test]
+    async fn test_peer_window_operations() {
+        let reliability = create_test_reliability().await;
         let mut manager = TransportManager::new(reliability);
         
         assert_eq!(manager.peer_recv_window(), 32);
@@ -240,9 +240,9 @@ mod tests {
         assert_eq!(manager.peer_recv_window(), 128);
     }
 
-    #[test]
-    fn test_transport_stats() {
-        let reliability = create_test_reliability();
+    #[tokio::test]
+    async fn test_transport_stats() {
+        let reliability = create_test_reliability().await;
         let manager = TransportManager::new(reliability);
         
         let stats = manager.transport_stats();
@@ -256,9 +256,9 @@ mod tests {
         assert!(stats_string.contains("peer_recv_window: 32"));
     }
 
-    #[test]
-    fn test_transport_manager_debug() {
-        let reliability = create_test_reliability();
+    #[tokio::test]
+    async fn test_transport_manager_debug() {
+        let reliability = create_test_reliability().await;
         let manager = TransportManager::new(reliability);
         
         let debug_string = format!("{:?}", manager);
