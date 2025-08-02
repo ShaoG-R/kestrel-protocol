@@ -9,7 +9,6 @@ use crate::{
     socket::TransportCommand,
 };
 use std::{future::Future, net::SocketAddr};
-use tokio::time::Instant;
 use tracing::trace;
 use crate::core::endpoint::core::frame::{create_ack_frame, create_fin_frame, create_syn_ack_frame, create_syn_frame};
 use crate::core::endpoint::types::state::ConnectionState;

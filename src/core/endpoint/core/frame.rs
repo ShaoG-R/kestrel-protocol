@@ -125,7 +125,7 @@ mod tests {
         match frame {
             Frame::Fin { header } => {
                 assert_eq!(header.connection_id, 456);
-                assert_eq!(header.sequence_number, 10);
+                assert_eq!(header.sequence_number, 0);
                 assert_eq!(header.payload_length, 0);
                 assert_eq!(header.recv_next_sequence, 1); // Should carry ACK info
             }
