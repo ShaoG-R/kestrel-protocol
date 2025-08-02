@@ -288,6 +288,10 @@ pub struct TimingManager {
     /// FIN处理定时器ID（如果有活跃的FIN处理定时器）
     /// FIN processing timer ID (if there's an active FIN processing timer)
     fin_processing_timer_id: Option<ActorTimerId>,
+    
+    /// FIN是否已发送标志
+    /// FIN sent flag
+    fin_sent: bool,
 
     /// 定时器管理器
     /// Timer manager
@@ -317,6 +321,7 @@ impl TimingManager {
             last_recv_time: now,
             fin_pending_eof: false,
             fin_processing_timer_id: None,
+            fin_sent: false,
             timer_manager,
             path_validation_stats: PathValidationStats::default(),
             unified_scheduler: UnifiedTimeoutScheduler::new(),
@@ -342,6 +347,7 @@ impl TimingManager {
             last_recv_time: start_time,
             fin_pending_eof: false,
             fin_processing_timer_id: None,
+            fin_sent: false,
             timer_manager,
             path_validation_stats: PathValidationStats::default(),
             unified_scheduler: UnifiedTimeoutScheduler::new(),
@@ -584,6 +590,18 @@ impl TimingManager {
         }
     }
 
+    /// 检查是否已发送FIN帧
+    /// Check if FIN frame has been sent
+    pub fn is_fin_sent(&self) -> bool {
+        self.fin_sent
+    }
+    
+    /// 标记FIN帧已发送
+    /// Mark FIN frame as sent
+    pub fn mark_fin_sent(&mut self) {
+        self.fin_sent = true;
+    }
+    
     /// 更新平均验证时间
     /// Update average validation time
     fn update_average_validation_time(&mut self, new_time: Duration) {

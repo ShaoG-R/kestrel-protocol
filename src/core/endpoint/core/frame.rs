@@ -48,7 +48,9 @@ pub(in crate::core::endpoint) fn create_fin_frame(
     reliability: &mut UnifiedReliabilityLayer,
     start_time: Instant,
 ) -> Frame {
-    let sequence_number = reliability.next_sequence_number();
+    // 使用当前的sequence_counter值，不递增，保持与数据包的一致性
+    // Use current sequence_counter value without incrementing to maintain consistency with data packets
+    let sequence_number = reliability.current_sequence_number();
     let timestamp = Instant::now().duration_since(start_time).as_millis() as u32;
     // A FIN frame should also carry the latest acknowledgment information, just like a PUSH frame.
     // This is the last chance to acknowledge any packets received before closing.

@@ -95,7 +95,6 @@ where
 
 impl<T: Transport> Endpoint<T> {
     pub(in crate::core::endpoint) async fn packetize_and_send(&mut self) -> Result<()> {
-        let now = Instant::now();
 
         // 1. Collect all frames that need to be sent without requiring &mut self.
         // 1. 收集所有需要发送的帧，这些操作不需要 &mut self。
@@ -108,16 +107,15 @@ impl<T: Transport> Endpoint<T> {
 
         // 2. Perform actions that require &mut self and collect their resulting frames.
         // 2. 执行需要 &mut self 的操作，并收集它们产生的帧。
-        if *self.state() == ConnectionState::Closing
-            && !self.transport.unified_reliability().has_fin_in_flight()
-        {
+        if *self.state() == ConnectionState::Closing && !self.timing.is_fin_sent() {
             let fin_frame = create_fin_frame(
                 self.identity.peer_cid(),
                 self.transport.unified_reliability_mut(),
                 self.timing.start_time(),
             );
-            self.transport.unified_reliability_mut()
-                .add_in_flight_packet(&fin_frame, now).await;
+            // 标记FIN帧已发送，防止重复发送
+            // Mark FIN frame as sent to prevent duplicate sending
+            self.timing.mark_fin_sent();
             frames_to_send.push(fin_frame);
         }
 

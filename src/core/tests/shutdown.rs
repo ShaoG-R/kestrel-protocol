@@ -11,6 +11,7 @@ use tokio::{sync::oneshot, time::timeout};
 
 #[tokio::test]
 async fn test_shutdown_when_established() {
+    crate::core::test_utils::init_tracing();
     // Standard case: closing an established connection should send a FIN.
     let (client, mut server) = setup_client_server_pair().await;
 

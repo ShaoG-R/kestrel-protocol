@@ -604,53 +604,17 @@ impl UnifiedReliabilityLayer {
     pub fn trigger_rto_backoff(&mut self) {
         self.rtt_estimator.backoff();
     }
-
-    
-    // === 兼容性接口方法 Compatibility Interface Methods ===
-    // 这些方法提供与旧ReliabilityLayer接口的兼容性，基于实际调用需求添加
-    // These methods provide compatibility with the old ReliabilityLayer interface, added based on actual call requirements
-
     /// 获取下一个序列号
     /// Get next sequence number
     pub fn next_sequence_number(&mut self) -> u32 {
         self.sequence_counter += 1;
         self.sequence_counter
     }
-
-    /// 接收PUSH数据（映射到receive_packet）
-    /// Receive PUSH data (maps to receive_packet)
-    pub fn receive_push(&mut self, sequence_number: u32, payload: Bytes) -> bool {
-        self.receive_packet(sequence_number, payload)
-    }
-
-    /// 写入流数据（映射到write_to_send_buffer）
-    /// Write to stream (maps to write_to_send_buffer)
-    pub fn write_to_stream(&mut self, data: Bytes) -> usize {
-        self.write_to_send_buffer(data)
-    }
-
-
-    /// 为打包帧注册定时器
-    /// Register timers for packetized frames
-    pub async fn register_timers_for_packetized_frames(&mut self, frames: &[Frame]) -> usize {
-        let mut count = 0;
-        let now = tokio::time::Instant::now();
-
-        for frame in frames {
-            // 使用统一的add_in_flight_packet方法，它会使用RTT估算器的RTO
-            if self.add_in_flight_packet(frame, now).await {
-                count += 1;
-            }
-        }
-
-        count
-    }
-
-    /// 跟踪帧在途（映射到add_in_flight_packet）
-    /// Track frame in flight (maps to add_in_flight_packet)
-    pub async fn track_frame_in_flight(&mut self, frame: Frame, now: tokio::time::Instant) -> bool {
-        // 使用统一的add_in_flight_packet方法，它会使用RTT估算器的RTO
-        self.add_in_flight_packet(&frame, now).await
+    
+    /// 获取当前序列号（不递增）
+    /// Get current sequence number (without incrementing)
+    pub fn current_sequence_number(&self) -> u32 {
+        self.sequence_counter
     }
 
     /// 检查是否有FIN在途
@@ -671,31 +635,10 @@ impl UnifiedReliabilityLayer {
         !self.buffer_coordinator.generate_sack_ranges().is_empty()
     }
 
-    /// ACK发送后处理
-    /// Handle after ACK sent
-    pub fn on_ack_sent(&mut self) {
-        // 简化实现：在unified架构中，这个操作可能不需要特别处理
-        trace!("ACK sent notification received");
-    }
-
-    /// 获取ACK信息
-    /// Get ACK info
-    pub fn get_ack_info(&self) -> (Vec<SackRange>, u32, u16) {
-        let (recv_next_seq, recv_window_size) = self.buffer_coordinator.get_receive_window_info();
-        let sack_ranges = self.buffer_coordinator.generate_sack_ranges();
-        (sack_ranges, recv_next_seq, recv_window_size)
-    }
-
     /// 检查接收缓冲区是否为空
     /// Check if receive buffer is empty
     pub fn is_recv_buffer_empty(&self) -> bool {
         self.buffer_coordinator.is_receive_buffer_empty()
-    }
-
-    /// 清理在途数据包（映射到cleanup_all_retransmission_timers）
-    /// Clear in-flight packets (maps to cleanup_all_retransmission_timers)
-    pub async fn clear_in_flight_packets(&mut self) {
-        self.cleanup_all_retransmission_timers().await;
     }
 
 }
