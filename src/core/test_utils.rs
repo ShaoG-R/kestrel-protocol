@@ -191,8 +191,8 @@ pub async fn setup_client_server_with_filter(
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
 ) {
-    let client_addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
-    let server_addr: SocketAddr = "127.0.0.1:5678".parse().unwrap();
+    let client_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
     // Create the shared "network" queues
     let client_recv_queue = Arc::new(Mutex::new(VecDeque::new()));
@@ -352,8 +352,8 @@ pub async fn new_stream_pair_with_filter<F>(
 /// 需要手动发送数据到 `tx_to_endpoint_network` 和 `rx_from_endpoint_network` 通道。
 /// 
 pub async fn setup_server_harness() -> ServerTestHarness {
-    let _server_addr: SocketAddr = "127.0.0.1:5678".parse().unwrap();
-    let client_addr: SocketAddr = "127.0.0.1:1234".parse().unwrap(); // "old" client addr
+    let _server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let client_addr: SocketAddr = "127.0.0.1:0".parse().unwrap(); // "old" client addr
     let config = Config::default();
 
     let (tx_to_endpoint_network, rx_from_socket) = mpsc::channel(128);
