@@ -170,7 +170,7 @@ impl ConnectionProcessor {
                 // 我们可以重新发送它。
                 // If we have already been triggered to send a SYN-ACK (i.e., data is in the
                 // send buffer), we can resend it.
-                if !endpoint.reliability().is_send_buffer_empty() {
+                if !endpoint.unified_reliability().is_send_buffer_empty() {
                     endpoint.send_syn_ack_frame().await?;
                 }
                 Ok(())
@@ -215,7 +215,7 @@ impl ConnectionProcessor {
                 // 可能会捎带数据
                 // Acknowledge the SYN-ACK, potentially with piggybacked data if the
                 // user has already called write()
-                if !endpoint.reliability().is_send_buffer_empty() {
+                if !endpoint.unified_reliability().is_send_buffer_empty() {
                     endpoint.packetize_and_send_data().await?;
                 } else {
                     endpoint.send_standalone_ack_frame().await?;

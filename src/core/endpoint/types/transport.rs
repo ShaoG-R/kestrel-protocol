@@ -2,54 +2,94 @@
 //! Transport Layer Management Module - Manages transport layer state for endpoints
 //!
 //! 该模块封装了与传输层相关的所有状态和逻辑，包括可靠性层、
-//! 流量控制窗口等功能。
+//! 流量控制窗口等功能。现已重构为使用统一可靠性层架构。
 //!
 //! This module encapsulates all transport layer related state and logic,
-//! including reliability layer, flow control windows, etc.
+//! including reliability layer, flow control windows, etc. Now refactored
+//! to use the unified reliability layer architecture.
 
-use crate::core::reliability::ReliabilityLayer;
+use crate::{
+    config::Config,
+    core::{
+        endpoint::timing::TimeoutEvent,
+        reliability::unified_reliability::UnifiedReliabilityLayer,
+    },
+    timer::{
+        actor::SenderTimerActorHandle,
+        event::{ConnectionId, TimerEventData},
+    },
+};
+use tokio::sync::mpsc;
 
-/// 传输层管理器
-/// Transport layer manager
+/// 传输层管理器 - 使用统一可靠性层架构
+/// Transport layer manager - using unified reliability layer architecture  
 pub struct TransportManager {
-    /// 可靠性层，负责ARQ、重传、拥塞控制等
-    /// Reliability layer responsible for ARQ, retransmission, congestion control, etc.
-    reliability: ReliabilityLayer,
+    /// 统一可靠性层，负责ARQ、重传、拥塞控制等
+    /// Unified reliability layer responsible for ARQ, retransmission, congestion control, etc.
+    unified_reliability: UnifiedReliabilityLayer,
     
-    /// 对端接收窗口大小
-    /// Peer receive window size
+    /// 对端接收窗口大小（已集成到统一层中，保留用于向后兼容）
+    /// Peer receive window size (integrated into unified layer, kept for backward compatibility)
     peer_recv_window: u32,
 }
 
 impl TransportManager {
-    /// 创建新的传输层管理器
-    /// Create new transport layer manager
-    pub fn new(reliability: ReliabilityLayer) -> Self {
+    /// 创建新的传输层管理器（使用统一可靠性层）
+    /// Create new transport layer manager (using unified reliability layer)
+    pub fn new(
+        connection_id: ConnectionId,
+        timer_actor: SenderTimerActorHandle,
+        timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,
+        config: Config,
+    ) -> Self {
+        let unified_reliability = UnifiedReliabilityLayer::new(
+            connection_id,
+            timer_actor,
+            timeout_tx,
+            config,
+        );
+        
         Self {
-            reliability,
+            unified_reliability,
             peer_recv_window: 32, // 默认窗口大小
         }
     }
 
-    /// 创建带指定窗口大小的传输层管理器
-    /// Create transport layer manager with specified window size
-    pub fn with_peer_window(reliability: ReliabilityLayer, peer_recv_window: u32) -> Self {
+    /// 创建带指定窗口大小的传输层管理器（使用统一可靠性层）
+    /// Create transport layer manager with specified window size (using unified reliability layer)
+    pub fn with_peer_window(
+        connection_id: ConnectionId,
+        timer_actor: SenderTimerActorHandle,
+        timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,
+        config: Config,
+        peer_recv_window: u32,
+    ) -> Self {
+        let mut unified_reliability = UnifiedReliabilityLayer::new(
+            connection_id,
+            timer_actor,
+            timeout_tx,
+            config,
+        );
+        
+        // 更新对端接收窗口大小到统一层
+        unified_reliability.update_peer_receive_window(peer_recv_window);
+        
         Self {
-            reliability,
+            unified_reliability,
             peer_recv_window,
         }
     }
 
-    /// 获取可靠性层的引用
-    /// Get reference to reliability layer
-    pub fn reliability(&self) -> &ReliabilityLayer {
-        &self.reliability
+    /// 获取统一可靠性层的引用
+    /// Get reference to unified reliability layer
+    pub fn unified_reliability(&self) -> &UnifiedReliabilityLayer {
+        &self.unified_reliability
     }
 
-    /// 获取可靠性层的可变引用
-    /// Get mutable reference to reliability layer
-    pub fn reliability_mut(&mut self) -> &mut ReliabilityLayer {
-        &mut self.reliability
+    /// 获取统一可靠性层的可变引用
+    /// Get mutable reference to unified reliability layer
+    pub fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer {
+        &mut self.unified_reliability
     }
 
     /// 获取对端接收窗口大小
@@ -62,62 +102,73 @@ impl TransportManager {
     /// Set peer receive window size
     pub fn set_peer_recv_window(&mut self, window_size: u32) {
         self.peer_recv_window = window_size;
+        // 同步更新到统一可靠性层
+        // Synchronously update to unified reliability layer
+        self.unified_reliability.update_peer_receive_window(window_size);
     }
 
     /// 检查发送缓冲区是否为空
     /// Check if send buffer is empty
     pub fn is_send_buffer_empty(&self) -> bool {
-        self.reliability.is_send_buffer_empty()
+        self.unified_reliability.is_send_buffer_empty()
     }
 
     /// 检查接收缓冲区是否为空
-    /// Check if receive buffer is empty
+    /// Check if receive buffer is empty (统一层没有此方法，使用接收缓冲区统计信息判断)
+    /// Check if receive buffer is empty (unified layer doesn't have this method, use receive buffer stats)
     pub fn is_recv_buffer_empty(&self) -> bool {
-        self.reliability.is_recv_buffer_empty()
+        // 通过统计信息判断接收缓冲区是否为空
+        self.unified_reliability.get_statistics().receive_buffer_utilization == 0.0
     }
 
     /// 检查在途数据包是否为空
     /// Check if in-flight packets are empty
     pub fn is_in_flight_empty(&self) -> bool {
-        self.reliability.is_in_flight_empty()
+        self.unified_reliability.is_in_flight_empty()
     }
 
     /// 获取当前拥塞窗口大小
     /// Get current congestion window size
     pub fn congestion_window(&self) -> u32 {
-        self.reliability.congestion_window()
+        self.unified_reliability.get_statistics().congestion_window
     }
 
-    /// 获取当前平滑往返时间
-    /// Get current smoothed round trip time
+    /// 获取当前平滑往返时间（统一层尚未提供此接口，返回None）
+    /// Get current smoothed round trip time (unified layer doesn't provide this interface yet, return None)
     pub fn smoothed_rtt(&self) -> Option<std::time::Duration> {
-        self.reliability.smoothed_rtt()
+        // TODO: 统一可靠性层需要添加RTT信息访问接口
+        // TODO: Unified reliability layer needs to add RTT information access interface
+        None
     }
 
-    /// 获取当前RTT变化
-    /// Get current RTT variation
+    /// 获取当前RTT变化（统一层尚未提供此接口，返回None）
+    /// Get current RTT variation (unified layer doesn't provide this interface yet, return None)  
     pub fn rtt_var(&self) -> Option<std::time::Duration> {
-        self.reliability.rtt_var()
+        // TODO: 统一可靠性层需要添加RTT变化信息访问接口
+        // TODO: Unified reliability layer needs to add RTT variation information access interface
+        None
     }
 
-    /// 清理在途数据包
-    /// Clear in-flight packets
-    pub fn clear_in_flight_packets(&mut self) {
-        self.reliability.clear_in_flight_packets();
+    /// 清理在途数据包（使用异步方法）
+    /// Clear in-flight packets (using async method)
+    pub async fn clear_in_flight_packets(&mut self) {
+        self.unified_reliability.cleanup_all_retransmission_timers().await;
     }
 
     /// 重装和发送数据
-    /// Reassemble and send data
+    /// Reassemble and send data  
     pub fn reassemble(&mut self) -> (Option<Vec<bytes::Bytes>>, bool) {
-        self.reliability.reassemble()
+        let result = self.unified_reliability.reassemble_data();
+        (result.data, result.fin_seen)
     }
 
     /// 获取传输层统计信息
     /// Get transport layer statistics
     pub fn transport_stats(&self) -> TransportStats {
+        let unified_stats = self.unified_reliability.get_statistics();
         TransportStats {
             peer_recv_window: self.peer_recv_window,
-            congestion_window: self.congestion_window(),
+            congestion_window: unified_stats.congestion_window,
             smoothed_rtt: self.smoothed_rtt(),
             rtt_var: self.rtt_var(),
             send_buffer_empty: self.is_send_buffer_empty(),
@@ -129,13 +180,18 @@ impl TransportManager {
 
 impl std::fmt::Debug for TransportManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let unified_stats = self.unified_reliability.get_statistics();
         f.debug_struct("TransportManager")
             .field("peer_recv_window", &self.peer_recv_window)
-            .field("congestion_window", &self.congestion_window())
+            .field("congestion_window", &unified_stats.congestion_window)
             .field("smoothed_rtt", &self.smoothed_rtt())
             .field("send_buffer_empty", &self.is_send_buffer_empty())
             .field("recv_buffer_empty", &self.is_recv_buffer_empty())
             .field("in_flight_empty", &self.is_in_flight_empty())
+            .field("in_flight_count", &unified_stats.total_in_flight)
+            .field("active_timers", &unified_stats.active_timers)
+            .field("send_buffer_utilization", &unified_stats.send_buffer_utilization)
+            .field("receive_buffer_utilization", &unified_stats.receive_buffer_utilization)
             .finish()
     }
 }
@@ -193,22 +249,19 @@ impl TransportStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Config, core::reliability::congestion::vegas::Vegas};
 
-    async fn create_test_reliability() -> ReliabilityLayer {
+    async fn create_test_transport_manager() -> TransportManager {
         let config = Config::default();
-        let congestion_control = Box::new(Vegas::new(config.clone()));
         let connection_id = 1; // Test connection ID
         let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent, crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>>();
         let timer_actor = crate::timer::start_sender_timer_actor(timer_handle, None);
         let (tx_to_endpoint, _rx_from_stream) = tokio::sync::mpsc::channel(128);
-        ReliabilityLayer::new(config, congestion_control, connection_id, timer_actor, tx_to_endpoint)
+        TransportManager::new(connection_id, timer_actor, tx_to_endpoint, config)
     }
 
     #[tokio::test]
     async fn test_transport_manager_creation() {
-        let reliability = create_test_reliability().await;
-        let manager = TransportManager::new(reliability);
+        let manager = create_test_transport_manager().await;
         
         assert_eq!(manager.peer_recv_window(), 32);
         assert!(manager.is_send_buffer_empty());
@@ -218,16 +271,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_transport_manager_with_window() {
-        let reliability = create_test_reliability().await;
-        let manager = TransportManager::with_peer_window(reliability, 64);
+        let config = Config::default();
+        let connection_id = 1;
+        let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent, crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>>();
+        let timer_actor = crate::timer::start_sender_timer_actor(timer_handle, None);
+        let (tx_to_endpoint, _rx_from_stream) = tokio::sync::mpsc::channel(128);
+        
+        let manager = TransportManager::with_peer_window(connection_id, timer_actor, tx_to_endpoint, config, 64);
         
         assert_eq!(manager.peer_recv_window(), 64);
     }
 
     #[tokio::test]
     async fn test_peer_window_operations() {
-        let reliability = create_test_reliability().await;
-        let mut manager = TransportManager::new(reliability);
+        let mut manager = create_test_transport_manager().await;
         
         assert_eq!(manager.peer_recv_window(), 32);
         
@@ -237,8 +294,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_transport_stats() {
-        let reliability = create_test_reliability().await;
-        let manager = TransportManager::new(reliability);
+        let manager = create_test_transport_manager().await;
         
         let stats = manager.transport_stats();
         assert_eq!(stats.peer_recv_window, 32);
@@ -253,8 +309,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_transport_manager_debug() {
-        let reliability = create_test_reliability().await;
-        let manager = TransportManager::new(reliability);
+        let manager = create_test_transport_manager().await;
         
         let debug_string = format!("{:?}", manager);
         assert!(debug_string.contains("TransportManager"));

@@ -16,6 +16,13 @@ pub mod send_buffer;
 pub mod congestion;
 pub mod packet_timer_manager;
 
+// 新的分层架构模块
+// New layered architecture modules
+pub mod data;
+pub mod logic;
+pub mod coordination;
+pub mod unified_reliability;
+
 use self::{
     packetizer::{packetize, PacketizerContext},
     recv_buffer::ReceiveBuffer,
@@ -141,13 +148,6 @@ impl ReliabilityLayer {
             packet_timer_manager,
         }
     }
-
-    /// 更新PacketTimerManager的timeout_tx通道
-    /// Update PacketTimerManager's timeout_tx channel
-    pub fn update_packet_timer_timeout_tx(&mut self, timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>) {
-        self.packet_timer_manager.update_timeout_tx(timeout_tx);
-    }
-
     /// Handles an incoming ACK frame and returns comprehensive result.
     ///
     /// This method processes the SACK ranges to identify acknowledged and lost packets,

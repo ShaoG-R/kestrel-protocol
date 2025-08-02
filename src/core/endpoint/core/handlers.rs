@@ -43,7 +43,7 @@ impl<T: Transport> Endpoint<T> {
             
             let challenge_frame = create_path_challenge_frame(
                 self.identity.peer_cid(),
-                self.transport.reliability_mut().next_sequence_number(),
+                self.transport.unified_reliability_mut().next_sequence_number(),
                 self.timing.start_time(),
                 challenge_data,
             );
@@ -66,7 +66,7 @@ impl<T: Transport> Endpoint<T> {
 
                 // Acknowledge the SYN-ACK, potentially with piggybacked data if the
                 // user has already called write().
-                if !self.transport.reliability().is_send_buffer_empty() {
+                if !self.transport.unified_reliability().is_send_buffer_empty() {
                     self.packetize_and_send().await?;
                 } else {
                     self.send_standalone_ack().await?;
@@ -103,14 +103,14 @@ impl<T: Transport> Endpoint<T> {
                 info!(cid = self.identity.local_cid(), "Received duplicate SYN, ignoring.");
                 // If we have already been triggered to send a SYN-ACK (i.e., data is in the
                 // send buffer), we can resend it.
-                if !self.transport.reliability().is_send_buffer_empty() {
+                if !self.transport.unified_reliability().is_send_buffer_empty() {
                     self.send_syn_ack().await?;
                 }
             }
             Frame::Push { header, payload } => {
                 // For 0-RTT PUSH frames received during the `SynReceived` state, the ACK
                 // will be piggybacked onto the eventual SYN-ACK.
-                self.transport.reliability_mut()
+                self.transport.unified_reliability_mut()
                     .receive_push(header.sequence_number, payload);
             }
             Frame::Ack { header, payload } => {
@@ -119,7 +119,7 @@ impl<T: Transport> Endpoint<T> {
             Frame::Fin { header, .. } => {
                 // Handle FIN even in SynReceived state - this can happen with 0-RTT
                 // where client sends data and immediately closes
-                if self.transport.reliability_mut().receive_fin(header.sequence_number) {
+                if self.transport.unified_reliability_mut().receive_fin(header.sequence_number) {
                     self.send_standalone_ack().await?;
                     // 在0-RTT场景中，从SynReceived状态转换到FinWait - 使用生命周期管理器
                     // In 0-RTT scenario, transition from SynReceived to FinWait - using lifecycle manager
@@ -152,7 +152,7 @@ impl<T: Transport> Endpoint<T> {
         match frame {
             Frame::Push { header, payload } => {
                 if self
-                    .transport.reliability_mut()
+                    .transport.unified_reliability_mut()
                     .receive_push(header.sequence_number, payload)
                 {
                     self.send_standalone_ack().await?;
@@ -165,7 +165,7 @@ impl<T: Transport> Endpoint<T> {
                 // Just receive the FIN and ACK it. Do NOT change state here.
                 // The state transition to FinWait is driven by the `reassemble`
                 // method in the main loop, which is the single source of truth.
-                if self.transport.reliability_mut().receive_fin(header.sequence_number) {
+                if self.transport.unified_reliability_mut().receive_fin(header.sequence_number) {
                     self.send_standalone_ack().await?;
                 }
             }
@@ -239,7 +239,7 @@ impl<T: Transport> Endpoint<T> {
             Frame::Push { header, payload } => {
                 // Continue processing data frames during path validation
                 if self
-                    .transport.reliability_mut()
+                    .transport.unified_reliability_mut()
                     .receive_push(header.sequence_number, payload)
                 {
                     self.send_standalone_ack().await?;
@@ -249,7 +249,7 @@ impl<T: Transport> Endpoint<T> {
                 self.handle_ack_frame(header, payload).await?;
             }
             Frame::Fin { header, .. } => {
-                if self.transport.reliability_mut().receive_fin(header.sequence_number) {
+                if self.transport.unified_reliability_mut().receive_fin(header.sequence_number) {
                     self.send_standalone_ack().await?;
                     // 路径验证期间收到FIN，转换到FinWait - 使用生命周期管理器
                     // Received FIN during path validation, transition to FinWait - using lifecycle manager
@@ -284,7 +284,7 @@ impl<T: Transport> Endpoint<T> {
                 // It's possible to receive data after we've decided to close,
                 // as the peer might have sent it before receiving our FIN.
                 if self
-                    .transport.reliability_mut()
+                    .transport.unified_reliability_mut()
                     .receive_push(header.sequence_number, payload)
                 {
                     self.send_standalone_ack().await?;
@@ -294,7 +294,7 @@ impl<T: Transport> Endpoint<T> {
                 self.handle_ack_frame(header, payload).await?;
             }
             Frame::Fin { header, .. } => {
-                if self.transport.reliability_mut().receive_fin(header.sequence_number) {
+                if self.transport.unified_reliability_mut().receive_fin(header.sequence_number) {
                     self.send_standalone_ack().await?;
                     // 在Closing状态收到FIN，转换到ClosingWait - 使用生命周期管理器
                     // Received FIN in Closing state, transition to ClosingWait - using lifecycle manager
@@ -354,7 +354,7 @@ impl<T: Transport> Endpoint<T> {
         match frame {
             Frame::Push { header, payload } => {
                 if self
-                    .transport.reliability_mut()
+                    .transport.unified_reliability_mut()
                     .receive_push(header.sequence_number, payload)
                 {
                     self.send_standalone_ack().await?;
@@ -367,7 +367,7 @@ impl<T: Transport> Endpoint<T> {
                 // This is a retransmitted FIN from the peer. Just acknowledge it again.
                 // Do NOT change state here. The state should only transition to `Closing`
                 // when the local application calls `shutdown()`.
-                if self.transport.reliability_mut().receive_fin(header.sequence_number) {
+                if self.transport.unified_reliability_mut().receive_fin(header.sequence_number) {
                     self.send_standalone_ack().await?;
                 }
             }
@@ -399,14 +399,14 @@ impl<T: Transport> Endpoint<T> {
         let sack_ranges = decode_sack_ranges(payload);
         let now = Instant::now();
         let context = self.create_retransmission_context();
-        let frames_to_retx = self.transport.reliability_mut().handle_ack(
+        let frames_to_retx = self.transport.unified_reliability_mut().handle_ack_comprehensive(
             header.recv_next_sequence,
             sack_ranges,
             now,
             &context,
-        );
-        if !frames_to_retx.is_empty() {
-            self.send_frames(frames_to_retx).await?;
+        ).await;
+        if !frames_to_retx.frames_to_retransmit.is_empty() {
+            self.send_frames(frames_to_retx.frames_to_retransmit).await?;
         }
         Ok(())
     }
@@ -437,22 +437,19 @@ impl<T: Transport> Endpoint<T> {
                     self.transition_state(ConnectionState::Established)?;
 
                     // 1. Queue the user's data into the reliability layer's stream buffer.
-                    self.transport.reliability_mut().write_to_stream(data);
+                    self.transport.unified_reliability_mut().write_to_stream(data);
 
                     // 2. Create the payload-less SYN-ACK frame.
                     let syn_ack_frame =
                         create_syn_ack_frame(&self.config, self.identity.peer_cid(), self.identity.local_cid());
 
                     // 3. Use intelligent 0-RTT packet splitting to ensure SYN-ACK is in the first packet
-                    let now = Instant::now();
                     let peer_recv_window = self.transport.peer_recv_window();
-                    let packet_groups = self.transport.reliability_mut().packetize_zero_rtt_stream_data(
+                    let packet_groups = self.transport.unified_reliability_mut().packetize_zero_rtt(
                         self.identity.peer_cid(),
                         peer_recv_window,
-                        now,
-                        self.timing.start_time(),
                         syn_ack_frame,
-                        self.config.connection.max_packet_size,
+                        &self.config,
                     );
 
                     // 4. Register timers for all frames in packet groups
@@ -463,7 +460,7 @@ impl<T: Transport> Endpoint<T> {
                     }
                     
                     if !all_frames.is_empty() {
-                        let timer_count = self.transport.reliability_mut()
+                        let timer_count = self.transport.unified_reliability_mut()
                             .register_timers_for_packetized_frames(&all_frames)
                             .await;
                         trace!(
@@ -476,11 +473,11 @@ impl<T: Transport> Endpoint<T> {
                     // 5. Send each packet group separately to maintain the intelligent splitting
                     self.send_zero_rtt_packets(packet_groups).await?;
                 } else {
-                    self.transport.reliability_mut().write_to_stream(data);
+                    self.transport.unified_reliability_mut().write_to_stream(data);
                 }
             }
             StreamCommand::Close => {
-                self.shutdown();
+                self.shutdown().await;
                 // Only attempt to send a FIN packet if we're not already closed
                 if !self.lifecycle_manager.should_close() {
                     self.packetize_and_send().await?;
@@ -501,7 +498,7 @@ impl<T: Transport> Endpoint<T> {
 
                 let challenge_frame = create_path_challenge_frame(
                     self.identity.peer_cid(),
-                    self.transport.reliability_mut().next_sequence_number(),
+                    self.transport.unified_reliability_mut().next_sequence_number(),
                     self.timing.start_time(),
                     challenge_data,
                 );
@@ -532,7 +529,7 @@ impl<T: Transport> Endpoint<T> {
     }
 
 
-    fn shutdown(&mut self) {
+    async fn shutdown(&mut self) {
         // 用户主动关闭，根据状态决定处理方式
         // User-initiated close, handle based on current state
 
@@ -542,7 +539,7 @@ impl<T: Transport> Endpoint<T> {
                 // 如果没有待发送的数据，可以立即关闭用户流
                 // In SynReceived state, connection is not established yet
                 // If there's no pending data, we can immediately close the user stream
-                if self.transport.reliability().is_send_buffer_empty() {
+                if self.transport.unified_reliability().is_send_buffer_empty() {
                     // 没有待发送数据，立即关闭用户流接收器
                     *self.channels.tx_to_stream_mut() = None;
                 }
@@ -550,17 +547,17 @@ impl<T: Transport> Endpoint<T> {
                 // 尝试优雅关闭
                 if let Ok(()) = self.begin_graceful_shutdown() {
                     if self.lifecycle_manager.should_close() {
-                        self.transport.reliability_mut().clear_in_flight_packets();
+                        self.transport.unified_reliability_mut().clear_in_flight_packets().await;
                         // 确保用户流已关闭
                         *self.channels.tx_to_stream_mut() = None;
                     }
                 }
             }
             crate::core::endpoint::types::state::ConnectionState::Connecting => {
-                if self.transport.reliability().is_send_buffer_empty() {
+                if self.transport.unified_reliability().is_send_buffer_empty() {
                     // 没有待发送数据，直接关闭
                     if let Ok(()) = self.lifecycle_manager.transition_to(crate::core::endpoint::types::state::ConnectionState::Closed) {
-                        self.transport.reliability_mut().clear_in_flight_packets();
+                        self.transport.unified_reliability_mut().clear_in_flight_packets().await;
                         // 连接直接关闭时才关闭用户流
                         *self.channels.tx_to_stream_mut() = None;
                     }
@@ -569,7 +566,7 @@ impl<T: Transport> Endpoint<T> {
                     if let Ok(()) = self.begin_graceful_shutdown() {
                         // 不要在这里关闭用户流，等待连接完全关闭
                         if self.lifecycle_manager.should_close() {
-                            self.transport.reliability_mut().clear_in_flight_packets();
+                            self.transport.unified_reliability_mut().clear_in_flight_packets().await;
                             *self.channels.tx_to_stream_mut() = None;
                         }
                     }
@@ -581,7 +578,7 @@ impl<T: Transport> Endpoint<T> {
                 if let Ok(()) = self.begin_graceful_shutdown() {
                     // 只有连接完全关闭时才关闭用户流
                     if self.lifecycle_manager.should_close() {
-                        self.transport.reliability_mut().clear_in_flight_packets();
+                        self.transport.unified_reliability_mut().clear_in_flight_packets().await;
                         *self.channels.tx_to_stream_mut() = None;
                     }
                 }

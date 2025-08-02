@@ -4,7 +4,6 @@ use crate::core::endpoint::{Endpoint, StreamCommand};
 use crate::socket::{Transport, TransportCommand};
 use crate::{
     config::Config,
-    core::reliability::ReliabilityLayer,
     socket::SocketActorCommand,
     error::Result,
     timer::{HybridTimerTaskHandle, task::types::SenderCallback},
@@ -20,7 +19,7 @@ use crate::core::endpoint::types::{
     state::ConnectionState,
     transport::TransportManager,
 };
-use crate::core::reliability::congestion::vegas::Vegas;
+
 
 impl<T: Transport> Endpoint<T> {
     /// Creates a new `Endpoint` for the client-side.
@@ -36,15 +35,20 @@ impl<T: Transport> Endpoint<T> {
     ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
-
-        let congestion_control = Box::new(Vegas::new(config.clone()));
         
         // 创建定时器Actor用于批量定时器管理
         // Create timer actor for batch timer management
         let timer_actor = crate::timer::start_sender_timer_actor(timer_handle.clone(), None);
         let (mut timing, timer_event_rx) = TimingManager::new(local_cid, timer_handle);
 
-        let mut reliability = ReliabilityLayer::new(config.clone(), congestion_control, local_cid, timer_actor, timing.get_timeout_tx());
+        // 创建使用统一可靠性层的传输管理器
+        // Create transport manager with unified reliability layer
+        let mut transport = TransportManager::new(
+            local_cid,
+            timer_actor,
+            timing.get_timeout_tx(),
+            config.clone(),
+        );
         
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer
@@ -53,8 +57,9 @@ impl<T: Transport> Endpoint<T> {
         }
         
         if let Some(data) = initial_data {
-            // Immediately write the 0-RTT data to the stream buffer.
-            reliability.write_to_stream(data);
+            // 立即写入0-RTT数据到发送缓冲区
+            // Immediately write the 0-RTT data to send buffer
+            transport.unified_reliability_mut().write_to_send_buffer(data);
         }
 
         let mut lifecycle_manager = DefaultLifecycleManager::new(
@@ -81,7 +86,7 @@ impl<T: Transport> Endpoint<T> {
         let endpoint = Self {
             identity: ConnectionIdentity::new(local_cid, 0, remote_addr),
             timing,
-            transport: TransportManager::new(reliability),
+            transport,
             lifecycle_manager,
             config,
             channels: ChannelManager::new(
@@ -110,8 +115,6 @@ impl<T: Transport> Endpoint<T> {
     ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
-
-        let congestion_control = Box::new(Vegas::new(config.clone()));
         
         // 创建定时器Actor用于批量定时器管理
         // Create timer actor for batch timer management
@@ -125,8 +128,14 @@ impl<T: Transport> Endpoint<T> {
 
         let (mut timing, timer_event_rx) = TimingManager::new(local_cid, timer_handle);
         
-        let reliability = ReliabilityLayer::new(config.clone(), congestion_control, local_cid, timer_actor, timing.get_timeout_tx());
-
+        // 创建使用统一可靠性层的传输管理器
+        // Create transport manager with unified reliability layer
+        let transport = TransportManager::new(
+            local_cid,
+            timer_actor,
+            timing.get_timeout_tx(),
+            config.clone(),
+        );
 
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer
@@ -137,7 +146,7 @@ impl<T: Transport> Endpoint<T> {
         let endpoint = Self {
             identity: ConnectionIdentity::new(local_cid, peer_cid, remote_addr),
             timing,
-            transport: TransportManager::new(reliability),
+            transport,
             lifecycle_manager,
             config,
             channels: ChannelManager::new(

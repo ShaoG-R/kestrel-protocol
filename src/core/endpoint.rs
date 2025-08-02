@@ -18,7 +18,7 @@ pub use types::command::StreamCommand;
 use lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::{
     config::Config,
-    core::reliability::ReliabilityLayer,
+    core::reliability::unified_reliability::UnifiedReliabilityLayer,
     error::Result,
     socket::{SocketActorCommand, Transport},
 };
@@ -149,7 +149,7 @@ impl<T: Transport> Endpoint<T> {
                 
                 // 使用PacketTimerManager处理特定数据包的超时
                 // Use PacketTimerManager to handle specific packet timeout
-                if let Some(retx_frame) = self.transport.reliability_mut()
+                if let Some(retx_frame) = self.transport.unified_reliability_mut()
                     .handle_packet_timer_timeout(timer_id, &context).await 
                 {
                     trace!(
@@ -203,7 +203,7 @@ impl<T: Transport> Endpoint<T> {
                 
                 // 检查是否可以发送EOF
                 // Check if EOF can be sent
-                if self.timing.should_send_eof(self.transport.reliability().is_recv_buffer_empty()) {
+                if self.timing.should_send_eof(self.transport.unified_reliability().is_recv_buffer_empty()) {
                     if let Some(tx) = self.channels.tx_to_stream_mut().take() {
                         trace!(
                             cid = self.identity.local_cid(),
@@ -231,7 +231,7 @@ impl<T: Transport> Endpoint<T> {
     /// 使用当前端点状态创建重传上下文
     pub fn create_retransmission_context(&self) -> crate::packet::frame::RetransmissionContext {
         let (recv_next_sequence, recv_window_size) = {
-            let info = self.transport.reliability().get_ack_info();
+            let info = self.transport.unified_reliability().get_ack_info();
             (info.1, info.2)
         };
 
@@ -352,14 +352,14 @@ impl<T: Transport> Endpoint<T> {
 
     /// 获取可靠性层的可变引用
     /// Gets a mutable reference to the reliability layer
-    pub fn reliability_mut(&mut self) -> &mut ReliabilityLayer {
-        self.transport.reliability_mut()
+    pub fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer {
+        self.transport.unified_reliability_mut()
     }
 
     /// 获取可靠性层的引用
     /// Gets a reference to the reliability layer
-    pub fn reliability(&self) -> &ReliabilityLayer {
-        self.transport.reliability()
+    pub fn unified_reliability(&self) -> &UnifiedReliabilityLayer {
+        self.transport.unified_reliability()
     }
 
     // === 分层超时管理协调接口 Layered Timeout Management Coordination Interface ===

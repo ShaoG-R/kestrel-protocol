@@ -75,7 +75,8 @@ impl<T: Transport> Endpoint<T> {
             );
 
             // 5. Reassemble data and send to the user stream
-            let (data_to_send, fin_seen) = self.transport.reliability_mut().reassemble();
+            let reassembly_result = self.transport.unified_reliability_mut().reassemble_data();
+            let (data_to_send, fin_seen) = (reassembly_result.data, reassembly_result.fin_seen);
             if fin_seen {
                 // The FIN has been reached in the byte stream. No more data will arrive.
                 // We can now set the flag to schedule the EOF signal for the user stream.
@@ -145,25 +146,25 @@ impl<T: Transport> Endpoint<T> {
             // instead of polling in every event loop iteration
 
             // 9. Check if we need to close the connection
-            if self.should_close() {
+            if self.should_close().await {
                 break;
             }
         }
         Ok(())
     }
 
-    fn should_close(&mut self) -> bool {
+    async fn should_close(&mut self) -> bool {
         // Condition 1: We are in a closing state AND all in-flight data is ACKed.
         // This is the primary condition to transition into the `Closed` state.
         let current_state = self.lifecycle_manager.current_state();
         if (*current_state == ConnectionState::Closing
             || *current_state == ConnectionState::ClosingWait)
-            && self.transport.reliability().is_in_flight_empty()
+            && self.transport.unified_reliability().is_in_flight_empty()
         {
             // 所有数据已确认，转换到Closed状态 - 使用生命周期管理器
             // All data acknowledged, transition to Closed state - using lifecycle manager
             if let Ok(()) = self.transition_state(ConnectionState::Closed) {
-                self.transport.reliability_mut().clear_in_flight_packets(); // Clean up here
+                self.transport.unified_reliability_mut().clear_in_flight_packets().await; // Clean up here
                 // 连接关闭时，关闭用户流接收器
                 // Close user stream receiver when connection closes
                 *self.channels.tx_to_stream_mut() = None;
@@ -175,5 +176,5 @@ impl<T: Transport> Endpoint<T> {
         // The previous logic for `FinWait` was causing premature termination. The endpoint
         // should wait in `FinWait` for the user to actively close the stream.
         self.lifecycle_manager.should_close()
-    }
+        }
 }

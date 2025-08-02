@@ -9,13 +9,9 @@
 //! improving code testability and maintainability.
 
 use crate::{
-    error::Result,
-    packet::frame::Frame,
-    socket::SocketActorCommand,
     core::{
-        endpoint::types::state::ConnectionState,
-        reliability::ReliabilityLayer,
-    },
+        endpoint::types::state::ConnectionState, reliability::unified_reliability::UnifiedReliabilityLayer,
+    }, error::Result, packet::frame::Frame, socket::SocketActorCommand
 };
 use std::net::SocketAddr;
 use tokio::{sync::mpsc, time::Instant};
@@ -89,11 +85,11 @@ pub trait EndpointOperations: Send {
     
     /// 获取可靠性层的只读引用
     /// Get read-only reference to reliability layer
-    fn reliability(&self) -> &ReliabilityLayer;
+    fn unified_reliability(&self) -> &UnifiedReliabilityLayer;
     
     /// 获取可靠性层的可变引用
     /// Get mutable reference to reliability layer
-    fn reliability_mut(&mut self) -> &mut ReliabilityLayer;
+    fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer;
     
     /// 检查发送缓冲区是否为空
     /// Check if send buffer is empty
@@ -235,7 +231,7 @@ mod tests {
         pub peer_recv_window: u32,
         pub current_state: ConnectionState,
         pub sent_frames: Arc<Mutex<VecDeque<Frame>>>,
-        pub reliability: ReliabilityLayer,
+        pub unified_reliability: UnifiedReliabilityLayer,
         pub command_tx: mpsc::Sender<SocketActorCommand>,
     }
 
@@ -250,14 +246,13 @@ mod tests {
                 peer_recv_window: 1000,
                 current_state: ConnectionState::Established,
                 sent_frames: Arc::new(Mutex::new(VecDeque::new())),
-                reliability: {
+                unified_reliability: {
                     let config = crate::config::Config::default();
-                    let congestion_control = Box::new(crate::core::reliability::congestion::vegas::Vegas::new(config.clone()));
                     let connection_id = 1; // Test connection ID
                     let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent, crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>>();
                     let timer_actor = crate::timer::start_sender_timer_actor(timer_handle, None);
                     let (tx_to_endpoint, _rx_from_stream) = tokio::sync::mpsc::channel(128);
-                    ReliabilityLayer::new(config, congestion_control, connection_id, timer_actor, tx_to_endpoint)
+                    UnifiedReliabilityLayer::new(connection_id, timer_actor, tx_to_endpoint, config)
                 },
                 command_tx,
             };
@@ -285,8 +280,8 @@ mod tests {
         fn set_remote_addr(&mut self, addr: SocketAddr) { self.remote_addr = addr; }
         fn complete_path_validation(&mut self, _success: bool) -> Result<()> { Ok(()) }
         
-        fn reliability(&self) -> &ReliabilityLayer { &self.reliability }
-        fn reliability_mut(&mut self) -> &mut ReliabilityLayer { &mut self.reliability }
+        fn unified_reliability(&self) -> &UnifiedReliabilityLayer { &self.unified_reliability }
+        fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer { &mut self.unified_reliability }
         fn is_send_buffer_empty(&self) -> bool { true }
         
         async fn send_syn_ack_frame(&mut self) -> Result<()> { Ok(()) }

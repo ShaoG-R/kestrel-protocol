@@ -9,7 +9,7 @@
 
 use crate::core::endpoint::Endpoint;
 use crate::{
-    core::{endpoint::{core::frame::create_path_response_frame, lifecycle::ConnectionLifecycleManager, processing::traits::{EndpointOperations, ProcessorOperations}, types::state::ConnectionState}, reliability::ReliabilityLayer},
+    core::{endpoint::{core::frame::create_path_response_frame, lifecycle::ConnectionLifecycleManager, processing::traits::{EndpointOperations, ProcessorOperations}, types::state::ConnectionState}, reliability::unified_reliability::UnifiedReliabilityLayer},
     error::Result,
     packet::{frame::Frame, sack::SackRange},
     socket::{SocketActorCommand, Transport},
@@ -18,7 +18,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::{sync::mpsc, time::Instant};
-use tracing::trace;
 
 /// 为 Endpoint<S> 实现 EndpointOperations trait
 /// Implementation of EndpointOperations trait for Endpoint<S>
@@ -79,16 +78,16 @@ impl<T: Transport> EndpointOperations for Endpoint<T> {
 
     // ========== 可靠性层操作 (Reliability Layer Operations) ==========
     
-    fn reliability(&self) -> &ReliabilityLayer {
-        self.transport.reliability()
+    fn unified_reliability(&self) -> &UnifiedReliabilityLayer {
+        self.transport.unified_reliability()
     }
     
-    fn reliability_mut(&mut self) -> &mut ReliabilityLayer {
-        self.transport.reliability_mut()
+    fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer {
+        self.transport.unified_reliability_mut()
     }
     
     fn is_send_buffer_empty(&self) -> bool {
-        self.reliability().is_send_buffer_empty()
+        self.unified_reliability().is_send_buffer_empty()
     }
 
     // ========== 帧发送操作 (Frame Sending Operations) ==========
@@ -164,27 +163,12 @@ impl<T: Transport> ProcessorOperations for Endpoint<T> {
         
         // 使用新的综合ACK处理方法
         // Use new comprehensive ACK processing method
-        let ack_result = self.transport.reliability_mut().handle_ack_comprehensive(
+        let ack_result = self.unified_reliability_mut().handle_ack_comprehensive(
             recv_next_seq,
             sack_ranges_converted,
             now,
             &context,
-        );
-        
-        // 异步处理已确认数据包的PacketTimerManager更新
-        // Async processing of PacketTimerManager updates for acknowledged packets
-        if !ack_result.newly_acked_sequences.is_empty() {
-            let acked_count = self.transport.reliability_mut()
-                .process_ack_acknowledgment(&ack_result.newly_acked_sequences)
-                .await;
-            
-            trace!(
-                cid = self.identity.local_cid(),
-                acked_count = acked_count,
-                sequences_count = ack_result.newly_acked_sequences.len(),
-                "Processed async PacketTimerManager acknowledgment in endpoint"
-            );
-        }
+        ).await;
         
         Ok(ack_result.frames_to_retransmit)
     }
@@ -196,7 +180,7 @@ impl<T: Transport> ProcessorOperations for Endpoint<T> {
     ) -> Result<()> {
         // 接收数据并检查是否需要立即发送 ACK
         // Receive data and check if immediate ACK is needed
-        if self.transport.reliability_mut().receive_push(seq, payload) {
+        if self.unified_reliability_mut().receive_push(seq, payload) {
             self.send_standalone_ack().await?;
         }
         Ok(())
@@ -205,7 +189,7 @@ impl<T: Transport> ProcessorOperations for Endpoint<T> {
     async fn receive_fin_and_ack(&mut self, seq: u32) -> Result<bool> {
         // 接收 FIN 并处理相应逻辑，返回是否成功接收了 FIN
         // Receive FIN and handle corresponding logic, return whether FIN was successfully received
-        let fin_received = self.transport.reliability_mut().receive_fin(seq);
+        let fin_received = self.transport.unified_reliability_mut().receive_fin(seq);
         if fin_received {
             self.send_standalone_ack().await?;
         }
@@ -316,7 +300,7 @@ mod tests {
         let endpoint = create_test_endpoint().await;
         
         // 测试可靠性层访问
-        let _reliability = endpoint.reliability();
+        let _reliability = endpoint.unified_reliability();
         assert!(endpoint.is_send_buffer_empty());
     }
 

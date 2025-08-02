@@ -226,7 +226,7 @@ impl PushProcessor {
         // ACK 将被捎带到最终的 SYN-ACK 上
         // For 0-RTT PUSH frames received during the SynReceived state,
         // the ACK will be piggybacked onto the eventual SYN-ACK
-        endpoint.reliability_mut().receive_push(header.sequence_number, payload);
+        endpoint.unified_reliability_mut().receive_push(header.sequence_number, payload);
         
         Ok(())
     }

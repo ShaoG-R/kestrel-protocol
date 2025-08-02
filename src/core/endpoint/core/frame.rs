@@ -6,8 +6,8 @@ use tokio::time::Instant;
 
 use crate::{
     config::Config,
-    core::reliability::ReliabilityLayer,
-    packet::frame::Frame,
+    core::reliability::unified_reliability::UnifiedReliabilityLayer,
+    packet::frame::Frame
 };
 
 /// Creates a SYN frame.
@@ -27,7 +27,7 @@ pub(in crate::core::endpoint) fn create_syn_ack_frame(
 /// Creates a standalone ACK frame.
 pub(in crate::core::endpoint) fn create_ack_frame(
     peer_cid: u32,
-    reliability: &mut ReliabilityLayer,
+    reliability: &mut UnifiedReliabilityLayer,
     start_time: Instant,
 ) -> Frame {
     let (sack_ranges, recv_next, window_size) = reliability.get_ack_info();
@@ -45,7 +45,7 @@ pub(in crate::core::endpoint) fn create_ack_frame(
 pub(in crate::core::endpoint) fn create_fin_frame(
     peer_cid: u32,
     sequence_number: u32,
-    reliability: &ReliabilityLayer,
+    reliability: &UnifiedReliabilityLayer,
     start_time: Instant,
 ) -> Frame {
     let timestamp = Instant::now().duration_since(start_time).as_millis() as u32;
@@ -86,17 +86,15 @@ pub(crate) fn create_path_response_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::reliability::congestion::vegas::Vegas;
     use bytes::Bytes;
 
-    async fn create_test_reliability_layer() -> ReliabilityLayer {
+    async fn create_test_reliability_layer() -> UnifiedReliabilityLayer {
         let config = Config::default();
-        let congestion_control = Box::new(Vegas::new(config.clone()));
         let connection_id = 1; // Test connection ID
         let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent, crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>>();
         let timer_actor = crate::timer::start_sender_timer_actor(timer_handle, None);
         let (tx_to_endpoint, _rx_from_stream) = tokio::sync::mpsc::channel(128);
-        ReliabilityLayer::new(config, congestion_control, connection_id, timer_actor, tx_to_endpoint)
+        UnifiedReliabilityLayer::new(connection_id, timer_actor, tx_to_endpoint, config)
     }   
 
     #[test]
@@ -115,7 +113,7 @@ mod tests {
     async fn test_create_fin_frame() {
         let mut reliability = create_test_reliability_layer().await;
         reliability.receive_push(0, Bytes::new());
-        let _ = reliability.reassemble();
+        let _ = reliability.reassemble_data();
 
         let frame = create_fin_frame(456, 10, &reliability, Instant::now());
         match frame {
@@ -136,7 +134,7 @@ mod tests {
         reliability.receive_push(0, Bytes::new());
         // Call reassemble to update the internal state of the receive buffer,
         // which moves the `next_sequence` forward.
-        let _ = reliability.reassemble();
+        let _ = reliability.reassemble_data();
 
         let frame = create_ack_frame(789, &mut reliability, Instant::now());
         match frame {

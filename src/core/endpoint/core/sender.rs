@@ -100,27 +100,25 @@ impl<T: Transport> Endpoint<T> {
         // 1. Collect all frames that need to be sent without requiring &mut self.
         // 1. 收集所有需要发送的帧，这些操作不需要 &mut self。
         let peer_recv_window = self.transport.peer_recv_window();
-        let mut frames_to_send = self.transport.reliability_mut().packetize_stream_data(
+        let mut frames_to_send = self.transport.unified_reliability_mut().packetize(
             self.identity.peer_cid(),
             peer_recv_window,
-            now,
-            self.timing.start_time(),
             None,
         );
 
         // 2. Perform actions that require &mut self and collect their resulting frames.
         // 2. 执行需要 &mut self 的操作，并收集它们产生的帧。
         if *self.state() == ConnectionState::Closing
-            && !self.transport.reliability().has_fin_in_flight()
+            && !self.transport.unified_reliability().has_fin_in_flight()
         {
             let fin_frame = create_fin_frame(
                 self.identity.peer_cid(),
-                self.transport.reliability_mut().next_sequence_number(),
-                self.transport.reliability(),
+                self.transport.unified_reliability_mut().next_sequence_number(),
+                self.transport.unified_reliability(),
                 self.timing.start_time(),
             );
-            self.transport.reliability_mut()
-                .track_frame_in_flight(fin_frame.clone(), now);
+            self.transport.unified_reliability_mut()
+                .track_frame_in_flight(fin_frame.clone(), now).await;
             frames_to_send.push(fin_frame);
         }
 
@@ -129,7 +127,7 @@ impl<T: Transport> Endpoint<T> {
         if !frames_to_send.is_empty() {
             // 4. Register retransmission timers for frames that need reliability tracking
             // 4. 为需要可靠传输跟踪的帧注册重传定时器
-            let timer_count = self.transport.reliability_mut()
+            let timer_count = self.transport.unified_reliability_mut()
                 .register_timers_for_packetized_frames(&frames_to_send)
                 .await;
             if timer_count > 0 {
@@ -148,18 +146,15 @@ impl<T: Transport> Endpoint<T> {
 
     pub(in crate::core::endpoint) async fn send_initial_syn(&mut self) -> Result<()> {
         // Phase 1: Collect all frames to be sent for the initial packet.
-        let now = Instant::now();
         let mut frames_to_send = Vec::new();
 
         let syn_frame = create_syn_frame(&self.config, self.identity.local_cid());
         frames_to_send.push(syn_frame);
 
         let peer_recv_window = self.transport.peer_recv_window();
-        let push_frames = self.transport.reliability_mut().packetize_stream_data(
+        let push_frames = self.transport.unified_reliability_mut().packetize(
             self.identity.peer_cid(),
             peer_recv_window,
-            now,
-            self.timing.start_time(),
             None,
         );
         frames_to_send.extend(push_frames);
@@ -185,11 +180,11 @@ impl<T: Transport> Endpoint<T> {
     }
 
     pub(in crate::core::endpoint) async fn send_standalone_ack(&mut self) -> Result<()> {
-        if !self.transport.reliability().is_ack_pending() {
+        if !self.transport.unified_reliability().is_ack_pending() {
             return Ok(());
         }
-        let frame = create_ack_frame(self.identity.peer_cid(), self.transport.reliability_mut(), self.timing.start_time());
-        self.transport.reliability_mut().on_ack_sent(); // This requires &mut self
+        let frame = create_ack_frame(self.identity.peer_cid(), self.transport.unified_reliability_mut(), self.timing.start_time());
+        self.transport.unified_reliability_mut().on_ack_sent(); // This requires &mut self
 
         // Since we've mutated self, we can now send the frame.
         self.send_raw_frames(vec![frame]).await
