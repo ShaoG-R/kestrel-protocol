@@ -120,14 +120,35 @@ impl TimerEventHandler {
         }
     }
     
-    /// 为数据包调度重传定时器
-    /// Schedule retransmission timer for packet
+    /// 为数据包调度重传定时器（增强错误处理）
+    /// Schedule retransmission timer for packet (enhanced error handling)
     pub async fn schedule_retransmission_timer(
         &self,
         store: &mut InFlightPacketStore,
         seq: u32,
         rto: Duration,
     ) -> Result<ActorTimerId, String> {
+        // 验证输入参数
+        if rto.is_zero() {
+            let error = "Invalid RTO: cannot be zero".to_string();
+            warn!(seq = seq, error = error);
+            return Err(error);
+        }
+        
+        if rto > Duration::from_secs(300) { // 5分钟上限
+            let error = format!("RTO too large: {} seconds", rto.as_secs());
+            warn!(seq = seq, error = error);
+            return Err(error);
+        }
+        
+        // 检查序列号是否已有定时器
+        if let Some(packet) = store.get_packet(seq) {
+            if packet.timer_id.is_some() {
+                debug!(seq = seq, "Packet already has timer, cancelling first");
+                self.cancel_retransmission_timer(store, seq).await;
+            }
+        }
+        
         // 使用回调式ID注入，确保事件中的timer_id与实际分配的一致
         // Use callback-based ID injection to ensure timer_id in event matches the allocated one
         let timer_id = self.timer_actor.register_timer_with_callback(
@@ -237,23 +258,73 @@ impl TimerEventHandler {
         self.schedule_retransmission_timer(store, seq, rto).await
     }
     
-    /// 批量重新调度定时器
-    /// Batch reschedule timers
+    /// 批量重新调度定时器（优化版）
+    /// Batch reschedule timers (optimized version)
     pub async fn batch_reschedule_timers(
         &self,
         store: &mut InFlightPacketStore,
         sequences: &[u32],
         rto: Duration,
     ) -> Vec<(u32, Result<ActorTimerId, String>)> {
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(sequences.len());
         
         // 先批量取消现有定时器
-        self.batch_cancel_retransmission_timers(store, sequences).await;
+        let cancelled_count = self.batch_cancel_retransmission_timers(store, sequences).await;
         
-        // 为每个序列号调度新定时器
-        for &seq in sequences {
-            let result = self.schedule_retransmission_timer(store, seq, rto).await;
-            results.push((seq, result));
+        debug!(
+            requested = sequences.len(),
+            cancelled = cancelled_count,
+            "Batch cancelled timers before rescheduling"
+        );
+        
+        // 并发调度新定时器（但要控制并发度避免过载timer actor）
+        const MAX_CONCURRENT: usize = 10;
+        
+        for chunk in sequences.chunks(MAX_CONCURRENT) {
+            let mut tasks = Vec::new();
+            
+            for &seq in chunk {
+                let connection_id = self.connection_id;
+                let timer_actor = self.timer_actor.clone();
+                let timeout_tx = self.timeout_tx.clone();
+                
+                let task = tokio::spawn(async move {
+                    let timer_id = timer_actor.register_timer_with_callback(
+                        connection_id,
+                        rto,
+                        SenderCallback::new(timeout_tx),
+                        move |timer_id| TimeoutEvent::PacketRetransmissionTimeout {
+                            sequence_number: seq,
+                            timer_id,
+                        }
+                    ).await;
+                    (seq, timer_id)
+                });
+                
+                tasks.push(task);
+            }
+            
+            // 等待这批任务完成
+            for task in tasks {
+                match task.await {
+                    Ok((seq, timer_result)) => {
+                        match timer_result {
+                            Ok(timer_id) => {
+                                store.set_timer_mapping(timer_id, seq);
+                                results.push((seq, Ok(timer_id)));
+                            }
+                            Err(e) => {
+                                results.push((seq, Err(e)));
+                            }
+                        }
+                    }
+                    Err(join_error) => {
+                        // 处理task join错误
+                        let error_msg = format!("Task join error: {}", join_error);
+                        debug!(seq = "unknown", error = error_msg, "Failed to join timer scheduling task");
+                    }
+                }
+            }
         }
         
         results
