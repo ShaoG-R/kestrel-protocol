@@ -102,12 +102,25 @@ impl SackProcessor {
         for seq in all_sequences {
             if seq < recv_next_seq {
                 if let Some(packet) = store.get_packet(seq) {
-                    // 计算RTT样本
+                    // 计算RTT样本，防止时间倒流
                     let rtt_sample = now.saturating_duration_since(packet.last_sent_at);
-                    result.rtt_samples.push(rtt_sample);
-                    result.cumulative_acked.push(seq);
                     
-                    trace!(seq = seq, rtt_ms = rtt_sample.as_millis(), "Cumulative ACK processed");
+                    // 只接受合理的RTT样本（小于10秒） - 与SACK范围处理保持一致
+                    if rtt_sample < Duration::from_secs(10) {
+                        result.rtt_samples.push(rtt_sample);
+                        result.cumulative_acked.push(seq);
+                        
+                        trace!(seq = seq, rtt_ms = rtt_sample.as_millis(), "Cumulative ACK processed");
+                    } else {
+                        // 仍然标记为累积确认，但不添加RTT样本
+                        result.cumulative_acked.push(seq);
+                        
+                        trace!(
+                            seq = seq,
+                            rtt_ms = rtt_sample.as_millis(),
+                            "Cumulative ACK processed, but RTT sample too large, ignoring"
+                        );
+                    }
                 }
             }
         }
@@ -199,7 +212,8 @@ impl SackProcessor {
                 let higher_acked_count = sack_acked_sorted.partition_point(|&acked_seq| acked_seq <= seq);
                 let higher_acked_count = (sack_acked_sorted.len() - higher_acked_count) as u8;
                 
-                if higher_acked_count >= self.fast_retx_threshold {
+                // 只有当更高序列号的确认数量严格大于阈值时才触发快速重传
+                if higher_acked_count > self.fast_retx_threshold {
                     result.fast_retx_candidates.push(seq);
                     
                     trace!(
