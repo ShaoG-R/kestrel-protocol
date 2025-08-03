@@ -48,13 +48,13 @@ pub enum RetransmissionType {
 pub struct RetransmissionDecider {
     /// 最大重传次数
     /// Maximum retransmission count
-    max_retx_count: u32,
+    max_retx_count: u8,
 }
 
 impl RetransmissionDecider {
     /// 创建新的重传决策器
     /// Create new retransmission decider
-    pub fn new(max_retx_count: u32) -> Self {
+    pub fn new(max_retx_count: u8) -> Self {
         Self {
             max_retx_count,
         }
@@ -250,11 +250,5 @@ impl RetransmissionDecider {
     /// Get fast retransmission candidate count
     pub fn get_fast_retx_candidate_count(&self, store: &InFlightPacketStore) -> usize {
         store.get_packets_by_state(PacketState::FastRetxCandidate).len()
-    }
-}
-
-impl Default for RetransmissionDecider {
-    fn default() -> Self {
-        Self::new(5) // 默认最大重传次数为5
     }
 }

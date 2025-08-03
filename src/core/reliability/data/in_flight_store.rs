@@ -47,11 +47,11 @@ pub struct InFlightPacket {
     
     /// 重传次数
     /// Retransmission count
-    pub retx_count: u32,
+    pub retx_count: u8,
     
     /// 最大重传次数
     /// Maximum retransmission count
-    pub max_retx_count: u32,
+    pub max_retx_count: u8,
     
     /// 当前的定时器ID（如果有）
     /// Current timer ID (if any)
@@ -63,7 +63,7 @@ pub struct InFlightPacket {
     
     /// 快速重传计数
     /// Fast retransmission count
-    pub fast_retx_count: u16,
+    pub fast_retx_count: u8,
 }
 
 /// 在途数据包存储器
@@ -80,7 +80,7 @@ pub struct InFlightPacketStore {
     
     /// 快速重传候选缓存
     /// Fast retransmission candidate cache
-    fast_retx_candidates: BTreeMap<u32, u16>, // seq -> duplicate_ack_count
+    fast_retx_candidates: BTreeMap<u32, u8>, // seq -> duplicate_ack_count
 }
 
 impl InFlightPacketStore {
@@ -216,7 +216,7 @@ impl InFlightPacketStore {
     
     /// 更新快速重传候选状态
     /// Update fast retransmission candidate state
-    pub fn update_fast_retx_candidate(&mut self, seq: u32, duplicate_count: u16) {
+    pub fn update_fast_retx_candidate(&mut self, seq: u32, duplicate_count: u8) {
         self.fast_retx_candidates.insert(seq, duplicate_count);
         
         if let Some(packet) = self.packets.get_mut(&seq) {
@@ -227,7 +227,7 @@ impl InFlightPacketStore {
     
     /// 获取快速重传候选
     /// Get fast retransmission candidates
-    pub fn get_fast_retx_candidates(&self) -> Vec<(u32, u16)> {
+    pub fn get_fast_retx_candidates(&self) -> Vec<(u32, u8)> {
         self.fast_retx_candidates.iter().map(|(&seq, &count)| (seq, count)).collect()
     }
 }

@@ -110,7 +110,7 @@ impl UnifiedReliabilityLayer {
                 timer_actor,
                 timeout_tx,
                 config.reliability.fast_retx_threshold,
-                config.reliability.handshake_data_max_retries as u32,
+                config.reliability.handshake_data_max_retries,
             ),
             buffer_coordinator: BufferCoordinator::new(
                 &config,

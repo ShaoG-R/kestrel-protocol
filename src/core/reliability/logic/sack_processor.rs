@@ -40,13 +40,13 @@ pub struct SackProcessResult {
 pub struct SackProcessor {
     /// 快速重传阈值
     /// Fast retransmission threshold
-    fast_retx_threshold: u16,
+    fast_retx_threshold: u8,
 }
 
 impl SackProcessor {
     /// 创建新的SACK处理器
     /// Create new SACK processor
-    pub fn new(fast_retx_threshold: u16) -> Self {
+    pub fn new(fast_retx_threshold: u8) -> Self {
         Self {
             fast_retx_threshold,
         }
@@ -155,7 +155,7 @@ impl SackProcessor {
             // 检查是否有更高序列号的数据包已被SACK确认
             let higher_acked_count = result.sack_acked.iter()
                 .filter(|&&acked_seq| acked_seq > seq)
-                .count() as u16;
+                .count() as u8;
             
             if higher_acked_count >= self.fast_retx_threshold {
                 if let Some(packet) = store.get_packet(seq) {
@@ -185,11 +185,5 @@ impl SackProcessor {
         for &seq in candidates {
             store.update_fast_retx_candidate(seq, self.fast_retx_threshold);
         }
-    }
-}
-
-impl Default for SackProcessor {
-    fn default() -> Self {
-        Self::new(3) // 默认快速重传阈值为3
     }
 }

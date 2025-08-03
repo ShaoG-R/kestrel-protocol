@@ -334,9 +334,3 @@ impl std::fmt::Display for FlowControlStats {
         )
     }
 }
-
-impl Default for FlowControlCoordinator {
-    fn default() -> Self {
-        Self::new(Config::default())
-    }
-}

@@ -197,8 +197,8 @@ impl PacketCoordinator {
         connection_id: ConnectionId,
         timer_actor: SenderTimerActorHandle,
         timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,
-        fast_retx_threshold: u16,
-        max_retx_count: u32,
+        fast_retx_threshold: u8,
+        max_retx_count: u8,
     ) -> Self {
         Self {
             store: InFlightPacketStore::new(),

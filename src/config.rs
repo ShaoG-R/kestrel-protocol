@@ -39,7 +39,7 @@ pub struct ReliabilityConfig {
     /// The number of unacknowledged packets with higher sequence numbers that
     /// must be received before a packet is considered lost and fast-retransmitted.
     /// 在一个包被认为丢失并进行快速重传之前，必须收到的具有更高序列号的未确认数据包的数量。
-    pub fast_retx_threshold: u16,
+    pub fast_retx_threshold: u8,
     /// The number of ACK-eliciting packets to receive before sending an immediate ACK.
     /// 在发送即时ACK之前要接收的触发ACK的包的数量。
     pub ack_threshold: u16,
