@@ -364,7 +364,7 @@ impl BufferCoordinator {
             },
             send_buffer_chunks: status.send_buffer_status.chunk_count,
             receive_buffer_packets: status.receive_buffer_status.used_slots,
-            estimated_frame_header_size: packetization_stats.estimated_frame_header_size,
+            push_frame_header_size: packetization_stats.push_frame_header_size,
         }
     }
 }
@@ -377,7 +377,7 @@ pub struct BufferCoordinatorStats {
     pub receive_buffer_utilization: f64,
     pub send_buffer_chunks: usize,
     pub receive_buffer_packets: usize,
-    pub estimated_frame_header_size: usize,
+    pub push_frame_header_size: usize,
 }
 
 impl std::fmt::Display for BufferCoordinatorStats {
@@ -389,7 +389,7 @@ impl std::fmt::Display for BufferCoordinatorStats {
             self.send_buffer_chunks,
             self.receive_buffer_utilization,
             self.receive_buffer_packets,
-            self.estimated_frame_header_size
+            self.push_frame_header_size
         )
     }
 }

@@ -8,7 +8,7 @@
 //! - 帧大小和分片管理
 
 use super::super::data::buffer_stores::SendBufferStore;
-use crate::packet::frame::Frame;
+use crate::packet::{frame::Frame, header::ShortHeader};
 use tracing::{debug, trace, warn};
 
 /// 打包上下文
@@ -96,26 +96,27 @@ pub struct ZeroRttPacketizationResult {
 /// Packetization processor
 #[derive(Debug)]
 pub struct PacketizationProcessor {
-    /// 估算的帧头大小
-    /// Estimated frame header size
-    estimated_frame_header_size: usize,
+    // 移除硬编码的估算值，改用精确计算
 }
 
 impl PacketizationProcessor {
     /// 创建新的打包处理器
     /// Create new packetization processor
     pub fn new() -> Self {
-        Self {
-            estimated_frame_header_size: 32, // 估算的帧头大小
-        }
+        Self {}
     }
     
-    /// 使用自定义帧头大小创建打包处理器
-    /// Create packetization processor with custom frame header size
-    pub fn with_frame_header_size(frame_header_size: usize) -> Self {
-        Self {
-            estimated_frame_header_size: frame_header_size,
-        }
+    /// 计算PUSH帧的头部大小（精确计算）
+    /// Calculate PUSH frame header size (exact calculation)
+    fn calculate_push_frame_header_size() -> usize {
+        // PUSH帧使用ShortHeader + command字节
+        1 + ShortHeader::ENCODED_SIZE
+    }
+    
+    /// 计算给定载荷大小的完整PUSH帧大小
+    /// Calculate complete PUSH frame size for given payload size
+    fn calculate_push_frame_size(payload_size: usize) -> usize {
+        Self::calculate_push_frame_header_size() + payload_size
     }
     
     /// 执行标准打包
@@ -152,17 +153,18 @@ impl PacketizationProcessor {
         // 生成数据帧，直到受限为止
         let mut frames_generated = 0;
         while frames_generated < permit && !send_buffer.is_empty() {
-            // 计算可用的有效载荷大小（考虑MTU限制）
-            let max_frame_size = context.max_packet_size.saturating_sub(current_packet_size);
-            if max_frame_size <= self.estimated_frame_header_size {
+            // 计算可用的剩余包空间
+            let remaining_packet_size = context.max_packet_size.saturating_sub(current_packet_size);
+            let push_frame_header_size = Self::calculate_push_frame_header_size();
+            
+            if remaining_packet_size <= push_frame_header_size {
                 // 当前数据包已满，无法再添加更多帧
                 break;
             }
             
-            let max_payload_size = std::cmp::min(
-                context.max_payload_size,
-                max_frame_size.saturating_sub(self.estimated_frame_header_size),
-            );
+            // 计算此帧可以使用的最大载荷大小
+            let max_payload_for_mtu = remaining_packet_size.saturating_sub(push_frame_header_size);
+            let max_payload_size = std::cmp::min(context.max_payload_size, max_payload_for_mtu);
             
             if max_payload_size == 0 {
                 break;
@@ -171,6 +173,7 @@ impl PacketizationProcessor {
             if let Some(chunk) = send_buffer.extract_chunk(max_payload_size) {
                 let seq = *sequence_counter;
                 *sequence_counter += 1;
+                let payload_size = chunk.len(); // 在移动chunk之前保存长度
                 
                 let frame = Frame::new_push(
                     context.peer_cid,
@@ -178,11 +181,11 @@ impl PacketizationProcessor {
                     context.ack_info.0, // recv_next_sequence
                     context.ack_info.1, // recv_window_size
                     context.timestamp,
-                    chunk, // 移除了不必要的clone
+                    chunk, // 移动chunk
                 );
                 
                 let frame_size = frame.encoded_size();
-                consumed_bytes += frame_size - self.estimated_frame_header_size; // 只计算有效载荷
+                consumed_bytes += payload_size; // 使用保存的载荷大小
                 current_packet_size += frame_size;
                 frames.push(frame);
                 frames_generated += 1;
@@ -190,7 +193,9 @@ impl PacketizationProcessor {
                 trace!(
                     seq = seq,
                     frame_size = frame_size,
+                    payload_size = payload_size,
                     current_packet_size = current_packet_size,
+                    remaining_space = context.max_packet_size.saturating_sub(current_packet_size),
                     "Generated PUSH frame during packetization"
                 );
             } else {
@@ -366,20 +371,19 @@ impl PacketizationProcessor {
         packets
     }
     
-    /// 估算帧大小
-    /// Estimate frame size
-    pub fn estimate_frame_size(payload_size: usize) -> usize {
-        // 简化的帧大小估算：头部 + 负载
-        // Simplified frame size estimation: header + payload
-        const ESTIMATED_HEADER_SIZE: usize = 32; // 估算的头部大小
-        ESTIMATED_HEADER_SIZE + payload_size
+    /// 精确计算帧大小（不再是估算）
+    /// Precisely calculate frame size (no longer an estimation)
+    pub fn calculate_frame_size(payload_size: usize) -> usize {
+        // 精确计算：PUSH帧头部 + 负载
+        // Precise calculation: PUSH frame header + payload
+        Self::calculate_push_frame_size(payload_size)
     }
     
     /// 获取处理器统计信息
     /// Get processor statistics
     pub fn get_statistics(&self) -> PacketizationStats {
         PacketizationStats {
-            estimated_frame_header_size: self.estimated_frame_header_size,
+            push_frame_header_size: Self::calculate_push_frame_header_size(),
         }
     }
 }
@@ -388,7 +392,9 @@ impl PacketizationProcessor {
 /// Packetization processor statistics
 #[derive(Debug, Clone)]
 pub struct PacketizationStats {
-    pub estimated_frame_header_size: usize,
+    /// PUSH帧头部的精确大小
+    /// Exact size of PUSH frame header
+    pub push_frame_header_size: usize,
 }
 
 impl Default for PacketizationProcessor {
@@ -623,21 +629,30 @@ mod tests {
         let processor = PacketizationProcessor::new();
         let stats = processor.get_statistics();
         
-        assert_eq!(stats.estimated_frame_header_size, 32);
+        // PUSH帧头部 = 1字节命令 + ShortHeader大小
+        let expected_header_size = 1 + ShortHeader::ENCODED_SIZE;
+        assert_eq!(stats.push_frame_header_size, expected_header_size);
     }
 
     #[test]
-    fn test_packetization_processor_custom_header_size() {
-        let processor = PacketizationProcessor::with_frame_header_size(64);
-        let stats = processor.get_statistics();
+    fn test_packetization_processor_frame_size_calculation() {
+        let frame_size = PacketizationProcessor::calculate_frame_size(100);
+        let expected_size = PacketizationProcessor::calculate_push_frame_header_size() + 100;
+        assert_eq!(frame_size, expected_size);
+    }
+    
+    #[test]
+    fn test_packetization_processor_precise_header_calculation() {
+        // 测试精确的头部大小计算
+        let header_size = PacketizationProcessor::calculate_push_frame_header_size();
         
-        assert_eq!(stats.estimated_frame_header_size, 64);
-    }
-
-    #[test]
-    fn test_packetization_processor_frame_size_estimation() {
-        let estimated_size = PacketizationProcessor::estimate_frame_size(100);
-        assert_eq!(estimated_size, 132); // 32 + 100
+        // 验证计算是否正确：1字节命令 + ShortHeader
+        assert_eq!(header_size, 1 + ShortHeader::ENCODED_SIZE);
+        
+        // 创建一个实际的PUSH帧来验证
+        let frame = Frame::new_push(1, 0, 0, 1024, 123, Bytes::from("test"));
+        let actual_header_size = frame.encoded_size() - 4; // 减去"test"的长度
+        assert_eq!(header_size, actual_header_size);
     }
 
     #[test]
