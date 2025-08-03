@@ -113,9 +113,7 @@ impl UnifiedReliabilityLayer {
                 config.reliability.handshake_data_max_retries as u32,
             ),
             buffer_coordinator: BufferCoordinator::new(
-                config.connection.send_buffer_capacity_bytes,
-                config.connection.recv_buffer_capacity_packets,
-                64, // 使用固定值，因为配置中没有此字段
+                &config,
             ),
             flow_control_coordinator: FlowControlCoordinator::new(config.clone()),
             rtt_estimator: RttEstimator::new(config.reliability.initial_rto),
@@ -365,6 +363,7 @@ impl UnifiedReliabilityLayer {
             peer_recv_window: flow_state.peer_receive_window,
             max_payload_size: self.config.connection.max_payload_size, // 从配置获取正确的值
             ack_info: (recv_next_seq, recv_window_size),
+            max_packet_size: self.config.connection.max_packet_size,
         };
         
         let result = self.buffer_coordinator.packetize(
@@ -390,7 +389,6 @@ impl UnifiedReliabilityLayer {
         peer_cid: u32,
         timestamp: u32,
         syn_ack_frame: Frame,
-        config: &Config,
     ) -> Vec<Vec<Frame>> {
         let flow_state = self.flow_control_coordinator.get_flow_control_state();
         let (recv_next_seq, recv_window_size) = self.buffer_coordinator.get_receive_window_info();
@@ -403,13 +401,13 @@ impl UnifiedReliabilityLayer {
             peer_recv_window: flow_state.peer_receive_window,
             max_payload_size: self.config.connection.max_payload_size, // 使用内部配置而不是传入的config
             ack_info: (recv_next_seq, recv_window_size),
+            max_packet_size: self.config.connection.max_packet_size,
         };
         
         let result = self.buffer_coordinator.packetize_zero_rtt(
             &context,
             &mut self.sequence_counter,
             syn_ack_frame,
-            config.connection.max_packet_size,
         );
         
         debug!(

@@ -328,18 +328,6 @@ pub struct ReceiveBufferStats {
     pub fin_reached: bool,
 }
 
-impl Default for SendBufferStore {
-    fn default() -> Self {
-        Self::new(1024 * 1024) // 1MB default capacity
-    }
-}
-
-impl Default for ReceiveBufferStore {
-    fn default() -> Self {
-        Self::new(256) // 256 packets default capacity
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

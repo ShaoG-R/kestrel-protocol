@@ -33,6 +33,9 @@ pub struct PacketizationContext {
     /// 最大负载大小
     /// Maximum payload size
     pub max_payload_size: usize,
+    /// 最大数据包大小（用于MTU分包）
+    /// Maximum packet size (for MTU-based packetization)
+    pub max_packet_size: usize,
     /// ACK信息 (recv_next_sequence, local_window_size)
     /// ACK information
     pub ack_info: (u32, u16),
@@ -93,17 +96,25 @@ pub struct ZeroRttPacketizationResult {
 /// Packetization processor
 #[derive(Debug)]
 pub struct PacketizationProcessor {
-    /// 最大帧数限制
-    /// Maximum frame count limit
-    max_frames_per_call: usize,
+    /// 估算的帧头大小
+    /// Estimated frame header size
+    estimated_frame_header_size: usize,
 }
 
 impl PacketizationProcessor {
     /// 创建新的打包处理器
     /// Create new packetization processor
-    pub fn new(max_frames_per_call: usize) -> Self {
+    pub fn new() -> Self {
         Self {
-            max_frames_per_call,
+            estimated_frame_header_size: 32, // 估算的帧头大小
+        }
+    }
+    
+    /// 使用自定义帧头大小创建打包处理器
+    /// Create packetization processor with custom frame header size
+    pub fn with_frame_header_size(frame_header_size: usize) -> Self {
+        Self {
+            estimated_frame_header_size: frame_header_size,
         }
     }
     
@@ -123,10 +134,10 @@ impl PacketizationProcessor {
         };
         
         let mut consumed_bytes = 0;
+        let mut current_packet_size = frames.iter().map(|f| f.encoded_size()).sum::<usize>();
         
-        // 计算发送许可
+        // 计算发送许可（基于流量控制）
         let permit = self.calculate_send_permit(context);
-        let effective_permit = std::cmp::min(permit, self.max_frames_per_call);
         
         let limitation = if permit == 0 {
             if send_buffer.is_empty() {
@@ -134,19 +145,30 @@ impl PacketizationProcessor {
             } else {
                 self.determine_limitation_reason(context)
             }
-        } else if effective_permit < permit {
-            PacketizationLimitation::MaxFrameCount
         } else {
             PacketizationLimitation::None
         };
         
-        // 生成数据帧
-        for _ in 0..effective_permit {
-            if send_buffer.is_empty() {
+        // 生成数据帧，直到受限为止
+        let mut frames_generated = 0;
+        while frames_generated < permit && !send_buffer.is_empty() {
+            // 计算可用的有效载荷大小（考虑MTU限制）
+            let max_frame_size = context.max_packet_size.saturating_sub(current_packet_size);
+            if max_frame_size <= self.estimated_frame_header_size {
+                // 当前数据包已满，无法再添加更多帧
                 break;
             }
             
-            if let Some(chunk) = send_buffer.extract_chunk(context.max_payload_size) {
+            let max_payload_size = std::cmp::min(
+                context.max_payload_size,
+                max_frame_size.saturating_sub(self.estimated_frame_header_size),
+            );
+            
+            if max_payload_size == 0 {
+                break;
+            }
+            
+            if let Some(chunk) = send_buffer.extract_chunk(max_payload_size) {
                 let seq = *sequence_counter;
                 *sequence_counter += 1;
                 
@@ -156,15 +178,19 @@ impl PacketizationProcessor {
                     context.ack_info.0, // recv_next_sequence
                     context.ack_info.1, // recv_window_size
                     context.timestamp,
-                    chunk.clone(),
+                    chunk, // 移除了不必要的clone
                 );
                 
-                consumed_bytes += chunk.len();
+                let frame_size = frame.encoded_size();
+                consumed_bytes += frame_size - self.estimated_frame_header_size; // 只计算有效载荷
+                current_packet_size += frame_size;
                 frames.push(frame);
+                frames_generated += 1;
                 
                 trace!(
                     seq = seq,
-                    payload_len = chunk.len(),
+                    frame_size = frame_size,
+                    current_packet_size = current_packet_size,
                     "Generated PUSH frame during packetization"
                 );
             } else {
@@ -194,7 +220,6 @@ impl PacketizationProcessor {
         send_buffer: &mut SendBufferStore,
         sequence_counter: &mut u32,
         syn_ack_frame: Frame,
-        max_packet_size: usize,
     ) -> ZeroRttPacketizationResult {
         // 首先生成所有PUSH帧
         let packetization_result = self.packetize(
@@ -217,7 +242,7 @@ impl PacketizationProcessor {
         let packets = self.distribute_frames_to_packets(
             syn_ack_frame,
             packetization_result.frames,
-            max_packet_size,
+            context.max_packet_size,
         );
         
         debug!(
@@ -354,7 +379,7 @@ impl PacketizationProcessor {
     /// Get processor statistics
     pub fn get_statistics(&self) -> PacketizationStats {
         PacketizationStats {
-            max_frames_per_call: self.max_frames_per_call,
+            estimated_frame_header_size: self.estimated_frame_header_size,
         }
     }
 }
@@ -363,11 +388,291 @@ impl PacketizationProcessor {
 /// Packetization processor statistics
 #[derive(Debug, Clone)]
 pub struct PacketizationStats {
-    pub max_frames_per_call: usize,
+    pub estimated_frame_header_size: usize,
 }
 
 impl Default for PacketizationProcessor {
     fn default() -> Self {
-        Self::new(64) // 默认最大帧数
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::reliability::data::buffer_stores::SendBufferStore;
+    use crate::packet::frame::Frame;
+    use bytes::Bytes;
+
+    fn create_test_context() -> PacketizationContext {
+        PacketizationContext {
+            peer_cid: 1,
+            timestamp: 123,
+            congestion_window: 10,
+            in_flight_count: 0,
+            peer_recv_window: 10,
+            max_payload_size: 100,
+            max_packet_size: 1500,
+            ack_info: (0, 1024),
+        }
+    }
+
+    #[test]
+    fn test_packetization_processor_basic_packetization() {
+        let processor = PacketizationProcessor::new();
+        let mut send_buffer = SendBufferStore::new(1024);
+        let mut seq_counter = 0;
+        
+        send_buffer.write_data(Bytes::from("hello world"));
+        
+        let context = create_test_context();
+        let result = processor.packetize(&context, &mut send_buffer, &mut seq_counter, None);
+        
+        assert_eq!(result.frames.len(), 1);
+        assert_eq!(seq_counter, 1);
+        assert!(result.consumed_bytes > 0);
+        assert_eq!(result.limitation, PacketizationLimitation::None);
+        
+        if let Frame::Push { payload, header } = &result.frames[0] {
+            assert_eq!(payload.as_ref(), b"hello world");
+            assert_eq!(header.sequence_number, 0);
+        } else {
+            panic!("Expected a PUSH frame");
+        }
+    }
+
+    #[test]
+    fn test_packetization_processor_mtu_based_splitting() {
+        let processor = PacketizationProcessor::new();
+        let mut send_buffer = SendBufferStore::new(1024);
+        let mut seq_counter = 0;
+        
+        // 添加足够的数据以超过包大小限制
+        let large_data = "a".repeat(1000);
+        send_buffer.write_data(Bytes::from(large_data));
+        
+        let mut context = create_test_context();
+        context.max_packet_size = 200; // 小包大小以强制分包
+        context.max_payload_size = 50;  // 小载荷大小
+        
+        let result = processor.packetize(&context, &mut send_buffer, &mut seq_counter, None);
+        
+        // 应该只生成一定数量的帧，由于MTU限制
+        assert!(result.frames.len() <= 4); // 大约 (200 - 32) / (50 + 32) = ~2-3帧
+        assert!(seq_counter > 0);
+        
+        // 验证帧大小不超过MTU
+        let total_frame_size: usize = result.frames.iter().map(|f| f.encoded_size()).sum();
+        assert!(total_frame_size <= context.max_packet_size);
+    }
+
+    #[test]
+    fn test_packetization_processor_congestion_window_limit() {
+        let processor = PacketizationProcessor::new();
+        let mut send_buffer = SendBufferStore::new(1024);
+        let mut seq_counter = 0;
+        
+        send_buffer.write_data(Bytes::from("hello world test data"));
+        
+        let mut context = create_test_context();
+        context.congestion_window = 2; // 拥塞窗口限制
+        context.in_flight_count = 0;
+        
+        let result = processor.packetize(&context, &mut send_buffer, &mut seq_counter, None);
+        
+        // 应该受拥塞窗口限制
+        assert!(result.frames.len() <= 2);
+        assert_eq!(result.limitation, PacketizationLimitation::None);
+    }
+
+    #[test]
+    fn test_packetization_processor_flow_control_limit() {
+        let processor = PacketizationProcessor::new();
+        let mut send_buffer = SendBufferStore::new(1024);
+        let mut seq_counter = 0;
+        
+        send_buffer.write_data(Bytes::from("hello world test data"));
+        
+        let mut context = create_test_context();
+        context.peer_recv_window = 1; // 流量控制限制
+        context.in_flight_count = 0;
+        
+        let result = processor.packetize(&context, &mut send_buffer, &mut seq_counter, None);
+        
+        // 应该受流量控制限制
+        assert!(result.frames.len() <= 1);
+        assert_eq!(result.limitation, PacketizationLimitation::None);
+    }
+
+    #[test]
+    fn test_packetization_processor_empty_buffer() {
+        let processor = PacketizationProcessor::new();
+        let mut send_buffer = SendBufferStore::new(1024); // 空缓冲区
+        let mut seq_counter = 0;
+        
+        let context = create_test_context();
+        let result = processor.packetize(&context, &mut send_buffer, &mut seq_counter, None);
+        
+        assert_eq!(result.frames.len(), 0);
+        assert_eq!(seq_counter, 0);
+        assert_eq!(result.consumed_bytes, 0);
+        assert_eq!(result.limitation, PacketizationLimitation::BufferEmpty);
+    }
+
+    #[test]
+    fn test_packetization_processor_prepend_frame() {
+        let processor = PacketizationProcessor::new();
+        let mut send_buffer = SendBufferStore::new(1024);
+        let mut seq_counter = 0;
+        
+        send_buffer.write_data(Bytes::from("hello"));
+        
+        let context = create_test_context();
+        let fin_frame = Frame::new_fin(1, 99, 0, 1024, 123);
+        let result = processor.packetize(&context, &mut send_buffer, &mut seq_counter, Some(fin_frame.clone()));
+        
+        assert_eq!(result.frames.len(), 2); // FIN + PUSH
+        assert_eq!(seq_counter, 1);
+        
+        assert_eq!(result.frames[0], fin_frame);
+        if let Frame::Push { header, .. } = &result.frames[1] {
+            assert_eq!(header.sequence_number, 0);
+        } else {
+            panic!("Expected a PUSH frame");
+        }
+    }
+
+    #[test]
+    fn test_packetization_processor_zero_rtt_syn_ack_only() {
+        let processor = PacketizationProcessor::new();
+        let mut send_buffer = SendBufferStore::new(1024); // 空缓冲区
+        let mut seq_counter = 0;
+        
+        let context = create_test_context();
+        let syn_ack_frame = Frame::new_syn_ack(1, 2, 1);
+        
+        let result = processor.packetize_zero_rtt(&context, &mut send_buffer, &mut seq_counter, syn_ack_frame.clone());
+        
+        assert_eq!(result.packets.len(), 1);
+        assert_eq!(result.packets[0].len(), 1);
+        assert_eq!(result.packets[0][0], syn_ack_frame);
+        assert_eq!(result.consumed_bytes, 0);
+        assert_eq!(seq_counter, 0);
+    }
+
+    #[test]
+    fn test_packetization_processor_zero_rtt_with_data() {
+        let processor = PacketizationProcessor::new();
+        let mut send_buffer = SendBufferStore::new(1024);
+        let mut seq_counter = 0;
+        
+        send_buffer.write_data(Bytes::from("hello world"));
+        
+        let context = create_test_context();
+        let syn_ack_frame = Frame::new_syn_ack(1, 2, 1);
+        
+        let result = processor.packetize_zero_rtt(&context, &mut send_buffer, &mut seq_counter, syn_ack_frame.clone());
+        
+        // 应该有数据包，第一个包含SYN-ACK
+        assert!(!result.packets.is_empty());
+        assert!(!result.packets[0].is_empty());
+        assert_eq!(result.packets[0][0], syn_ack_frame);
+        assert!(result.consumed_bytes > 0);
+        assert!(seq_counter > 0);
+        
+        // 验证PUSH帧存在
+        let has_push_frame = result.packets.iter().flatten().any(|frame| {
+            matches!(frame, Frame::Push { .. })
+        });
+        assert!(has_push_frame);
+    }
+
+    #[test]
+    fn test_packetization_processor_zero_rtt_multiple_packets() {
+        let processor = PacketizationProcessor::new();
+        let mut send_buffer = SendBufferStore::new(1024);
+        let mut seq_counter = 0;
+        
+        // 添加大量数据以强制多包
+        let large_data = "x".repeat(2000);
+        send_buffer.write_data(Bytes::from(large_data));
+        
+        let mut context = create_test_context();
+        context.max_packet_size = 500; // 小包大小
+        context.max_payload_size = 100;
+        
+        let syn_ack_frame = Frame::new_syn_ack(1, 2, 1);
+        
+        let result = processor.packetize_zero_rtt(&context, &mut send_buffer, &mut seq_counter, syn_ack_frame.clone());
+        
+        // 应该有多个数据包
+        assert!(result.packets.len() > 1);
+        
+        // 第一个数据包应该包含SYN-ACK
+        assert_eq!(result.packets[0][0], syn_ack_frame);
+        
+        // 验证每个数据包的大小
+        for packet in &result.packets {
+            let packet_size: usize = packet.iter().map(|f| f.encoded_size()).sum();
+            assert!(packet_size <= context.max_packet_size);
+        }
+    }
+
+    #[test]
+    fn test_packetization_processor_statistics() {
+        let processor = PacketizationProcessor::new();
+        let stats = processor.get_statistics();
+        
+        assert_eq!(stats.estimated_frame_header_size, 32);
+    }
+
+    #[test]
+    fn test_packetization_processor_custom_header_size() {
+        let processor = PacketizationProcessor::with_frame_header_size(64);
+        let stats = processor.get_statistics();
+        
+        assert_eq!(stats.estimated_frame_header_size, 64);
+    }
+
+    #[test]
+    fn test_packetization_processor_frame_size_estimation() {
+        let estimated_size = PacketizationProcessor::estimate_frame_size(100);
+        assert_eq!(estimated_size, 132); // 32 + 100
+    }
+
+    #[test]
+    fn test_packetization_processor_zero_permit_congestion() {
+        let processor = PacketizationProcessor::new();
+        let mut send_buffer = SendBufferStore::new(1024);
+        let mut seq_counter = 0;
+        
+        send_buffer.write_data(Bytes::from("test data"));
+        
+        let mut context = create_test_context();
+        context.congestion_window = 5;
+        context.in_flight_count = 5; // 完全占用拥塞窗口
+        
+        let result = processor.packetize(&context, &mut send_buffer, &mut seq_counter, None);
+        
+        assert_eq!(result.frames.len(), 0);
+        assert_eq!(result.limitation, PacketizationLimitation::CongestionWindow);
+    }
+
+    #[test]
+    fn test_packetization_processor_zero_permit_flow_control() {
+        let processor = PacketizationProcessor::new();
+        let mut send_buffer = SendBufferStore::new(1024);
+        let mut seq_counter = 0;
+        
+        send_buffer.write_data(Bytes::from("test data"));
+        
+        let mut context = create_test_context();
+        context.peer_recv_window = 3;
+        context.in_flight_count = 3; // 完全占用流量控制窗口
+        
+        let result = processor.packetize(&context, &mut send_buffer, &mut seq_counter, None);
+        
+        assert_eq!(result.frames.len(), 0);
+        assert_eq!(result.limitation, PacketizationLimitation::FlowControl);
     }
 }

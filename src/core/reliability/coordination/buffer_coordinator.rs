@@ -12,6 +12,7 @@ use super::super::{
     logic::packetization_processor::{PacketizationProcessor, PacketizationContext, PacketizationResult, ZeroRttPacketizationResult},
 };
 use crate::packet::{frame::Frame, sack::SackRange};
+use crate::config::Config;
 use bytes::Bytes;
 use tracing::{debug, info, trace, warn};
 
@@ -86,14 +87,12 @@ impl BufferCoordinator {
     /// 创建新的缓冲区协调器
     /// Create new buffer coordinator
     pub fn new(
-        send_buffer_capacity: usize,
-        receive_buffer_capacity: usize,
-        max_frames_per_packetization: usize,
+        config: &Config,
     ) -> Self {
         Self {
-            send_buffer: SendBufferStore::new(send_buffer_capacity),
-            receive_buffer: ReceiveBufferStore::new(receive_buffer_capacity),
-            packetization_processor: PacketizationProcessor::new(max_frames_per_packetization),
+            send_buffer: SendBufferStore::new(config.reliability.send_buffer_capacity_bytes),
+            receive_buffer: ReceiveBufferStore::new(config.reliability.recv_buffer_capacity_packets),
+            packetization_processor: PacketizationProcessor::new(),
         }
     }
     
@@ -153,12 +152,11 @@ impl BufferCoordinator {
         context: &PacketizationContext,
         sequence_counter: &mut u32,
         syn_ack_frame: Frame,
-        max_packet_size: usize,
     ) -> ZeroRttPacketizationResult {
         trace!(
             available_data = self.send_buffer.data_size(),
             seq_counter = *sequence_counter,
-            max_packet_size = max_packet_size,
+            max_packet_size = context.max_packet_size,
             "Starting 0-RTT packetization"
         );
         
@@ -167,7 +165,6 @@ impl BufferCoordinator {
             &mut self.send_buffer,
             sequence_counter,
             syn_ack_frame,
-            max_packet_size,
         );
         
         debug!(
@@ -367,7 +364,7 @@ impl BufferCoordinator {
             },
             send_buffer_chunks: status.send_buffer_status.chunk_count,
             receive_buffer_packets: status.receive_buffer_status.used_slots,
-            max_frames_per_packetization: packetization_stats.max_frames_per_call,
+            estimated_frame_header_size: packetization_stats.estimated_frame_header_size,
         }
     }
 }
@@ -380,40 +377,33 @@ pub struct BufferCoordinatorStats {
     pub receive_buffer_utilization: f64,
     pub send_buffer_chunks: usize,
     pub receive_buffer_packets: usize,
-    pub max_frames_per_packetization: usize,
+    pub estimated_frame_header_size: usize,
 }
 
 impl std::fmt::Display for BufferCoordinatorStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "BufferCoordinator[send:{:.1}%({} chunks), recv:{:.1}%({} packets), max_frames:{}]",
+            "BufferCoordinator[send:{:.1}%({} chunks), recv:{:.1}%({} packets), frame_header:{}B]",
             self.send_buffer_utilization,
             self.send_buffer_chunks,
             self.receive_buffer_utilization,
             self.receive_buffer_packets,
-            self.max_frames_per_packetization
+            self.estimated_frame_header_size
         )
     }
 }
-
-impl Default for BufferCoordinator {
-    fn default() -> Self {
-        Self::new(
-            1024 * 1024, // 1MB send buffer
-            256,          // 256 packets receive buffer
-            64,           // 64 frames per packetization
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
 
     fn create_test_coordinator() -> BufferCoordinator {
-        BufferCoordinator::new(1024, 10, 8)
+        BufferCoordinator {
+            send_buffer: SendBufferStore::new(1024),
+            receive_buffer: ReceiveBufferStore::new(10),
+            packetization_processor: PacketizationProcessor::new(),
+        }
     }
 
     fn create_test_context() -> PacketizationContext {
@@ -424,6 +414,7 @@ mod tests {
             in_flight_count: 0,
             peer_recv_window: 10,
             max_payload_size: 64,
+            max_packet_size: 1500, // 标准MTU大小
             ack_info: (0, 10),
         }
     }
@@ -643,7 +634,11 @@ mod tests {
 
     #[test]
     fn test_buffer_coordinator_send_buffer_capacity_limits() {
-        let mut coordinator = BufferCoordinator::new(10, 10, 8); // Small send buffer
+        let mut coordinator = BufferCoordinator {
+            send_buffer: SendBufferStore::new(10), // Small send buffer
+            receive_buffer: ReceiveBufferStore::new(10),
+            packetization_processor: PacketizationProcessor::new(),
+        };
         
         let data1 = Bytes::from("hello");
         let data2 = Bytes::from("world");
@@ -665,6 +660,6 @@ mod tests {
         assert!(display_str.contains("BufferCoordinator"));
         assert!(display_str.contains("send:"));
         assert!(display_str.contains("recv:"));
-        assert!(display_str.contains("max_frames:"));
+        assert!(display_str.contains("frame_header:"));
     }
 }

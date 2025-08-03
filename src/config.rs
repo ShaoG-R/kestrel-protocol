@@ -57,7 +57,14 @@ pub struct ReliabilityConfig {
     pub control_frame_retry_interval: Duration,
     /// Enable layered retransmission mechanism.
     /// 启用分层重传机制。
-    pub enable_layered_retransmission: bool,
+    pub enable_layered_retransmission: bool,    
+
+    /// The capacity of the send buffer in bytes.
+    /// 发送缓冲区的容量（以字节为单位）。
+    pub send_buffer_capacity_bytes: usize,
+    /// The capacity of the receive buffer in packets.
+    /// 接收缓冲区的容量（以数据包为单位）。
+    pub recv_buffer_capacity_packets: usize,
 }
 
 /// Congestion control-related parameters.
@@ -157,6 +164,8 @@ impl Default for ReliabilityConfig {
             control_frame_max_retries: 5,
             control_frame_retry_interval: Duration::from_millis(500),
             enable_layered_retransmission: true,
+            send_buffer_capacity_bytes: 1024 * 1024, // 1 MB
+            recv_buffer_capacity_packets: 256,
         }
     }
 }

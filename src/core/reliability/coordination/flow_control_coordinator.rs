@@ -90,10 +90,6 @@ pub struct FlowControlCoordinator {
     /// 上次发送时间
     /// Last send time
     last_send_time: Option<Instant>,
-    
-    /// 配置参数
-    /// Configuration parameters
-    config: Config,
 }
 
 impl FlowControlCoordinator {
@@ -106,7 +102,6 @@ impl FlowControlCoordinator {
             in_flight_count: 0,
             max_send_rate: None,
             last_send_time: None,
-            config,
         }
     }
     

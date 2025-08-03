@@ -449,7 +449,6 @@ impl<T: Transport> Endpoint<T> {
                         self.identity.peer_cid(),
                         peer_recv_window,
                         syn_ack_frame,
-                        &self.config,
                     );
 
                     // 4. Register timers for all frames in packet groups
