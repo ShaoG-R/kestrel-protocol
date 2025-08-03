@@ -135,12 +135,11 @@ impl PacketizationProcessor {
         };
         
         let mut consumed_bytes = 0;
-        let mut current_packet_size = frames.iter().map(|f| f.encoded_size()).sum::<usize>();
         
         // 计算发送许可（基于流量控制）
         let permit = self.calculate_send_permit(context);
         
-        let limitation = if permit == 0 {
+        let mut limitation = if permit == 0 {
             if send_buffer.is_empty() {
                 PacketizationLimitation::BufferEmpty
             } else {
@@ -153,24 +152,7 @@ impl PacketizationProcessor {
         // 生成数据帧，直到受限为止
         let mut frames_generated = 0;
         while frames_generated < permit && !send_buffer.is_empty() {
-            // 计算可用的剩余包空间
-            let remaining_packet_size = context.max_packet_size.saturating_sub(current_packet_size);
-            let push_frame_header_size = Self::calculate_push_frame_header_size();
-            
-            if remaining_packet_size <= push_frame_header_size {
-                // 当前数据包已满，无法再添加更多帧
-                break;
-            }
-            
-            // 计算此帧可以使用的最大载荷大小
-            let max_payload_for_mtu = remaining_packet_size.saturating_sub(push_frame_header_size);
-            let max_payload_size = std::cmp::min(context.max_payload_size, max_payload_for_mtu);
-            
-            if max_payload_size == 0 {
-                break;
-            }
-            
-            if let Some(chunk) = send_buffer.extract_chunk(max_payload_size) {
+            if let Some(chunk) = send_buffer.extract_chunk(context.max_payload_size) {
                 let seq = *sequence_counter;
                 *sequence_counter += 1;
                 let payload_size = chunk.len(); // 在移动chunk之前保存长度
@@ -184,23 +166,23 @@ impl PacketizationProcessor {
                     chunk, // 移动chunk
                 );
                 
-                let frame_size = frame.encoded_size();
                 consumed_bytes += payload_size; // 使用保存的载荷大小
-                current_packet_size += frame_size;
                 frames.push(frame);
                 frames_generated += 1;
                 
                 trace!(
                     seq = seq,
-                    frame_size = frame_size,
                     payload_size = payload_size,
-                    current_packet_size = current_packet_size,
-                    remaining_space = context.max_packet_size.saturating_sub(current_packet_size),
                     "Generated PUSH frame during packetization"
                 );
             } else {
                 break;
             }
+        }
+        
+        // 如果没有生成任何帧且缓冲区为空，更新限制原因
+        if frames_generated == 0 && limitation == PacketizationLimitation::None && send_buffer.is_empty() {
+            limitation = PacketizationLimitation::BufferEmpty;
         }
         
         debug!(
