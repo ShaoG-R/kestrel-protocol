@@ -234,6 +234,7 @@ impl FlowControlCoordinator {
         self.vegas_controller.reset();
         self.peer_receive_window = u32::MAX;
         self.in_flight_count = 0;
+        self.max_send_rate = None;
         self.last_send_time = None;
         
         info!("Flow control coordinator reset");
@@ -263,9 +264,14 @@ impl FlowControlCoordinator {
     /// Calculate suggested send interval
     fn calculate_send_interval(&self, current_rtt: Duration) -> Option<Duration> {
         if let Some(max_rate) = self.max_send_rate {
-            // 基于最大发送速率计算间隔
-            let interval = Duration::from_secs(1) / max_rate;
-            return Some(interval);
+            if max_rate > 0 {
+                // 基于最大发送速率计算间隔，避免除零错误
+                let interval = Duration::from_secs(1) / max_rate;
+                return Some(interval);
+            } else {
+                // 如果速率为0，表示禁止发送
+                return Some(Duration::from_secs(3600)); // 1小时延迟，实际上禁止发送
+            }
         }
         
         // 基于RTT的自适应间隔（可选）
@@ -280,16 +286,26 @@ impl FlowControlCoordinator {
     /// 判断是否应该延迟发送
     /// Determine if sending should be delayed
     fn should_delay_send(&self, now: Instant) -> bool {
+        // 拥塞窗口为0时应该延迟
+        if self.vegas_controller.congestion_window() == 0 {
+            return true;
+        }
+        
+        // 检查速率限制
         if let Some(last_send) = self.last_send_time {
             if let Some(max_rate) = self.max_send_rate {
-                let min_interval = Duration::from_secs(1) / max_rate;
-                let elapsed = now.duration_since(last_send);
-                return elapsed < min_interval;
+                if max_rate > 0 {
+                    let min_interval = Duration::from_secs(1) / max_rate;
+                    let elapsed = now.duration_since(last_send);
+                    return elapsed < min_interval;
+                } else {
+                    // 速率为0，禁止发送
+                    return true;
+                }
             }
         }
         
-        // 拥塞窗口为0时应该延迟
-        self.vegas_controller.congestion_window() == 0
+        false
     }
     
     /// 获取统计信息

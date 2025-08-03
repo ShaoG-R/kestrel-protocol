@@ -11,13 +11,13 @@ use crate::{
     core::reliability::coordination::packet_coordinator::RetransmissionFrameInfo,
     timer::actor::ActorTimerId,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use tokio::time::Instant;
 use tracing::{debug, trace};
 
 /// 在途数据包的状态
 /// In-flight packet state
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PacketState {
     /// 已发送，等待ACK
     /// Sent, waiting for ACK
@@ -81,6 +81,10 @@ pub struct InFlightPacketStore {
     /// 快速重传候选缓存
     /// Fast retransmission candidate cache
     fast_retx_candidates: BTreeMap<u32, u8>, // seq -> duplicate_ack_count
+    
+    /// 性能优化：按状态的索引
+    /// Performance optimization: index by state
+    state_index: HashMap<PacketState, Vec<u32>>,
 }
 
 impl InFlightPacketStore {
@@ -91,6 +95,7 @@ impl InFlightPacketStore {
             packets: BTreeMap::new(),
             timer_to_sequence: BTreeMap::new(),
             fast_retx_candidates: BTreeMap::new(),
+            state_index: HashMap::new(),
         }
     }
     
@@ -98,6 +103,10 @@ impl InFlightPacketStore {
     /// Add packet
     pub fn add_packet(&mut self, seq: u32, packet: InFlightPacket) {
         trace!(seq = seq, "Adding packet to store");
+        
+        // 更新状态索引
+        self.add_to_state_index(packet.state, seq);
+        
         self.packets.insert(seq, packet);
     }
     
@@ -117,6 +126,9 @@ impl InFlightPacketStore {
     /// Remove packet
     pub fn remove_packet(&mut self, seq: u32) -> Option<InFlightPacket> {
         if let Some(packet) = self.packets.remove(&seq) {
+            // 清理状态索引
+            self.remove_from_state_index(packet.state, seq);
+            
             // 清理定时器映射
             if let Some(timer_id) = packet.timer_id {
                 self.timer_to_sequence.remove(&timer_id);
@@ -148,12 +160,21 @@ impl InFlightPacketStore {
     
     /// 设置定时器映射
     /// Set timer mapping
-    pub fn set_timer_mapping(&mut self, timer_id: ActorTimerId, seq: u32) {
-        self.timer_to_sequence.insert(timer_id, seq);
-        
-        // 更新数据包的定时器ID
+    pub fn set_timer_mapping(&mut self, timer_id: ActorTimerId, seq: u32) -> bool {
+        // 只有当数据包存在时才创建映射，避免孤立映射
         if let Some(packet) = self.packets.get_mut(&seq) {
+            // 清理旧的定时器映射（如果存在）
+            if let Some(old_timer_id) = packet.timer_id {
+                self.timer_to_sequence.remove(&old_timer_id);
+            }
+            
+            self.timer_to_sequence.insert(timer_id, seq);
             packet.timer_id = Some(timer_id);
+            trace!(seq = seq, timer_id = timer_id, "Timer mapping set successfully");
+            true
+        } else {
+            debug!(seq = seq, timer_id = timer_id, "Cannot set timer mapping: packet not found");
+            false
         }
     }
     
@@ -183,14 +204,25 @@ impl InFlightPacketStore {
         self.packets.keys().copied().collect()
     }
     
-    /// 获取指定状态的数据包
-    /// Get packets with specific state
+    /// 获取指定状态的数据包 (优化版本，使用状态索引)
+    /// Get packets with specific state (optimized version using state index)
     pub fn get_packets_by_state(&self, state: PacketState) -> Vec<(u32, &InFlightPacket)> {
-        self.packets
-            .iter()
-            .filter(|(_, packet)| packet.state == state)
-            .map(|(&seq, packet)| (seq, packet))
-            .collect()
+        if let Some(seq_list) = self.state_index.get(&state) {
+            seq_list
+                .iter()
+                .filter_map(|&seq| {
+                    self.packets.get(&seq).map(|packet| (seq, packet))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+    
+    /// 获取指定状态的数据包数量 (新增方法，高效计数)
+    /// Get count of packets with specific state (new method for efficient counting)
+    pub fn count_packets_by_state(&self, state: PacketState) -> usize {
+        self.state_index.get(&state).map_or(0, |seq_list| seq_list.len())
     }
     
     /// 获取在途数据包数量
@@ -212,6 +244,7 @@ impl InFlightPacketStore {
         self.packets.clear();
         self.timer_to_sequence.clear();
         self.fast_retx_candidates.clear();
+        self.state_index.clear();
     }
     
     /// 更新快速重传候选状态
@@ -220,8 +253,14 @@ impl InFlightPacketStore {
         self.fast_retx_candidates.insert(seq, duplicate_count);
         
         if let Some(packet) = self.packets.get_mut(&seq) {
+            let old_state = packet.state;
             packet.state = PacketState::FastRetxCandidate;
             packet.fast_retx_count = duplicate_count;
+            
+            // 更新状态索引
+            if old_state != PacketState::FastRetxCandidate {
+                self.update_state_index(old_state, PacketState::FastRetxCandidate, seq);
+            }
         }
     }
     
@@ -229,6 +268,30 @@ impl InFlightPacketStore {
     /// Get fast retransmission candidates
     pub fn get_fast_retx_candidates(&self) -> Vec<(u32, u8)> {
         self.fast_retx_candidates.iter().map(|(&seq, &count)| (seq, count)).collect()
+    }
+    
+    /// 添加序列号到状态索引
+    /// Add sequence number to state index
+    fn add_to_state_index(&mut self, state: PacketState, seq: u32) {
+        self.state_index.entry(state).or_insert_with(Vec::new).push(seq);
+    }
+    
+    /// 从状态索引中移除序列号
+    /// Remove sequence number from state index
+    fn remove_from_state_index(&mut self, state: PacketState, seq: u32) {
+        if let Some(seq_list) = self.state_index.get_mut(&state) {
+            seq_list.retain(|&s| s != seq);
+            if seq_list.is_empty() {
+                self.state_index.remove(&state);
+            }
+        }
+    }
+    
+    /// 更新状态索引（从旧状态移动到新状态）
+    /// Update state index (move from old state to new state)
+    fn update_state_index(&mut self, old_state: PacketState, new_state: PacketState, seq: u32) {
+        self.remove_from_state_index(old_state, seq);
+        self.add_to_state_index(new_state, seq);
     }
 }
 

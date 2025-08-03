@@ -266,15 +266,17 @@ impl PacketCoordinator {
             now,
         );
         
-        // 步骤2：收集所有需要确认的序列号
-        let mut all_acked = sack_result.cumulative_acked.clone();
-        all_acked.extend(sack_result.sack_acked.clone());
+        // 步骤2：收集所有需要确认的序列号（优化：避免不必要的克隆）
+        let all_acked: Vec<u32> = sack_result.cumulative_acked.iter()
+            .chain(sack_result.sack_acked.iter())
+            .copied()
+            .collect();
         
         // 步骤3：批量移除已确认的数据包并取消定时器
         let removed_packets = self.store.batch_remove_packets(&all_acked);
         if !removed_packets.is_empty() {
-            let sequences: Vec<u32> = removed_packets.iter().map(|(seq, _)| *seq).collect();
-            self.timer_event_handler.batch_cancel_retransmission_timers(&mut self.store, &sequences).await;
+            // 直接使用all_acked而不是重新提取序列号
+            self.timer_event_handler.batch_cancel_retransmission_timers(&mut self.store, &all_acked).await;
         }
         
         // 步骤4：处理快速重传
@@ -319,6 +321,7 @@ impl PacketCoordinator {
         timer_id: ActorTimerId,
         context: &RetransmissionContext,
         rto: Duration,
+        now: Instant,
     ) -> Option<Frame> {
         // 步骤1：使用定时器事件处理器处理超时
         let timer_result = self.timer_event_handler.handle_timer_timeout(&mut self.store, timer_id);
@@ -331,7 +334,7 @@ impl PacketCoordinator {
                     seq,
                     context,
                     rto,
-                    Instant::now(),
+                    now,
                 );
                 
                 // 步骤3：处理决策结果

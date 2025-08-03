@@ -249,6 +249,7 @@ impl UnifiedReliabilityLayer {
         // 使用RTT估算器的当前RTO值
         // Use current RTO value from RTT estimator
         let rto = self.rtt_estimator.rto();
+        let now = Instant::now();
         
         trace!(
             timer_id = timer_id,
@@ -256,7 +257,7 @@ impl UnifiedReliabilityLayer {
             "Handling packet timer timeout with unified layer using estimated RTO"
         );
         
-        let result = self.packet_coordinator.handle_timer_timeout(timer_id, context, rto).await;
+        let result = self.packet_coordinator.handle_timer_timeout(timer_id, context, rto, now).await;
         
         // 只在实际产生重传帧时进行RTO退避和拥塞控制更新
         // Only perform RTO backoff and congestion control update when actually producing retransmission frame

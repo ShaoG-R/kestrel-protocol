@@ -13,3 +13,6 @@ pub use buffer_coordinator::{
 pub use flow_control_coordinator::{
     FlowControlCoordinator, FlowControlDecision, FlowControlState, FlowControlStats,
 };
+
+#[cfg(test)]
+mod tests;
