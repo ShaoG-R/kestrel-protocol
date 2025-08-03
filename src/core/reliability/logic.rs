@@ -8,6 +8,11 @@ pub mod vegas_controller;
 pub mod packetization_processor;
 pub mod rtt;
 
+// 测试模块 - 只在测试时编译
+// Test modules - compiled only during testing
+#[cfg(test)]
+mod tests;
+
 pub use sack_processor::{SackProcessor, SackProcessResult};
 pub use retransmission_decider::{RetransmissionDecider, RetransmissionDecision, RetransmissionType};
 pub use timer_event_handler::{TimerEventHandler, TimerHandlingResult};
