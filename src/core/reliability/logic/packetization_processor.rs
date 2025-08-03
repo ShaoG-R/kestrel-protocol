@@ -134,56 +134,18 @@ impl PacketizationProcessor {
             Vec::new()
         };
         
-        let mut consumed_bytes = 0;
+        let current_packet_size = frames.iter().map(|f| f.encoded_size()).sum::<usize>();
         
-        // 计算发送许可（基于流量控制）
-        let permit = self.calculate_send_permit(context);
-        
-        let mut limitation = if permit == 0 {
-            if send_buffer.is_empty() {
-                PacketizationLimitation::BufferEmpty
-            } else {
-                self.determine_limitation_reason(context)
-            }
-        } else {
-            PacketizationLimitation::None
-        };
-        
-        // 生成数据帧，直到受限为止
-        let mut frames_generated = 0;
-        while frames_generated < permit && !send_buffer.is_empty() {
-            if let Some(chunk) = send_buffer.extract_chunk(context.max_payload_size) {
-                let seq = *sequence_counter;
-                *sequence_counter += 1;
-                let payload_size = chunk.len(); // 在移动chunk之前保存长度
-                
-                let frame = Frame::new_push(
-                    context.peer_cid,
-                    seq,
-                    context.ack_info.0, // recv_next_sequence
-                    context.ack_info.1, // recv_window_size
-                    context.timestamp,
-                    chunk, // 移动chunk
-                );
-                
-                consumed_bytes += payload_size; // 使用保存的载荷大小
-                frames.push(frame);
-                frames_generated += 1;
-                
-                trace!(
-                    seq = seq,
-                    payload_size = payload_size,
-                    "Generated PUSH frame during packetization"
-                );
-            } else {
-                break;
-            }
-        }
+        // 生成PUSH帧，考虑MTU限制
+        let (mut push_frames, consumed_bytes, mut limitation) = 
+            self.generate_push_frames_with_mtu_limit(context, send_buffer, sequence_counter, current_packet_size);
         
         // 如果没有生成任何帧且缓冲区为空，更新限制原因
-        if frames_generated == 0 && limitation == PacketizationLimitation::None && send_buffer.is_empty() {
+        if push_frames.is_empty() && limitation == PacketizationLimitation::None && send_buffer.is_empty() {
             limitation = PacketizationLimitation::BufferEmpty;
         }
+        
+        frames.append(&mut push_frames);
         
         debug!(
             frames_generated = frames.len(),
@@ -199,6 +161,146 @@ impl PacketizationProcessor {
         }
     }
     
+    /// 生成PUSH帧（考虑MTU限制）
+    /// Generate PUSH frames (with MTU consideration)
+    fn generate_push_frames_with_mtu_limit(
+        &self,
+        context: &PacketizationContext,
+        send_buffer: &mut SendBufferStore,
+        sequence_counter: &mut u32,
+        initial_packet_size: usize,
+    ) -> (Vec<Frame>, usize, PacketizationLimitation) {
+        let mut frames = Vec::new();
+        let mut consumed_bytes = 0;
+        let mut current_packet_size = initial_packet_size;
+        
+        // 计算发送许可（基于流量控制）
+        let permit = self.calculate_send_permit(context);
+        
+        let limitation = if permit == 0 {
+            if send_buffer.is_empty() {
+                PacketizationLimitation::BufferEmpty
+            } else {
+                self.determine_limitation_reason(context)
+            }
+        } else {
+            PacketizationLimitation::None
+        };
+        
+        // 生成数据帧，受流量控制和MTU限制
+        let mut frames_generated = 0;
+        while frames_generated < permit && !send_buffer.is_empty() {
+            // 检查是否还有足够的包空间来放置新帧
+            let push_frame_header_size = Self::calculate_push_frame_header_size();
+            let remaining_packet_size = context.max_packet_size.saturating_sub(current_packet_size);
+            
+            if remaining_packet_size <= push_frame_header_size {
+                // 包空间不足，无法添加更多帧
+                break;
+            }
+            
+            // 计算这个帧可以使用的最大载荷大小（考虑MTU限制）
+            let max_payload_for_mtu = remaining_packet_size.saturating_sub(push_frame_header_size);
+            let effective_max_payload = std::cmp::min(context.max_payload_size, max_payload_for_mtu);
+            
+            if effective_max_payload == 0 {
+                break;
+            }
+            
+            if let Some(chunk) = send_buffer.extract_chunk(effective_max_payload) {
+                let seq = *sequence_counter;
+                *sequence_counter += 1;
+                let payload_size = chunk.len();
+                
+                let frame = Frame::new_push(
+                    context.peer_cid,
+                    seq,
+                    context.ack_info.0,
+                    context.ack_info.1,
+                    context.timestamp,
+                    chunk,
+                );
+                
+                let frame_size = frame.encoded_size();
+                consumed_bytes += payload_size;
+                current_packet_size += frame_size;
+                frames.push(frame);
+                frames_generated += 1;
+                
+                trace!(
+                    seq = seq,
+                    payload_size = payload_size,
+                    frame_size = frame_size,
+                    current_packet_size = current_packet_size,
+                    remaining_space = context.max_packet_size.saturating_sub(current_packet_size),
+                    "Generated PUSH frame with MTU consideration"
+                );
+            } else {
+                break;
+            }
+        }
+        
+        (frames, consumed_bytes, limitation)
+    }
+    
+    /// 生成PUSH帧（不考虑MTU限制）
+    /// Generate PUSH frames (without MTU consideration)
+    fn generate_push_frames(
+        &self,
+        context: &PacketizationContext,
+        send_buffer: &mut SendBufferStore,
+        sequence_counter: &mut u32,
+    ) -> (Vec<Frame>, usize, PacketizationLimitation) {
+        let mut frames = Vec::new();
+        let mut consumed_bytes = 0;
+        
+        // 计算发送许可（基于流量控制）
+        let permit = self.calculate_send_permit(context);
+        
+        let limitation = if permit == 0 {
+            if send_buffer.is_empty() {
+                PacketizationLimitation::BufferEmpty
+            } else {
+                self.determine_limitation_reason(context)
+            }
+        } else {
+            PacketizationLimitation::None
+        };
+        
+        // 生成数据帧，只受流量控制限制
+        let mut frames_generated = 0;
+        while frames_generated < permit && !send_buffer.is_empty() {
+            if let Some(chunk) = send_buffer.extract_chunk(context.max_payload_size) {
+                let seq = *sequence_counter;
+                *sequence_counter += 1;
+                let payload_size = chunk.len();
+                
+                let frame = Frame::new_push(
+                    context.peer_cid,
+                    seq,
+                    context.ack_info.0,
+                    context.ack_info.1,
+                    context.timestamp,
+                    chunk,
+                );
+                
+                consumed_bytes += payload_size;
+                frames.push(frame);
+                frames_generated += 1;
+                
+                trace!(
+                    seq = seq,
+                    payload_size = payload_size,
+                    "Generated PUSH frame"
+                );
+            } else {
+                break;
+            }
+        }
+        
+        (frames, consumed_bytes, limitation)
+    }
+
     /// 执行0-RTT打包
     /// Perform 0-RTT packetization
     pub fn packetize_zero_rtt(
@@ -208,41 +310,40 @@ impl PacketizationProcessor {
         sequence_counter: &mut u32,
         syn_ack_frame: Frame,
     ) -> ZeroRttPacketizationResult {
-        // 首先生成所有PUSH帧
-        let packetization_result = self.packetize(
+        // 直接生成所有PUSH帧，不受MTU限制
+        let (push_frames, consumed_bytes, limitation) = self.generate_push_frames(
             context,
             send_buffer,
             sequence_counter,
-            None,
         );
         
-        if packetization_result.frames.is_empty() {
+        if push_frames.is_empty() {
             // 只有SYN-ACK，没有数据
             return ZeroRttPacketizationResult {
                 packets: vec![vec![syn_ack_frame]],
                 consumed_bytes: 0,
-                limitation: packetization_result.limitation,
+                limitation,
             };
         }
         
         // 智能分包：将SYN-ACK和PUSH帧分布到多个包中
         let packets = self.distribute_frames_to_packets(
             syn_ack_frame,
-            packetization_result.frames,
+            push_frames,
             context.max_packet_size,
         );
         
         debug!(
             packets_count = packets.len(),
-            consumed_bytes = packetization_result.consumed_bytes,
-            limitation = ?packetization_result.limitation,
+            consumed_bytes = consumed_bytes,
+            limitation = ?limitation,
             "0-RTT packetization completed"
         );
         
         ZeroRttPacketizationResult {
             packets,
-            consumed_bytes: packetization_result.consumed_bytes,
-            limitation: packetization_result.limitation,
+            consumed_bytes,
+            limitation,
         }
     }
     
