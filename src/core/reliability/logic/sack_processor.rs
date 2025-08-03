@@ -113,8 +113,8 @@ impl SackProcessor {
         }
     }
     
-    /// 处理SACK范围
-    /// Process SACK ranges
+    /// 处理SACK范围（带边界检查）
+    /// Process SACK ranges (with bounds checking)
     fn process_sack_ranges(
         &self,
         store: &mut InFlightPacketStore,
@@ -123,21 +123,53 @@ impl SackProcessor {
         result: &mut SackProcessResult,
     ) {
         for range in sack_ranges {
+            // 验证SACK范围的合法性
+            if range.start > range.end {
+                trace!(
+                    start = range.start,
+                    end = range.end,
+                    "Invalid SACK range: start > end, skipping"
+                );
+                continue;
+            }
+            
+            // 防止范围过大导致性能问题（限制单个范围最大1000个序列号）
+            let range_size = range.end.saturating_sub(range.start) + 1;
+            if range_size > 1000 {
+                trace!(
+                    start = range.start,
+                    end = range.end,
+                    size = range_size,
+                    "SACK range too large, skipping for performance"
+                );
+                continue;
+            }
+            
             for seq in range.start..=range.end {
                 if let Some(packet) = store.get_packet(seq) {
-                    // 计算RTT样本
+                    // 计算RTT样本，防止时间倒流
                     let rtt_sample = now.saturating_duration_since(packet.last_sent_at);
-                    result.rtt_samples.push(rtt_sample);
-                    result.sack_acked.push(seq);
                     
-                    trace!(seq = seq, rtt_ms = rtt_sample.as_millis(), "SACK range processed");
+                    // 只接受合理的RTT样本（小于10秒）
+                    if rtt_sample < Duration::from_secs(10) {
+                        result.rtt_samples.push(rtt_sample);
+                        result.sack_acked.push(seq);
+                        
+                        trace!(seq = seq, rtt_ms = rtt_sample.as_millis(), "SACK range processed");
+                    } else {
+                        trace!(
+                            seq = seq,
+                            rtt_ms = rtt_sample.as_millis(),
+                            "RTT sample too large, ignoring"
+                        );
+                    }
                 }
             }
         }
     }
     
-    /// 检测快速重传候选
-    /// Detect fast retransmission candidates
+    /// 检测快速重传候选（优化版 O(n log n)）
+    /// Detect fast retransmission candidates (optimized O(n log n))
     fn detect_fast_retx_candidates(
         &self,
         store: &mut InFlightPacketStore,
@@ -147,32 +179,41 @@ impl SackProcessor {
             return;
         }
         
-        // 寻找被跳过的数据包（可能丢失）
-        // Find skipped packets (potentially lost)
-        let all_sequences = store.get_all_sequences();
+        // 获取所有序列号并排序（一次排序，多次使用）
+        let mut all_sequences = store.get_all_sequences();
+        all_sequences.sort_unstable();
         
-        for seq in all_sequences {
-            // 检查是否有更高序列号的数据包已被SACK确认
-            let higher_acked_count = result.sack_acked.iter()
-                .filter(|&&acked_seq| acked_seq > seq)
-                .count() as u8;
-            
-            if higher_acked_count >= self.fast_retx_threshold {
-                if let Some(packet) = store.get_packet(seq) {
-                    // 只有处于Sent状态的数据包才考虑快速重传
-                    if packet.state == PacketState::Sent {
-                        result.fast_retx_candidates.push(seq);
-                        
-                        trace!(
-                            seq = seq,
-                            higher_acked_count = higher_acked_count,
-                            threshold = self.fast_retx_threshold,
-                            "Fast retransmission candidate detected"
-                        );
-                    }
+        // 对SACK确认的序列号也排序
+        let mut sack_acked_sorted = result.sack_acked.clone();
+        sack_acked_sorted.sort_unstable();
+        
+        // 对每个序列号，使用二分查找计算有多少更高的序列号被SACK确认
+        for &seq in &all_sequences {
+            if let Some(packet) = store.get_packet(seq) {
+                // 只检查处于Sent状态的数据包
+                if packet.state != PacketState::Sent {
+                    continue;
+                }
+                
+                // 使用二分查找找到第一个大于seq的SACK确认序列号的位置
+                let higher_acked_count = sack_acked_sorted.partition_point(|&acked_seq| acked_seq <= seq);
+                let higher_acked_count = (sack_acked_sorted.len() - higher_acked_count) as u8;
+                
+                if higher_acked_count >= self.fast_retx_threshold {
+                    result.fast_retx_candidates.push(seq);
+                    
+                    trace!(
+                        seq = seq,
+                        higher_acked_count = higher_acked_count,
+                        threshold = self.fast_retx_threshold,
+                        "Fast retransmission candidate detected"
+                    );
                 }
             }
         }
+        
+        // 最后按序列号排序候选列表，确保处理顺序一致
+        result.fast_retx_candidates.sort_unstable();
     }
     
     /// 更新快速重传候选状态

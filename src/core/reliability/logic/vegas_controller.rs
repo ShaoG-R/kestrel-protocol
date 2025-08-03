@@ -84,8 +84,9 @@ impl VegasController {
             congestion_window: config.congestion_control.initial_cwnd_packets,
             slow_start_threshold: config.congestion_control.initial_ssthresh,
             state: CongestionState::SlowStart,
-            min_rtt: Duration::from_secs(u64::MAX),
-            last_rtt: Duration::from_secs(u64::MAX),
+            // 使用合理的初始值而不是 u64::MAX 避免溢出
+            min_rtt: Duration::from_millis(1000), // 1 second as safe initial value
+            last_rtt: Duration::from_millis(1000),
             config,
         }
     }
@@ -208,26 +209,53 @@ impl VegasController {
     /// 处理拥塞避免阶段
     /// Handle congestion avoidance phase
     fn handle_congestion_avoidance(&mut self, rtt: Duration) {
-        // Vegas算法的Alpha-Beta机制
-        let expected_throughput = self.congestion_window as f32 / self.min_rtt.as_secs_f32();
-        let actual_throughput = self.congestion_window as f32 / rtt.as_secs_f32();
-        let diff_packets = (expected_throughput - actual_throughput) * self.min_rtt.as_secs_f32();
+        // 避免除零错误和无效计算
+        if rtt.is_zero() || self.min_rtt.is_zero() {
+            trace!("Skipping congestion avoidance: invalid RTT values");
+            return;
+        }
         
-        if diff_packets < self.config.congestion_control.vegas_alpha_packets as f32 {
+        // 优化版Vegas算法：使用整数运算避免浮点精度问题
+        // diff = cwnd * (rtt - min_rtt) / min_rtt
+        // 通过重新排列避免浮点除法：diff = cwnd * (rtt - min_rtt) / min_rtt
+        let rtt_micros = rtt.as_micros();
+        let min_rtt_micros = self.min_rtt.as_micros();
+        
+        if rtt_micros <= min_rtt_micros {
+            // RTT没有增加，增加窗口
+            self.congestion_window += 1;
+            trace!(
+                cwnd = self.congestion_window,
+                rtt_us = rtt_micros,
+                min_rtt_us = min_rtt_micros,
+                "Congestion avoidance: RTT not increased, growing window"
+            );
+            return;
+        }
+        
+        // 计算差值，使用微秒精度避免浮点运算
+        let rtt_diff_micros = rtt_micros - min_rtt_micros;
+        let diff_packets_scaled = (self.congestion_window as u128 * rtt_diff_micros) / min_rtt_micros;
+        let diff_packets = diff_packets_scaled as u32;
+        
+        let alpha = self.config.congestion_control.vegas_alpha_packets;
+        let beta = self.config.congestion_control.vegas_beta_packets;
+        
+        if diff_packets < alpha {
             self.congestion_window += 1;
             trace!(
                 cwnd = self.congestion_window,
                 diff = diff_packets,
-                alpha = self.config.congestion_control.vegas_alpha_packets,
+                alpha = alpha,
                 "Congestion avoidance: increasing window"
             );
-        } else if diff_packets > self.config.congestion_control.vegas_beta_packets as f32 {
+        } else if diff_packets > beta {
             self.congestion_window = (self.congestion_window - 1)
                 .max(self.config.congestion_control.min_cwnd_packets);
             trace!(
                 cwnd = self.congestion_window,
                 diff = diff_packets,
-                beta = self.config.congestion_control.vegas_beta_packets,
+                beta = beta,
                 "Congestion avoidance: decreasing window"
             );
         } else {
@@ -252,9 +280,13 @@ impl VegasController {
     /// 判断是否为拥塞性丢包
     /// Determine if loss is congestive
     fn is_congestive_loss(&self) -> bool {
-        // 如果RTT显著增加，认为是拥塞性丢包
-        self.last_rtt == Duration::from_secs(u64::MAX)
-            || self.last_rtt > self.min_rtt + (self.min_rtt / 5)
+        // 如果RTT显著增加（超过min_rtt的20%），认为是拥塞性丢包
+        // 避免除零错误：当min_rtt为零时默认为非拥塞性丢包
+        if self.min_rtt.is_zero() {
+            return false;
+        }
+        
+        self.last_rtt > self.min_rtt + (self.min_rtt / 5)
     }
     
     /// 处理拥塞性丢包
@@ -292,8 +324,9 @@ impl VegasController {
         self.congestion_window = self.config.congestion_control.initial_cwnd_packets;
         self.slow_start_threshold = self.config.congestion_control.initial_ssthresh;
         self.state = CongestionState::SlowStart;
-        self.min_rtt = Duration::from_secs(u64::MAX);
-        self.last_rtt = Duration::from_secs(u64::MAX);
+        // 使用与构造函数相同的初始值
+        self.min_rtt = Duration::from_millis(1000);
+        self.last_rtt = Duration::from_millis(1000);
         
         debug!("Vegas controller reset to initial state");
     }
