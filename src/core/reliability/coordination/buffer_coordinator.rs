@@ -100,11 +100,12 @@ impl BufferCoordinator {
     /// 写入数据到发送缓冲区
     /// Write data to send buffer
     pub fn write_to_send_buffer(&mut self, data: Bytes) -> usize {
-        let written = self.send_buffer.write_data(data.clone());
+        let data_len = data.len();
+        let written = self.send_buffer.write_data(data);
         
-        if written < data.len() {
+        if written < data_len {
             warn!(
-                requested = data.len(),
+                requested = data_len,
                 written = written,
                 "Send buffer write partially successful due to capacity limit"
             );
@@ -287,6 +288,19 @@ impl BufferCoordinator {
         self.send_buffer.available_space()
     }
     
+    /// 取出发送缓冲区中的所有数据
+    /// Take all data from send buffer
+    pub fn take_send_buffer_data(&mut self) -> impl Iterator<Item = Bytes> {
+        info!("Taking all data from send buffer");
+        self.send_buffer.take_all_data()
+    }
+    
+    /// 检查接收缓冲区是否到达FIN
+    /// Check if receive buffer has reached FIN
+    pub fn is_receive_buffer_fin_reached(&self) -> bool {
+        self.receive_buffer.is_fin_reached()
+    }
+    
     /// 清空发送缓冲区
     /// Clear send buffer
     pub fn clear_send_buffer(&mut self) {
@@ -390,5 +404,267 @@ impl Default for BufferCoordinator {
             256,          // 256 packets receive buffer
             64,           // 64 frames per packetization
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    fn create_test_coordinator() -> BufferCoordinator {
+        BufferCoordinator::new(1024, 10, 8)
+    }
+
+    fn create_test_context() -> PacketizationContext {
+        PacketizationContext {
+            peer_cid: 123,
+            timestamp: 1000,
+            congestion_window: 10,
+            in_flight_count: 0,
+            peer_recv_window: 10,
+            max_payload_size: 64,
+            ack_info: (0, 10),
+        }
+    }
+
+    #[test]
+    fn test_buffer_coordinator_basic_operations() {
+        let mut coordinator = create_test_coordinator();
+        
+        // Test initial state
+        assert!(coordinator.is_send_buffer_empty());
+        assert!(coordinator.is_receive_buffer_empty());
+        assert_eq!(coordinator.send_buffer_available_space(), 1024);
+        
+        // Test write to send buffer
+        let data = Bytes::from("hello world");
+        let written = coordinator.write_to_send_buffer(data);
+        assert_eq!(written, 11);
+        assert!(!coordinator.is_send_buffer_empty());
+        assert_eq!(coordinator.send_buffer_available_space(), 1013);
+    }
+
+    #[test]
+    fn test_buffer_coordinator_receive_operations() {
+        let mut coordinator = create_test_coordinator();
+        
+        // Test receive packet
+        assert!(coordinator.receive_packet(0, Bytes::from("hello")));
+        assert!(coordinator.receive_packet(1, Bytes::from(" world")));
+        assert!(!coordinator.receive_packet(0, Bytes::from("duplicate")));
+        
+        assert!(!coordinator.is_receive_buffer_empty());
+        
+        // Test reassembly
+        let result = coordinator.reassemble_data();
+        assert!(result.data.is_some());
+        let data = result.data.unwrap();
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0], "hello");
+        assert_eq!(data[1], " world");
+        assert!(!result.fin_seen);
+        assert_eq!(result.packet_count, 2);
+    }
+
+    #[test]
+    fn test_buffer_coordinator_fin_handling() {
+        let mut coordinator = create_test_coordinator();
+        
+        coordinator.receive_packet(0, Bytes::from("data"));
+        coordinator.receive_fin(1);
+        coordinator.receive_packet(2, Bytes::from("after fin"));
+        
+        let result = coordinator.reassemble_data();
+        assert!(result.data.is_some());
+        assert!(result.fin_seen);
+        assert_eq!(result.packet_count, 2); // data + fin
+        
+        assert!(coordinator.is_receive_buffer_fin_reached());
+        
+        // After FIN, no more data should be available
+        let result2 = coordinator.reassemble_data();
+        assert!(result2.data.is_none());
+        assert!(!result2.fin_seen);
+        assert_eq!(result2.packet_count, 0);
+    }
+
+    #[test]
+    fn test_buffer_coordinator_out_of_order_packets() {
+        let mut coordinator = create_test_coordinator();
+        
+        // Receive out of order
+        coordinator.receive_packet(2, Bytes::from("world"));
+        coordinator.receive_packet(0, Bytes::from("hello"));
+        coordinator.receive_packet(1, Bytes::from(" "));
+        
+        // Should reassemble in order
+        let result = coordinator.reassemble_data();
+        assert!(result.data.is_some());
+        let data = result.data.unwrap();
+        assert_eq!(data.len(), 3);
+        assert_eq!(data[0], "hello");
+        assert_eq!(data[1], " ");
+        assert_eq!(data[2], "world");
+    }
+
+    #[test]
+    fn test_buffer_coordinator_sack_ranges() {
+        let mut coordinator = create_test_coordinator();
+        
+        // Create gaps in sequence
+        coordinator.receive_packet(0, Bytes::new());
+        coordinator.receive_packet(1, Bytes::new());
+        coordinator.receive_packet(4, Bytes::new());
+        coordinator.receive_packet(5, Bytes::new());
+        coordinator.receive_packet(8, Bytes::new());
+        
+        // Reassemble contiguous part
+        coordinator.reassemble_data();
+        
+        let sack_ranges = coordinator.generate_sack_ranges();
+        assert_eq!(sack_ranges.len(), 2);
+        assert_eq!(sack_ranges[0].start, 4);
+        assert_eq!(sack_ranges[0].end, 5);
+        assert_eq!(sack_ranges[1].start, 8);
+        assert_eq!(sack_ranges[1].end, 8);
+    }
+
+    #[test]
+    fn test_buffer_coordinator_receive_window_info() {
+        let mut coordinator = create_test_coordinator();
+        
+        let (next_seq, window_size) = coordinator.get_receive_window_info();
+        assert_eq!(next_seq, 0);
+        assert_eq!(window_size, 10);
+        
+        coordinator.receive_packet(0, Bytes::from("test"));
+        coordinator.receive_packet(2, Bytes::from("test2"));
+        
+        let (next_seq, window_size) = coordinator.get_receive_window_info();
+        assert_eq!(next_seq, 0); // Still expecting 0 since we haven't reassembled
+        assert_eq!(window_size, 8); // 2 packets buffered
+        
+        coordinator.reassemble_data(); // This should extract packet 0
+        
+        let (next_seq, window_size) = coordinator.get_receive_window_info();
+        assert_eq!(next_seq, 1); // Now expecting 1
+        assert_eq!(window_size, 9); // 1 packet still buffered
+    }
+
+    #[test]
+    fn test_buffer_coordinator_packetization() {
+        let mut coordinator = create_test_coordinator();
+        let context = create_test_context();
+        let mut sequence_counter = 0u32;
+        
+        // Add data to send buffer
+        coordinator.write_to_send_buffer(Bytes::from("hello"));
+        coordinator.write_to_send_buffer(Bytes::from(" world"));
+        
+        // Test basic packetization
+        let result = coordinator.packetize(&context, &mut sequence_counter, None);
+        
+        assert!(!result.frames.is_empty());
+        assert!(result.consumed_bytes > 0);
+        assert_eq!(sequence_counter, result.frames.len() as u32);
+    }
+
+    #[test]
+    fn test_buffer_coordinator_take_send_buffer_data() {
+        let mut coordinator = create_test_coordinator();
+        
+        coordinator.write_to_send_buffer(Bytes::from("hello"));
+        coordinator.write_to_send_buffer(Bytes::from(" world"));
+        
+        assert!(!coordinator.is_send_buffer_empty());
+        
+        let all_data: Vec<Bytes> = coordinator.take_send_buffer_data().collect();
+        assert_eq!(all_data.len(), 2);
+        assert_eq!(all_data[0], "hello");
+        assert_eq!(all_data[1], " world");
+        
+        assert!(coordinator.is_send_buffer_empty());
+    }
+
+    #[test]
+    fn test_buffer_coordinator_clear_operations() {
+        let mut coordinator = create_test_coordinator();
+        
+        // Add data to both buffers
+        coordinator.write_to_send_buffer(Bytes::from("send data"));
+        coordinator.receive_packet(0, Bytes::from("receive data"));
+        
+        assert!(!coordinator.is_send_buffer_empty());
+        assert!(!coordinator.is_receive_buffer_empty());
+        
+        // Test individual clears
+        coordinator.clear_send_buffer();
+        assert!(coordinator.is_send_buffer_empty());
+        assert!(!coordinator.is_receive_buffer_empty());
+        
+        coordinator.clear_receive_buffer();
+        assert!(coordinator.is_receive_buffer_empty());
+        
+        // Test clear all
+        coordinator.write_to_send_buffer(Bytes::from("send data"));
+        coordinator.receive_packet(0, Bytes::from("receive data"));
+        
+        coordinator.clear_all_buffers();
+        assert!(coordinator.is_send_buffer_empty());
+        assert!(coordinator.is_receive_buffer_empty());
+    }
+
+    #[test]
+    fn test_buffer_coordinator_status_and_statistics() {
+        let mut coordinator = create_test_coordinator();
+        
+        // Add some data
+        coordinator.write_to_send_buffer(Bytes::from("test data"));
+        coordinator.receive_packet(0, Bytes::from("recv data"));
+        coordinator.receive_packet(2, Bytes::from("recv data2"));
+        
+        let status = coordinator.get_buffer_status();
+        assert_eq!(status.send_buffer_status.used_bytes, 9);
+        assert_eq!(status.send_buffer_status.total_capacity, 1024);
+        assert!(!status.send_buffer_status.is_empty);
+        
+        assert_eq!(status.receive_buffer_status.used_slots, 2);
+        assert_eq!(status.receive_buffer_status.total_capacity, 10);
+        assert!(!status.receive_buffer_status.is_empty);
+        assert!(!status.receive_buffer_status.fin_reached);
+        
+        let stats = coordinator.get_statistics();
+        assert!(stats.send_buffer_utilization > 0.0);
+        assert!(stats.receive_buffer_utilization > 0.0);
+        assert_eq!(stats.send_buffer_chunks, 1);
+        assert_eq!(stats.receive_buffer_packets, 2);
+    }
+
+    #[test]
+    fn test_buffer_coordinator_send_buffer_capacity_limits() {
+        let mut coordinator = BufferCoordinator::new(10, 10, 8); // Small send buffer
+        
+        let data1 = Bytes::from("hello");
+        let data2 = Bytes::from("world");
+        let data3 = Bytes::from("!!!");
+        
+        assert_eq!(coordinator.write_to_send_buffer(data1), 5);
+        assert_eq!(coordinator.write_to_send_buffer(data2), 5);
+        assert_eq!(coordinator.write_to_send_buffer(data3), 0); // Should be rejected
+        
+        assert_eq!(coordinator.send_buffer_available_space(), 0);
+    }
+
+    #[test]
+    fn test_buffer_coordinator_display_statistics() {
+        let coordinator = create_test_coordinator();
+        let stats = coordinator.get_statistics();
+        
+        let display_str = format!("{}", stats);
+        assert!(display_str.contains("BufferCoordinator"));
+        assert!(display_str.contains("send:"));
+        assert!(display_str.contains("recv:"));
+        assert!(display_str.contains("max_frames:"));
     }
 }

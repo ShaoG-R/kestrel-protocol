@@ -112,6 +112,13 @@ impl SendBufferStore {
         self.stream_buffer.is_empty()
     }
     
+    /// 取出流缓冲区中的所有数据
+    /// Take all data from stream buffer
+    pub fn take_all_data(&mut self) -> impl Iterator<Item = Bytes> {
+        self.stream_buffer_size = 0;
+        self.stream_buffer.drain(..)
+    }
+    
     /// 清空缓冲区
     /// Clear buffer
     pub fn clear(&mut self) {
@@ -330,5 +337,233 @@ impl Default for SendBufferStore {
 impl Default for ReceiveBufferStore {
     fn default() -> Self {
         Self::new(256) // 256 packets default capacity
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    #[test]
+    fn test_send_buffer_store_basic_operations() {
+        let mut store = SendBufferStore::new(100);
+        
+        // Test initial state
+        assert!(store.is_empty());
+        assert_eq!(store.data_size(), 0);
+        assert_eq!(store.available_space(), 100);
+        
+        // Test write data
+        let data1 = Bytes::from("hello");
+        let written = store.write_data(data1);
+        assert_eq!(written, 5);
+        assert_eq!(store.data_size(), 5);
+        assert_eq!(store.available_space(), 95);
+        assert!(!store.is_empty());
+        
+        // Test extract chunk
+        let chunk = store.extract_chunk(3).unwrap();
+        assert_eq!(chunk, "hel");
+        assert_eq!(store.data_size(), 2);
+        
+        let chunk = store.extract_chunk(10).unwrap();
+        assert_eq!(chunk, "lo");
+        assert_eq!(store.data_size(), 0);
+        assert!(store.is_empty());
+    }
+    
+    #[test]
+    fn test_send_buffer_store_capacity_limits() {
+        let mut store = SendBufferStore::new(10);
+        
+        let data1 = Bytes::from("hello");
+        let data2 = Bytes::from("world");
+        let data3 = Bytes::from("!!!");
+        
+        assert_eq!(store.write_data(data1), 5);
+        assert_eq!(store.write_data(data2), 5);
+        assert_eq!(store.write_data(data3), 0); // Should be rejected
+        
+        assert_eq!(store.data_size(), 10);
+        assert_eq!(store.available_space(), 0);
+    }
+    
+    #[test]
+    fn test_send_buffer_store_partial_write() {
+        let mut store = SendBufferStore::new(8);
+        
+        let data = Bytes::from("hello world");
+        let written = store.write_data(data);
+        assert_eq!(written, 8);
+        assert_eq!(store.data_size(), 8);
+        
+        let chunk = store.extract_chunk(100).unwrap();
+        assert_eq!(chunk, "hello wo");
+    }
+    
+    #[test]
+    fn test_send_buffer_store_take_all_data() {
+        let mut store = SendBufferStore::new(100);
+        
+        store.write_data(Bytes::from("hello"));
+        store.write_data(Bytes::from(" world"));
+        
+        let all_data: Vec<Bytes> = store.take_all_data().collect();
+        assert_eq!(all_data.len(), 2);
+        assert_eq!(all_data[0], "hello");
+        assert_eq!(all_data[1], " world");
+        
+        assert!(store.is_empty());
+        assert_eq!(store.data_size(), 0);
+    }
+    
+    #[test]
+    fn test_receive_buffer_store_basic_operations() {
+        let mut store = ReceiveBufferStore::new(10);
+        
+        // Test initial state
+        assert!(store.is_empty());
+        assert_eq!(store.next_sequence(), 0);
+        assert!(!store.is_fin_reached());
+        assert_eq!(store.window_size(), 10);
+        
+        // Test store packets
+        assert!(store.store_packet(0, Bytes::from("hello")));
+        assert!(store.store_packet(1, Bytes::from(" world")));
+        assert!(!store.store_packet(0, Bytes::from("duplicate"))); // Duplicate
+        
+        assert_eq!(store.window_size(), 8);
+        assert!(!store.is_empty());
+    }
+    
+    #[test]
+    fn test_receive_buffer_store_in_order_extraction() {
+        let mut store = ReceiveBufferStore::new(10);
+        
+        store.store_packet(0, Bytes::from("hello"));
+        store.store_packet(1, Bytes::from(" world"));
+        
+        // Extract in order
+        let packet1 = store.extract_next_contiguous().unwrap();
+        assert!(matches!(packet1, PacketOrFin::Push(data) if data == "hello"));
+        assert_eq!(store.next_sequence(), 1);
+        
+        let packet2 = store.extract_next_contiguous().unwrap();
+        assert!(matches!(packet2, PacketOrFin::Push(data) if data == " world"));
+        assert_eq!(store.next_sequence(), 2);
+        
+        assert!(store.extract_next_contiguous().is_none());
+    }
+    
+    #[test]
+    fn test_receive_buffer_store_out_of_order() {
+        let mut store = ReceiveBufferStore::new(10);
+        
+        // Store out of order
+        store.store_packet(2, Bytes::from("world"));
+        store.store_packet(0, Bytes::from("hello"));
+        store.store_packet(1, Bytes::from(" "));
+        
+        // Should extract in sequence order
+        let packet1 = store.extract_next_contiguous().unwrap();
+        assert!(matches!(packet1, PacketOrFin::Push(data) if data == "hello"));
+        
+        let packet2 = store.extract_next_contiguous().unwrap();
+        assert!(matches!(packet2, PacketOrFin::Push(data) if data == " "));
+        
+        let packet3 = store.extract_next_contiguous().unwrap();
+        assert!(matches!(packet3, PacketOrFin::Push(data) if data == "world"));
+    }
+    
+    #[test]
+    fn test_receive_buffer_store_fin_handling() {
+        let mut store = ReceiveBufferStore::new(10);
+        
+        store.store_packet(0, Bytes::from("data"));
+        store.store_fin(1);
+        store.store_packet(2, Bytes::from("after fin")); // Should be accepted but cleared on FIN processing
+        
+        // Extract data
+        let packet1 = store.extract_next_contiguous().unwrap();
+        assert!(matches!(packet1, PacketOrFin::Push(data) if data == "data"));
+        
+        // Extract FIN
+        let fin_packet = store.extract_next_contiguous().unwrap();
+        assert!(matches!(fin_packet, PacketOrFin::Fin));
+        assert!(store.is_fin_reached());
+        assert!(store.is_empty()); // Should be cleared after FIN
+        
+        // No more packets should be extractable
+        assert!(store.extract_next_contiguous().is_none());
+        
+        // New packets should be rejected
+        assert!(!store.store_packet(3, Bytes::from("rejected")));
+    }
+    
+    #[test]
+    fn test_receive_buffer_store_old_packets() {
+        let mut store = ReceiveBufferStore::new(10);
+        
+        store.store_packet(0, Bytes::from("first"));
+        store.extract_next_contiguous(); // Advances next_sequence to 1
+        
+        // Old packet should be rejected
+        assert!(!store.store_packet(0, Bytes::from("old")));
+        
+        // Future packet should be accepted
+        assert!(store.store_packet(2, Bytes::from("future")));
+    }
+    
+    #[test]
+    fn test_receive_buffer_store_sack_ranges() {
+        let mut store = ReceiveBufferStore::new(10);
+        
+        // Create gaps: receive 0,1,4,5,8
+        store.store_packet(0, Bytes::new());
+        store.store_packet(1, Bytes::new());
+        store.store_packet(4, Bytes::new());
+        store.store_packet(5, Bytes::new());
+        store.store_packet(8, Bytes::new());
+        
+        // Extract contiguous part (0,1)
+        store.extract_next_contiguous();
+        store.extract_next_contiguous();
+        
+        let sack_ranges = store.generate_sack_ranges();
+        assert_eq!(sack_ranges.len(), 2);
+        assert_eq!(sack_ranges[0].start, 4);
+        assert_eq!(sack_ranges[0].end, 5);
+        assert_eq!(sack_ranges[1].start, 8);
+        assert_eq!(sack_ranges[1].end, 8);
+    }
+    
+    #[test]
+    fn test_send_buffer_store_statistics() {
+        let mut store = SendBufferStore::new(100);
+        
+        store.write_data(Bytes::from("hello"));
+        store.write_data(Bytes::from(" world"));
+        
+        let stats = store.get_stats();
+        assert_eq!(stats.total_capacity, 100);
+        assert_eq!(stats.used_size, 11);
+        assert_eq!(stats.available_size, 89);
+        assert_eq!(stats.chunk_count, 2);
+    }
+    
+    #[test]
+    fn test_receive_buffer_store_statistics() {
+        let mut store = ReceiveBufferStore::new(10);
+        
+        store.store_packet(0, Bytes::from("hello"));
+        store.store_packet(2, Bytes::from("world"));
+        
+        let stats = store.get_stats();
+        assert_eq!(stats.total_capacity, 10);
+        assert_eq!(stats.used_slots, 2);
+        assert_eq!(stats.available_slots, 8);
+        assert_eq!(stats.next_sequence, 0);
+        assert!(!stats.fin_reached);
     }
 }
