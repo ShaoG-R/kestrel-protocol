@@ -15,9 +15,10 @@ pub mod data;
 
 use coordination::{
     buffer_coordinator::{BufferCoordinator, ReassemblyResult},
-    flow_control_coordinator::FlowControlCoordinator,
+    flow_control_coordinator::{FlowControlCoordinator, FlowControlCoordinatorConfig},
     packet_coordinator::PacketCoordinator,
 };
+use logic::congestion::traits::CongestionController;
 use logic::packetization_processor::PacketizationContext;
 use crate::{
     config::Config,
@@ -66,7 +67,7 @@ pub struct AckProcessingResult {
 
 /// 统一可靠性层
 /// Unified reliability layer
-pub struct UnifiedReliabilityLayer {
+pub struct UnifiedReliabilityLayer<C: CongestionController> {
     /// 数据包协调器 - 处理重传和定时器
     /// Packet coordinator - handles retransmission and timers
     packet_coordinator: PacketCoordinator,
@@ -77,7 +78,7 @@ pub struct UnifiedReliabilityLayer {
     
     /// 流量控制协调器 - 处理拥塞控制和流量控制
     /// Flow control coordinator - handles congestion and flow control
-    flow_control_coordinator: FlowControlCoordinator,
+    flow_control_coordinator: FlowControlCoordinator<C>,
     
     /// RTT估算器 - 计算准确的RTO用于重传定时器
     /// RTT estimator - calculates accurate RTO for retransmission timers
@@ -96,13 +97,15 @@ pub struct UnifiedReliabilityLayer {
     config: Config,
 }
 
-impl UnifiedReliabilityLayer {
+impl<C: CongestionController> UnifiedReliabilityLayer<C> {
     /// 创建新的统一可靠性层
     /// Create new unified reliability layer
     pub fn new(
         connection_id: ConnectionId,
         timer_actor: SenderTimerActorHandle,
         timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,
+        congestion_controller: C,
+        flow_control_config: FlowControlCoordinatorConfig,
         config: Config,
     ) -> Self {
         Self {
@@ -116,7 +119,10 @@ impl UnifiedReliabilityLayer {
             buffer_coordinator: BufferCoordinator::new(
                 &config,
             ),
-            flow_control_coordinator: FlowControlCoordinator::new(config.clone()),
+            flow_control_coordinator: FlowControlCoordinator::new(
+                congestion_controller,
+                flow_control_config,
+            ),
             rtt_estimator: RttEstimator::new(config.reliability.initial_rto),
             sequence_counter: 0,
             fin_in_flight: false,
@@ -534,7 +540,7 @@ impl UnifiedReliabilityLayer {
     
     /// 获取统计信息
     /// Get statistics
-    pub fn get_statistics(&self) -> UnifiedReliabilityStats {
+    pub fn get_statistics(&self) -> UnifiedReliabilityStats<C::Stats> {
         let packet_stats = self.packet_coordinator.get_statistics();
         let buffer_stats = self.buffer_coordinator.get_statistics();
         let flow_stats = self.flow_control_coordinator.get_statistics();
@@ -546,7 +552,7 @@ impl UnifiedReliabilityLayer {
             active_timers: packet_stats.active_timers,
             send_buffer_utilization: buffer_stats.send_buffer_utilization,
             receive_buffer_utilization: buffer_stats.receive_buffer_utilization,
-            congestion_window: flow_stats.vegas_stats.congestion_window,
+            congestion_stats: flow_stats.congestion_stats,
             send_permit: flow_stats.send_permit,
             sequence_counter: self.sequence_counter,
         }
@@ -647,7 +653,7 @@ impl UnifiedReliabilityLayer {
 /// 统一可靠性层统计信息
 /// Unified reliability layer statistics
 #[derive(Debug, Clone)]
-pub struct UnifiedReliabilityStats {
+pub struct UnifiedReliabilityStats<S: logic::congestion::traits::CongestionStats> {
     /// 总在途数据包数
     /// Total in-flight packets
     pub total_in_flight: usize,
@@ -672,9 +678,9 @@ pub struct UnifiedReliabilityStats {
     /// Receive buffer utilization
     pub receive_buffer_utilization: f64,
     
-    /// 拥塞窗口大小
-    /// Congestion window size
-    pub congestion_window: u32,
+    /// 拥塞控制统计信息
+    /// Congestion control statistics
+    pub congestion_stats: S,
     
     /// 发送许可
     /// Send permit
@@ -685,21 +691,20 @@ pub struct UnifiedReliabilityStats {
     pub sequence_counter: u32,
 }
 
-impl std::fmt::Display for UnifiedReliabilityStats {
+impl<S: logic::congestion::traits::CongestionStats> std::fmt::Display for UnifiedReliabilityStats<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "UnifiedReliability[in_flight:{}, needs_retx:{}, fast_retx:{}, timers:{}, send_buf:{:.1}%, recv_buf:{:.1}%, cwnd:{}, permit:{}, seq:{}]",
+            "UnifiedReliability[in_flight:{}, needs_retx:{}, fast_retx:{}, timers:{}, send_buf:{:.1}%, recv_buf:{:.1}%, congestion:{}, permit:{}, seq:{}]",
             self.total_in_flight,
             self.needs_retx_count,
             self.fast_retx_candidates,
             self.active_timers,
             self.send_buffer_utilization,
             self.receive_buffer_utilization,
-            self.congestion_window,
+            self.congestion_stats,
             self.send_permit,
             self.sequence_counter
         )
     }
-
 }

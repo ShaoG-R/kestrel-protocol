@@ -15,7 +15,7 @@ pub use retransmission::sack_processor::{SackProcessResult, SackProcessor};
 pub use retransmission::{RetransmissionDecider, RetransmissionDecision, RetransmissionType};
 pub use timer_event_handler::{TimerEventHandler, TimerHandlingResult};
 pub use congestion::vegas_controller::{
-    CongestionDecision, CongestionState, VegasController, VegasStats,
+    VegasController, VegasStats,
 };
 pub use packetization_processor::{
     PacketizationContext, PacketizationLimitation, PacketizationProcessor,

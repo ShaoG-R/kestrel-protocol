@@ -10,8 +10,15 @@
 
 use crate::{
     core::{
-        endpoint::types::state::ConnectionState, reliability::UnifiedReliabilityLayer,
-    }, error::Result, packet::frame::Frame, socket::SocketActorCommand
+        endpoint::types::state::ConnectionState, 
+        reliability::{
+            UnifiedReliabilityLayer,
+            logic::congestion::{traits::CongestionController, vegas_controller::VegasController},
+        },
+    }, 
+    error::Result, 
+    packet::frame::Frame, 
+    socket::SocketActorCommand
 };
 use std::net::SocketAddr;
 use tokio::{sync::mpsc, time::Instant};
@@ -32,7 +39,7 @@ use async_trait::async_trait;
 /// 2. Simplify unit testing (can provide mock implementations)
 /// 3. Improve code maintainability and modularity
 #[async_trait]
-pub trait EndpointOperations: Send {
+pub trait EndpointOperations<C: CongestionController = VegasController>: Send {
     // ========== 基础信息获取 (Basic Information Access) ==========
     
     /// 获取本地连接ID
@@ -85,11 +92,11 @@ pub trait EndpointOperations: Send {
     
     /// 获取可靠性层的只读引用
     /// Get read-only reference to reliability layer
-    fn unified_reliability(&self) -> &UnifiedReliabilityLayer;
+    fn unified_reliability(&self) -> &UnifiedReliabilityLayer<C>;
     
     /// 获取可靠性层的可变引用
     /// Get mutable reference to reliability layer
-    fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer;
+    fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer<C>;
     
     /// 检查发送缓冲区是否为空
     /// Check if send buffer is empty
@@ -150,7 +157,7 @@ pub trait EndpointOperations: Send {
 /// It combines multiple low-level operations to provide interfaces that better match
 /// processor usage patterns.
 #[async_trait]
-pub trait ProcessorOperations: EndpointOperations {
+pub trait ProcessorOperations<C: CongestionController = VegasController>: EndpointOperations<C> {
     /// 处理ACK信息并返回需要重传的帧
     /// Process ACK information and return frames that need retransmission
     async fn process_ack_and_get_retx_frames(
@@ -184,7 +191,7 @@ pub trait ProcessorOperations: EndpointOperations {
 
 /// 处理器错误上下文创建器
 /// Processor error context creator
-pub trait ProcessorErrorContext {
+pub trait ProcessorErrorContext<C: CongestionController = VegasController> {
     /// 创建处理器错误上下文
     /// Create processor error context
     fn create_processor_error_context(
@@ -197,7 +204,7 @@ pub trait ProcessorErrorContext {
 
 // 为任何实现了 EndpointOperations 的类型提供默认的错误上下文创建
 // Provide default error context creation for any type implementing EndpointOperations
-impl<T: EndpointOperations> ProcessorErrorContext for T {
+impl<T: EndpointOperations<C>, C: CongestionController> ProcessorErrorContext<C> for T {
     fn create_processor_error_context(
         &self,
         processor_name: &'static str,
@@ -223,7 +230,7 @@ mod tests {
 
     /// 模拟端点操作实现，用于测试
     /// Mock endpoint operations implementation for testing
-    pub struct MockEndpointOperations {
+    pub struct MockEndpointOperations<C: CongestionController = VegasController> {
         pub local_cid: u32,
         pub peer_cid: u32,
         pub remote_addr: SocketAddr,
@@ -231,13 +238,14 @@ mod tests {
         pub peer_recv_window: u32,
         pub current_state: ConnectionState,
         pub sent_frames: Arc<Mutex<VecDeque<Frame>>>,
-        pub unified_reliability: UnifiedReliabilityLayer,
+        pub unified_reliability: UnifiedReliabilityLayer<C>,
         pub command_tx: mpsc::Sender<SocketActorCommand>,
     }
 
-    impl MockEndpointOperations {
+    impl MockEndpointOperations<VegasController> {
         pub async fn new() -> (Self, mpsc::Receiver<SocketActorCommand>) {
             let (command_tx, command_rx) = mpsc::channel(100);
+            let config = crate::config::Config::default();
             let mock = Self {
                 local_cid: 1,
                 peer_cid: 2,
@@ -247,12 +255,13 @@ mod tests {
                 current_state: ConnectionState::Established,
                 sent_frames: Arc::new(Mutex::new(VecDeque::new())),
                 unified_reliability: {
-                    let config = crate::config::Config::default();
                     let connection_id = 1; // Test connection ID
                     let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent, crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>>();
                     let timer_actor = crate::timer::start_sender_timer_actor(timer_handle, None);
                     let (tx_to_endpoint, _rx_from_stream) = tokio::sync::mpsc::channel(128);
-                    UnifiedReliabilityLayer::new(connection_id, timer_actor, tx_to_endpoint, config)
+                    let congestion_controller = VegasController::new(config.clone());
+                    let flow_control_config = crate::core::reliability::coordination::flow_control_coordinator::FlowControlCoordinatorConfig::default();
+                    UnifiedReliabilityLayer::new(connection_id, timer_actor, tx_to_endpoint, congestion_controller, flow_control_config, config.clone())
                 },
                 command_tx,
             };
@@ -261,7 +270,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl EndpointOperations for MockEndpointOperations {
+    impl EndpointOperations<VegasController> for MockEndpointOperations<VegasController> {
         fn local_cid(&self) -> u32 { self.local_cid }
         fn peer_cid(&self) -> u32 { self.peer_cid }
         fn remote_addr(&self) -> SocketAddr { self.remote_addr }
@@ -280,8 +289,8 @@ mod tests {
         fn set_remote_addr(&mut self, addr: SocketAddr) { self.remote_addr = addr; }
         fn complete_path_validation(&mut self, _success: bool) -> Result<()> { Ok(()) }
         
-        fn unified_reliability(&self) -> &UnifiedReliabilityLayer { &self.unified_reliability }
-        fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer { &mut self.unified_reliability }
+        fn unified_reliability(&self) -> &UnifiedReliabilityLayer<VegasController> { &self.unified_reliability }
+        fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer<VegasController> { &mut self.unified_reliability }
         fn is_send_buffer_empty(&self) -> bool { true }
         
         async fn send_syn_ack_frame(&mut self) -> Result<()> { Ok(()) }

@@ -18,7 +18,10 @@ pub use types::command::StreamCommand;
 use lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::{
     config::Config,
-    core::reliability::UnifiedReliabilityLayer,
+    core::reliability::{
+        UnifiedReliabilityLayer,
+        logic::congestion::{traits::CongestionController, vegas_controller::VegasController},
+    },
     error::Result,
     socket::{SocketActorCommand, Transport},
 };
@@ -62,7 +65,7 @@ impl<T: Transport> Drop for ConnectionCleaner<T> {
 }
 
 /// Represents one end of a reliable connection.
-pub struct Endpoint<T: Transport> {
+pub struct Endpoint<T: Transport, C: CongestionController = VegasController> {
     /// 新的连接标识管理器
     /// New connection identity manager
     identity: ConnectionIdentity,
@@ -73,7 +76,7 @@ pub struct Endpoint<T: Transport> {
     
     /// 新的传输层管理器
     /// New transport manager
-    transport: TransportManager,
+    transport: TransportManager<C>,
 
     /// 新的通道管理器
     /// New channel manager
@@ -86,7 +89,7 @@ pub struct Endpoint<T: Transport> {
     
 }
 
-impl<T: Transport> Endpoint<T> {
+impl<T: Transport, C: CongestionController> Endpoint<T, C> {
 
     /// 获取生命周期管理器的引用
     /// Gets a reference to the lifecycle manager
@@ -349,13 +352,13 @@ impl<T: Transport> Endpoint<T> {
 
     /// 获取可靠性层的可变引用
     /// Gets a mutable reference to the reliability layer
-    pub fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer {
+    pub fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer<C> {
         self.transport.unified_reliability_mut()
     }
 
     /// 获取可靠性层的引用
     /// Gets a reference to the reliability layer
-    pub fn unified_reliability(&self) -> &UnifiedReliabilityLayer {
+    pub fn unified_reliability(&self) -> &UnifiedReliabilityLayer<C> {
         self.transport.unified_reliability()
     }
 

@@ -162,7 +162,7 @@ async fn test_core_multiple_clients_concurrently() {
         // Start global timer task for testing
         let timer_handle = crate::timer::start_hybrid_timer_task();
 
-        let (server_endpoint, tx_to_server_user, rx_from_server_user) = Endpoint::new_server(
+        let (server_endpoint, tx_to_server_user, rx_from_server_user) = Endpoint::new_server_with_vegas(
             Config::default(),
             client_addr,
             server_cid,
@@ -191,7 +191,7 @@ async fn test_core_multiple_clients_concurrently() {
             // Start global timer task for testing
             let timer_handle = crate::timer::start_hybrid_timer_task();
 
-            let (mut endpoint, tx_to_client_user, mut rx_from_client_user) = Endpoint::new_client(
+            let (mut endpoint, tx_to_client_user, mut rx_from_client_user) = Endpoint::new_client_with_vegas(
                 Config::default(),
                 server_addr,
                 client_cid,

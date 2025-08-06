@@ -1,7 +1,10 @@
 //! VegasController 组件的全面测试
 //! Comprehensive tests for VegasController component
 
-use crate::core::reliability::logic::congestion::vegas_controller::{VegasController, CongestionState};
+use crate::core::reliability::logic::congestion::{
+    vegas_controller::VegasController,
+    traits::CongestionState,
+};
 use crate::config::Config;
 use std::time::Duration;
 use tokio::time::Instant;

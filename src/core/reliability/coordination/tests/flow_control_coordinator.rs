@@ -1,14 +1,22 @@
 use tokio::time::Instant;
 use std::time::Duration;
 use crate::config::Config;
-use crate::core::reliability::coordination::FlowControlCoordinator;
+use crate::core::reliability::{
+    coordination::{
+        flow_control_coordinator::{FlowControlCoordinator, FlowControlCoordinatorConfig},
+    },
+    logic::congestion::vegas_controller::VegasController,
+};
 
 fn create_test_config() -> Config {
     Config::default()
 }
 
-fn create_test_flow_controller() -> FlowControlCoordinator {
-    FlowControlCoordinator::new(create_test_config())
+fn create_test_flow_controller() -> FlowControlCoordinator<VegasController> {
+    let config = create_test_config();
+    let vegas_controller = VegasController::new(config);
+    let flow_config = FlowControlCoordinatorConfig::default();
+    FlowControlCoordinator::new(vegas_controller, flow_config)
 }
 
 #[test]

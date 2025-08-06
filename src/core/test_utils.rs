@@ -229,7 +229,7 @@ pub async fn setup_client_server_with_filter(
         // Start global timer task for testing
         let timer_handle = crate::timer::start_hybrid_timer_task();
 
-        let (mut endpoint, tx_to_user, rx_from_user) = Endpoint::new_client(
+        let (mut endpoint, tx_to_user, rx_from_user) = Endpoint::new_client_with_vegas(
             client_config,
             server_addr,
             local_cid,
@@ -266,7 +266,7 @@ pub async fn setup_client_server_with_filter(
         // Start global timer task for testing
         let timer_handle = crate::timer::start_hybrid_timer_task();
 
-        let (endpoint, tx_to_user, rx_from_user) = Endpoint::new_server(
+        let (endpoint, tx_to_user, rx_from_user) = Endpoint::new_server_with_vegas(
             server_config,
             client_addr,
             local_cid,
@@ -367,7 +367,7 @@ pub async fn setup_server_harness() -> ServerTestHarness {
     // Start global timer task for testing
     let timer_handle = crate::timer::start_hybrid_timer_task();
 
-    let (mut endpoint, tx_to_user, rx_from_user) = Endpoint::new_server(
+    let (mut endpoint, tx_to_user, rx_from_user) = Endpoint::new_server_with_vegas(
         config,
         client_addr,
         server_cid,

@@ -6,7 +6,10 @@ use tokio::time::Instant;
 
 use crate::{
     config::Config,
-    core::reliability::UnifiedReliabilityLayer,
+    core::reliability::{
+        UnifiedReliabilityLayer,
+        logic::congestion::traits::CongestionController,
+    },
     packet::frame::Frame
 };
 
@@ -25,9 +28,9 @@ pub(in crate::core::endpoint) fn create_syn_ack_frame(
 }
 
 /// Creates a standalone ACK frame.
-pub(in crate::core::endpoint) fn create_ack_frame(
+pub(in crate::core::endpoint) fn create_ack_frame<C: CongestionController>(
     peer_cid: u32,
-    reliability: &mut UnifiedReliabilityLayer,
+    reliability: &mut UnifiedReliabilityLayer<C>,
     start_time: Instant,
 ) -> Frame {
     let (sack_ranges, recv_next, window_size) = reliability.get_acknowledgment_info();
@@ -43,9 +46,9 @@ pub(in crate::core::endpoint) fn create_ack_frame(
 
 /// Creates a FIN frame with automatic sequence number management.
 /// 创建FIN帧，自动管理序列号
-pub(in crate::core::endpoint) fn create_fin_frame(
+pub(in crate::core::endpoint) fn create_fin_frame<C: CongestionController>(
     peer_cid: u32,
-    reliability: &mut UnifiedReliabilityLayer,
+    reliability: &mut UnifiedReliabilityLayer<C>,
     start_time: Instant,
 ) -> Frame {
     // 使用当前的sequence_counter值，不递增，保持与数据包的一致性
@@ -66,9 +69,9 @@ pub(in crate::core::endpoint) fn create_fin_frame(
 
 /// Creates a PATH_CHALLENGE frame with automatic sequence number management.
 /// 创建路径挑战帧，自动管理序列号
-pub(crate) fn create_path_challenge_frame(
+pub(crate) fn create_path_challenge_frame<C: CongestionController>(
     peer_cid: u32,
-    reliability: &mut UnifiedReliabilityLayer,
+    reliability: &mut UnifiedReliabilityLayer<C>,
     start_time: Instant,
     challenge_data: u64,
 ) -> Frame {
@@ -93,14 +96,17 @@ pub(crate) fn create_path_response_frame(
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use crate::core::reliability::logic::congestion::vegas_controller::VegasController;
 
-    async fn create_test_reliability_layer() -> UnifiedReliabilityLayer {
+    async fn create_test_reliability_layer() -> UnifiedReliabilityLayer<VegasController> {
         let config = Config::default();
         let connection_id = 1; // Test connection ID
         let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent, crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>>();
         let timer_actor = crate::timer::start_sender_timer_actor(timer_handle, None);
         let (tx_to_endpoint, _rx_from_stream) = tokio::sync::mpsc::channel(128);
-        UnifiedReliabilityLayer::new(connection_id, timer_actor, tx_to_endpoint, config)
+        let congestion_controller = VegasController::new(config.clone());
+        let flow_control_config = crate::core::reliability::coordination::flow_control_coordinator::FlowControlCoordinatorConfig::default();
+        UnifiedReliabilityLayer::new(connection_id, timer_actor, tx_to_endpoint, congestion_controller, flow_control_config, config)
     }   
 
     #[test]

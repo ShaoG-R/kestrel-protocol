@@ -11,11 +11,12 @@ use tracing::{info, trace};
 use crate::core::endpoint::core::frame::{
     create_path_challenge_frame, create_path_response_frame, create_syn_ack_frame,
 };
+use crate::core::reliability::logic::congestion::traits::CongestionController;
 use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
 use crate::core::endpoint::types::command::StreamCommand;
 use crate::core::endpoint::types::state::ConnectionState;
 
-impl<T: Transport> Endpoint<T> {
+impl<T: Transport, C: CongestionController> Endpoint<T, C> {
 
     // handle_frame 方法已被 EventDispatcher 替代
     // handle_frame method has been replaced by EventDispatcher

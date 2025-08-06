@@ -71,7 +71,7 @@ async fn test_shutdown_when_connecting() {
             let timer_handle = crate::timer::start_hybrid_timer_task();
 
     let (mut client_endpoint, tx_to_stream, _) =
-        crate::core::endpoint::Endpoint::<MockTransport>::new_client(
+        crate::core::endpoint::Endpoint::<MockTransport>::new_client_with_vegas(
             Default::default(),
             "127.0.0.1:1234".parse().unwrap(),
             1,

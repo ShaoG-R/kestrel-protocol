@@ -26,9 +26,11 @@ use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+use crate::core::reliability::logic::congestion::vegas_controller::VegasController;
+
 /// 服务器端点创建结果类型别名
 /// Type alias for server endpoint creation result
-type ServerEndpointBundle<T> = (Endpoint<T>, mpsc::Sender<(Frame, SocketAddr)>, Stream);
+type ServerEndpointBundle<T> = (Endpoint<T, VegasController>, mpsc::Sender<(Frame, SocketAddr)>, Stream);
 
 /// Socket会话协调器 - 统一协调各层交互的中央控制器
 /// Socket Session Coordinator - Central controller that coordinates inter-layer interactions
@@ -210,7 +212,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
         let transport_tx = self.transport_manager.send_tx();
 
-        let (endpoint, tx_to_stream_handle, rx_from_stream_handle) = Endpoint::new_server(
+        let (endpoint, tx_to_stream_handle, rx_from_stream_handle) = Endpoint::new_server_with_vegas(
             self.config.as_ref().clone(),
             remote_addr,
             local_cid,
@@ -426,7 +428,7 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
         let transport_tx = self.transport_manager.send_tx();
 
-        let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) = Endpoint::new_client(
+        let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) = Endpoint::new_client_with_vegas(
             config,
             remote_addr,
             local_cid,

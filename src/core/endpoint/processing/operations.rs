@@ -9,10 +9,11 @@
 
 use crate::core::endpoint::Endpoint;
 use crate::{
-    core::{endpoint::{core::frame::create_path_response_frame, lifecycle::ConnectionLifecycleManager, processing::traits::{EndpointOperations, ProcessorOperations}, types::state::ConnectionState}, reliability::UnifiedReliabilityLayer},
+    core::{endpoint::{core::frame::create_path_response_frame, lifecycle::ConnectionLifecycleManager, processing::traits::{EndpointOperations, ProcessorOperations}, types::state::ConnectionState}, reliability::{UnifiedReliabilityLayer, logic::congestion::traits::CongestionController}},
     error::Result,
     packet::{frame::Frame, sack::SackRange},
     socket::{SocketActorCommand, Transport},
+    
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -26,7 +27,7 @@ use tokio::{sync::mpsc, time::Instant};
 /// This implementation abstracts the endpoint operations needed by processors,
 /// allowing processors to decouple from the Endpoint.
 #[async_trait]
-impl<T: Transport> EndpointOperations for Endpoint<T> {
+impl<T: Transport, C: CongestionController> EndpointOperations<C> for Endpoint<T, C> {
     // ========== 基础信息获取 (Basic Information Access) ==========
     
     fn local_cid(&self) -> u32 {
@@ -78,11 +79,11 @@ impl<T: Transport> EndpointOperations for Endpoint<T> {
 
     // ========== 可靠性层操作 (Reliability Layer Operations) ==========
     
-    fn unified_reliability(&self) -> &UnifiedReliabilityLayer {
+    fn unified_reliability(&self) -> &UnifiedReliabilityLayer<C> {
         self.transport.unified_reliability()
     }
     
-    fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer {
+    fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer<C> {
         self.transport.unified_reliability_mut()
     }
     
@@ -146,7 +147,7 @@ impl<T: Transport> EndpointOperations for Endpoint<T> {
 /// for frame processors, combining multiple low-level operations to provide interfaces
 /// that better match processor usage patterns.
 #[async_trait]
-impl<T: Transport> ProcessorOperations for Endpoint<T> {
+impl<T: Transport, C: CongestionController> ProcessorOperations<C> for Endpoint<T, C> {
     async fn process_ack_and_get_retx_frames(
         &mut self,
         recv_next_seq: u32,
@@ -258,7 +259,7 @@ mod tests {
         let timer_handle = crate::timer::start_hybrid_timer_task();
 
         // 使用正确的构造函数创建 Endpoint
-        let (endpoint, _stream_tx, _stream_rx) = Endpoint::new_client(
+        let (endpoint, _stream_tx, _stream_rx) = Endpoint::new_client_with_vegas(
             config,
             remote_addr,
             local_cid,

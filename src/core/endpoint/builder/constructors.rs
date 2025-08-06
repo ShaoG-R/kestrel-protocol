@@ -8,6 +8,10 @@ use crate::{
     error::Result,
     timer::{HybridTimerTaskHandle, task::types::SenderCallback},
 };
+use crate::core::reliability::{
+    logic::congestion::{traits::CongestionController, vegas_controller::VegasController},
+    coordination::flow_control_coordinator::FlowControlCoordinatorConfig,
+};
 use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
@@ -21,7 +25,7 @@ use crate::core::endpoint::types::{
 };
 
 
-impl<T: Transport> Endpoint<T> {
+impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     /// Creates a new `Endpoint` for the client-side.
     pub async fn new_client(
         config: Config,
@@ -32,6 +36,8 @@ impl<T: Transport> Endpoint<T> {
         command_tx: mpsc::Sender<SocketActorCommand>,
         initial_data: Option<Bytes>,
         timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
+        congestion_controller: C,
+        flow_control_config: FlowControlCoordinatorConfig,
     ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
@@ -47,6 +53,8 @@ impl<T: Transport> Endpoint<T> {
             local_cid,
             timer_actor,
             timing.get_timeout_tx(),
+            congestion_controller,
+            flow_control_config,
             config.clone(),
         );
         
@@ -112,6 +120,8 @@ impl<T: Transport> Endpoint<T> {
         sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
         timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
+        congestion_controller: C,
+        flow_control_config: FlowControlCoordinatorConfig,
     ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
@@ -134,6 +144,8 @@ impl<T: Transport> Endpoint<T> {
             local_cid,
             timer_actor,
             timing.get_timeout_tx(),
+            congestion_controller,
+            flow_control_config,
             config.clone(),
         );
 
@@ -160,5 +172,65 @@ impl<T: Transport> Endpoint<T> {
         };
 
         Ok((endpoint, tx_to_endpoint, rx_from_endpoint))
+    }
+}
+
+// 便利构造函数，使用默认的Vegas拥塞控制器
+// Convenience constructors using default Vegas congestion controller
+impl<T: Transport> Endpoint<T, VegasController> {
+    /// Creates a new `Endpoint` for the client-side with Vegas congestion control.
+    pub async fn new_client_with_vegas(
+        config: Config,
+        remote_addr: SocketAddr,
+        local_cid: u32,
+        receiver: mpsc::Receiver<(crate::packet::frame::Frame, SocketAddr)>,
+        sender: mpsc::Sender<TransportCommand<T>>,
+        command_tx: mpsc::Sender<SocketActorCommand>,
+        initial_data: Option<Bytes>,
+        timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
+    ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
+        let congestion_controller = VegasController::new(config.clone());
+        let flow_control_config = FlowControlCoordinatorConfig::default();
+        
+        Self::new_client(
+            config,
+            remote_addr,
+            local_cid,
+            receiver,
+            sender,
+            command_tx,
+            initial_data,
+            timer_handle,
+            congestion_controller,
+            flow_control_config,
+        ).await
+    }
+
+    /// Creates a new `Endpoint` for the server-side with Vegas congestion control.
+    pub async fn new_server_with_vegas(
+        config: Config,
+        remote_addr: SocketAddr,
+        local_cid: u32,
+        peer_cid: u32,
+        receiver: mpsc::Receiver<(crate::packet::frame::Frame, SocketAddr)>,
+        sender: mpsc::Sender<TransportCommand<T>>,
+        command_tx: mpsc::Sender<SocketActorCommand>,
+        timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
+    ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
+        let congestion_controller = VegasController::new(config.clone());
+        let flow_control_config = FlowControlCoordinatorConfig::default();
+        
+        Self::new_server(
+            config,
+            remote_addr,
+            local_cid,
+            peer_cid,
+            receiver,
+            sender,
+            command_tx,
+            timer_handle,
+            congestion_controller,
+            flow_control_config,
+        ).await
     }
 } 

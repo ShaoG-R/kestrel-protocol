@@ -12,40 +12,80 @@ use crate::{
     config::Config,
     core::{
         endpoint::timing::TimeoutEvent,
-        reliability::UnifiedReliabilityLayer,
+        reliability::{
+            UnifiedReliabilityLayer,
+            coordination::flow_control_coordinator::FlowControlCoordinatorConfig,
+        },
     },
     timer::{
         actor::SenderTimerActorHandle,
         event::{ConnectionId, TimerEventData},
     },
 };
+use crate::core::reliability::logic::congestion::{
+    traits::{CongestionController, CongestionStats},
+    vegas_controller::VegasController,
+};
 use tokio::sync::mpsc;
 
 /// 传输层管理器 - 使用统一可靠性层架构
 /// Transport layer manager - using unified reliability layer architecture  
-pub struct TransportManager {
+pub struct TransportManager<C: CongestionController = VegasController> {
     /// 统一可靠性层，负责ARQ、重传、拥塞控制等
     /// Unified reliability layer responsible for ARQ, retransmission, congestion control, etc.
-    unified_reliability: UnifiedReliabilityLayer,
+    unified_reliability: UnifiedReliabilityLayer<C>,
     
     /// 对端接收窗口大小（已集成到统一层中，保留用于向后兼容）
     /// Peer receive window size (integrated into unified layer, kept for backward compatibility)
     peer_recv_window: u32,
 }
 
-impl TransportManager {
+impl TransportManager<VegasController> {
+    /// 创建使用Vegas拥塞控制的传输层管理器（便利方法）
+    /// Create transport layer manager with Vegas congestion control (convenience method)
+    pub fn new_with_vegas(
+        connection_id: ConnectionId,
+        timer_actor: SenderTimerActorHandle,
+        timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,
+        config: Config,
+    ) -> Self {
+        let congestion_controller = VegasController::new(config.clone());
+        let flow_control_config = FlowControlCoordinatorConfig::default();
+        Self::new(connection_id, timer_actor, timeout_tx, congestion_controller, flow_control_config, config)
+    }
+
+    /// 创建带指定窗口大小的Vegas传输层管理器（便利方法）
+    /// Create Vegas transport layer manager with specified window size (convenience method)
+    pub fn new_vegas_with_peer_window(
+        connection_id: ConnectionId,
+        timer_actor: SenderTimerActorHandle,
+        timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,
+        config: Config,
+        peer_recv_window: u32,
+    ) -> Self {
+        let congestion_controller = VegasController::new(config.clone());
+        let flow_control_config = FlowControlCoordinatorConfig::default();
+        Self::with_peer_window(connection_id, timer_actor, timeout_tx, congestion_controller, flow_control_config, config, peer_recv_window)
+    }
+}
+
+impl<C: CongestionController> TransportManager<C> {
     /// 创建新的传输层管理器（使用统一可靠性层）
     /// Create new transport layer manager (using unified reliability layer)
     pub fn new(
         connection_id: ConnectionId,
         timer_actor: SenderTimerActorHandle,
         timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,
+        congestion_controller: C,
+        flow_control_config: FlowControlCoordinatorConfig,
         config: Config,
     ) -> Self {
         let unified_reliability = UnifiedReliabilityLayer::new(
             connection_id,
             timer_actor,
             timeout_tx,
+            congestion_controller,
+            flow_control_config,
             config,
         );
         
@@ -61,6 +101,8 @@ impl TransportManager {
         connection_id: ConnectionId,
         timer_actor: SenderTimerActorHandle,
         timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,
+        congestion_controller: C,
+        flow_control_config: FlowControlCoordinatorConfig,
         config: Config,
         peer_recv_window: u32,
     ) -> Self {
@@ -68,6 +110,8 @@ impl TransportManager {
             connection_id,
             timer_actor,
             timeout_tx,
+            congestion_controller,
+            flow_control_config,
             config,
         );
         
@@ -82,13 +126,13 @@ impl TransportManager {
 
     /// 获取统一可靠性层的引用
     /// Get reference to unified reliability layer
-    pub fn unified_reliability(&self) -> &UnifiedReliabilityLayer {
+    pub fn unified_reliability(&self) -> &UnifiedReliabilityLayer<C> {
         &self.unified_reliability
     }
 
     /// 获取统一可靠性层的可变引用
     /// Get mutable reference to unified reliability layer
-    pub fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer {
+    pub fn unified_reliability_mut(&mut self) -> &mut UnifiedReliabilityLayer<C> {
         &mut self.unified_reliability
     }
 
@@ -130,7 +174,7 @@ impl TransportManager {
     /// 获取当前拥塞窗口大小
     /// Get current congestion window size
     pub fn congestion_window(&self) -> u32 {
-        self.unified_reliability.get_statistics().congestion_window
+        self.unified_reliability.get_statistics().congestion_stats.congestion_window()
     }
 
     /// 获取当前平滑往返时间（统一层尚未提供此接口，返回None）
@@ -165,10 +209,8 @@ impl TransportManager {
     /// 获取传输层统计信息
     /// Get transport layer statistics
     pub fn transport_stats(&self) -> TransportStats {
-        let unified_stats = self.unified_reliability.get_statistics();
         TransportStats {
             peer_recv_window: self.peer_recv_window,
-            congestion_window: unified_stats.congestion_window,
             smoothed_rtt: self.smoothed_rtt(),
             rtt_var: self.rtt_var(),
             send_buffer_empty: self.is_send_buffer_empty(),
@@ -178,12 +220,12 @@ impl TransportManager {
     }
 }
 
-impl std::fmt::Debug for TransportManager {
+impl<C: CongestionController> std::fmt::Debug for TransportManager<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let unified_stats = self.unified_reliability.get_statistics();
         f.debug_struct("TransportManager")
             .field("peer_recv_window", &self.peer_recv_window)
-            .field("congestion_window", &unified_stats.congestion_window)
+            .field("congestion_stats", &unified_stats.congestion_stats)
             .field("smoothed_rtt", &self.smoothed_rtt())
             .field("send_buffer_empty", &self.is_send_buffer_empty())
             .field("recv_buffer_empty", &self.is_recv_buffer_empty())
@@ -203,10 +245,6 @@ pub struct TransportStats {
     /// 对端接收窗口大小
     /// Peer receive window size
     pub peer_recv_window: u32,
-    
-    /// 当前拥塞窗口大小
-    /// Current congestion window size
-    pub congestion_window: u32,
     
     /// 平滑往返时间
     /// Smoothed round trip time
@@ -234,9 +272,8 @@ impl TransportStats {
     /// Get string representation of statistics
     pub fn stats_string(&self) -> String {
         format!(
-            "TransportStats {{ peer_recv_window: {}, congestion_window: {}, smoothed_rtt: {:?}, rtt_var: {:?}, buffers_empty: {{send: {}, recv: {}, in_flight: {}}} }}",
+            "TransportStats {{ peer_recv_window: {}, smoothed_rtt: {:?}, rtt_var: {:?}, buffers_empty: {{send: {}, recv: {}, in_flight: {}}} }}",
             self.peer_recv_window,
-            self.congestion_window,
             self.smoothed_rtt,
             self.rtt_var,
             self.send_buffer_empty,
@@ -250,13 +287,13 @@ impl TransportStats {
 mod tests {
     use super::*;
 
-    async fn create_test_transport_manager() -> TransportManager {
+    async fn create_test_transport_manager() -> TransportManager<VegasController> {
         let config = Config::default();
         let connection_id = 1; // Test connection ID
         let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent, crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>>();
         let timer_actor = crate::timer::start_sender_timer_actor(timer_handle, None);
         let (tx_to_endpoint, _rx_from_stream) = tokio::sync::mpsc::channel(128);
-        TransportManager::new(connection_id, timer_actor, tx_to_endpoint, config)
+        TransportManager::new_with_vegas(connection_id, timer_actor, tx_to_endpoint, config)
     }
 
     #[tokio::test]
@@ -277,7 +314,7 @@ mod tests {
         let timer_actor = crate::timer::start_sender_timer_actor(timer_handle, None);
         let (tx_to_endpoint, _rx_from_stream) = tokio::sync::mpsc::channel(128);
         
-        let manager = TransportManager::with_peer_window(connection_id, timer_actor, tx_to_endpoint, config, 64);
+        let manager = TransportManager::new_vegas_with_peer_window(connection_id, timer_actor, tx_to_endpoint, config, 64);
         
         assert_eq!(manager.peer_recv_window(), 64);
     }
@@ -314,6 +351,6 @@ mod tests {
         let debug_string = format!("{:?}", manager);
         assert!(debug_string.contains("TransportManager"));
         assert!(debug_string.contains("peer_recv_window"));
-        assert!(debug_string.contains("congestion_window"));
+        assert!(debug_string.contains("congestion_stats"));
     }
 }

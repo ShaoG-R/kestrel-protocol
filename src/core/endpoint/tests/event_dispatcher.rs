@@ -24,7 +24,7 @@ mod tests {
         // Start global timer task for testing
         let timer_handle = crate::timer::start_hybrid_timer_task();
 
-        let (endpoint, _stream_tx, _stream_rx) = Endpoint::<MockTransport>::new_client(
+        let (endpoint, _stream_tx, _stream_rx) = Endpoint::<MockTransport>::new_client_with_vegas(
             config,
             remote_addr,
             local_cid,

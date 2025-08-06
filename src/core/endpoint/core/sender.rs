@@ -12,6 +12,7 @@ use std::{future::Future, net::SocketAddr};
 use tracing::trace;
 use crate::core::endpoint::core::frame::{create_ack_frame, create_fin_frame, create_syn_ack_frame, create_syn_frame};
 use crate::core::endpoint::types::state::ConnectionState;
+use crate::core::reliability::logic::congestion::traits::CongestionController;
 
 /// A helper to build packets that respect the configured MTU.
 ///
@@ -92,7 +93,7 @@ where
     }
 }
 
-impl<T: Transport> Endpoint<T> {
+impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     pub(in crate::core::endpoint) async fn packetize_and_send(&mut self) -> Result<()> {
 
         // 1. Collect all frames that need to be sent without requiring &mut self.

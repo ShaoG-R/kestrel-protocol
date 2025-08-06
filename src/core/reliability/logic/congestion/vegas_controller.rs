@@ -9,43 +9,16 @@
 
 use crate::{
     config::Config,
+    core::reliability::logic::congestion::traits::{
+        CongestionController, CongestionDecision, CongestionState, CongestionStats,
+        ConfigurableCongestionController,
+    },
 };
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::{debug, trace};
 
-/// 拥塞控制状态
-/// Congestion control state
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CongestionState {
-    /// 慢启动阶段
-    /// Slow start phase
-    SlowStart,
-    /// 拥塞避免阶段
-    /// Congestion avoidance phase
-    CongestionAvoidance,
-}
 
-/// 拥塞控制决策结果
-/// Congestion control decision result
-#[derive(Debug, Clone)]
-pub struct CongestionDecision {
-    /// 新的拥塞窗口大小
-    /// New congestion window size
-    pub new_congestion_window: u32,
-    
-    /// 新的慢启动阈值
-    /// New slow start threshold
-    pub new_slow_start_threshold: u32,
-    
-    /// 新的状态
-    /// New state
-    pub new_state: CongestionState,
-    
-    /// 是否发生了显著变化
-    /// Whether significant change occurred
-    pub significant_change: bool,
-}
 
 /// Vegas拥塞控制器
 /// Vegas congestion controller
@@ -109,6 +82,11 @@ impl VegasController {
             CongestionState::CongestionAvoidance => {
                 self.handle_congestion_avoidance(rtt);
             }
+            CongestionState::FastRecovery => {
+                // Vegas通常不使用快速恢复，转为拥塞避免
+                self.state = CongestionState::CongestionAvoidance;
+                self.handle_congestion_avoidance(rtt);
+            }
         }
         
         // 检查是否需要状态转换
@@ -123,6 +101,7 @@ impl VegasController {
             new_slow_start_threshold: self.slow_start_threshold,
             new_state: self.state,
             significant_change,
+            suggested_send_rate: None, // Vegas doesn't suggest specific rates
         }
     }
     
@@ -149,6 +128,7 @@ impl VegasController {
             new_slow_start_threshold: self.slow_start_threshold,
             new_state: self.state,
             significant_change,
+            suggested_send_rate: None, // Vegas doesn't suggest specific rates
         }
     }
     
@@ -355,6 +335,28 @@ pub struct VegasStats {
     pub last_rtt: Duration,
 }
 
+impl CongestionStats for VegasStats {
+    fn congestion_window(&self) -> u32 {
+        self.congestion_window
+    }
+    
+    fn slow_start_threshold(&self) -> u32 {
+        self.slow_start_threshold
+    }
+    
+    fn state(&self) -> CongestionState {
+        self.state
+    }
+    
+    fn min_rtt(&self) -> Duration {
+        self.min_rtt
+    }
+    
+    fn last_rtt(&self) -> Duration {
+        self.last_rtt
+    }
+}
+
 impl std::fmt::Display for VegasStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -366,6 +368,67 @@ impl std::fmt::Display for VegasStats {
             self.min_rtt.as_secs_f64() * 1000.0,
             self.last_rtt.as_secs_f64() * 1000.0
         )
+    }
+}
+
+impl CongestionController for VegasController {
+    type Stats = VegasStats;
+    
+    fn handle_ack(&mut self, rtt: Duration) -> CongestionDecision {
+        self.handle_ack(rtt)
+    }
+    
+    fn handle_packet_loss(&mut self, now: Instant) -> CongestionDecision {
+        self.handle_packet_loss(now)
+    }
+    
+    fn congestion_window(&self) -> u32 {
+        self.congestion_window
+    }
+    
+    fn current_state(&self) -> CongestionState {
+        self.state
+    }
+    
+    fn slow_start_threshold(&self) -> u32 {
+        self.slow_start_threshold
+    }
+    
+    fn min_rtt(&self) -> Duration {
+        self.min_rtt
+    }
+    
+    fn last_rtt(&self) -> Duration {
+        self.last_rtt
+    }
+    
+    fn reset(&mut self) {
+        self.reset()
+    }
+    
+    fn get_statistics(&self) -> Self::Stats {
+        self.get_statistics()
+    }
+    
+    fn algorithm_name(&self) -> &'static str {
+        "Vegas"
+    }
+}
+
+impl ConfigurableCongestionController for VegasController {
+    type Config = Config;
+    
+    fn new(config: Self::Config) -> Self {
+        Self::new(config)
+    }
+    
+    fn update_config(&mut self, config: Self::Config) {
+        self.config = config;
+        // 可以选择是否重置状态，这里保持当前状态
+    }
+    
+    fn get_config(&self) -> &Self::Config {
+        &self.config
     }
 }
 
