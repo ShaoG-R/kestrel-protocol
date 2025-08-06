@@ -4,6 +4,9 @@
 pub mod in_flight_store;
 pub mod buffer_stores;
 
+#[cfg(test)]
+mod tests;
+
 pub use in_flight_store::{InFlightPacket, InFlightPacketStore, PacketState};
 pub use buffer_stores::{
     SendBufferStore, ReceiveBufferStore, PacketOrFin,
