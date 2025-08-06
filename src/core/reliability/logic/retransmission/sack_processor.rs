@@ -7,7 +7,7 @@
 //! - 计算RTT样本
 //! - 快速重传检测逻辑
 
-use super::super::data::in_flight_store::{InFlightPacketStore, PacketState};
+use crate::core::reliability::data::in_flight_store::{InFlightPacketStore, PacketState};
 use crate::packet::sack::SackRange;
 use std::time::Duration;
 use tokio::time::Instant;

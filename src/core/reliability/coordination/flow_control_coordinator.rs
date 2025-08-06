@@ -7,7 +7,7 @@
 //! - 处理RTT更新和丢包响应
 //! - 提供统一的流量控制接口
 
-use super::super::logic::vegas_controller::{VegasController, CongestionDecision, CongestionState, VegasStats};
+use crate::core::reliability::logic::congestion::vegas_controller::{VegasController, CongestionDecision, CongestionState, VegasStats};
 use crate::config::Config;
 use std::time::Duration;
 use tokio::time::Instant;

@@ -14,11 +14,11 @@ pub mod data;
 
 
 use coordination::{
-        packet_coordinator::PacketCoordinator,
-        buffer_coordinator::{BufferCoordinator, ReassemblyResult},
-        flow_control_coordinator::FlowControlCoordinator,
-    };
-use logic::{packetization_processor::PacketizationContext, rtt::RttEstimator};
+    buffer_coordinator::{BufferCoordinator, ReassemblyResult},
+    flow_control_coordinator::FlowControlCoordinator,
+    packet_coordinator::PacketCoordinator,
+};
+use logic::packetization_processor::PacketizationContext;
 use crate::{
     config::Config,
     core::endpoint::timing::TimeoutEvent,
@@ -33,6 +33,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace};
+use logic::congestion::rtt::RttEstimator;
 
 /// 重传触发类型
 /// Retransmission trigger type
