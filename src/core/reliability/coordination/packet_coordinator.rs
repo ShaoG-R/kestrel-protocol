@@ -10,15 +10,13 @@
 use super::super::{
     data::in_flight_store::{InFlightPacket, InFlightPacketStore, PacketState},
     logic::{
-        sack_processor::SackProcessor,
         retransmission_decider::RetransmissionDecider,
+        sack_processor::SackProcessor,
         timer_event_handler::TimerEventHandler,
     },
 };
 use crate::{
-    core::{
-        endpoint::timing::TimeoutEvent,
-    },
+    core::endpoint::timing::TimeoutEvent,
     packet::{frame::{Frame, FrameType, RetransmissionContext}, sack::SackRange},
     timer::{
         actor::{ActorTimerId, SenderTimerActorHandle},
