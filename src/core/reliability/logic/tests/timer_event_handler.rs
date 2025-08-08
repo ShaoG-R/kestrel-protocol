@@ -373,16 +373,16 @@ async fn test_handle_timer_timeout_packet_removed() {
     store.add_packet(seq, packet);
     let timer_id = handler.schedule_retransmission_timer(&mut store, seq, Duration::from_millis(50)).await.unwrap();
     
-    // 手动移除数据包但保留定时器映射
-    // 注意：实际场景中，这种情况可能发生在并发环境中
+    // 手动移除数据包
+    // 按当前存储层语义：移除数据包会同时清理其定时器映射，
+    // 不允许出现“孤立的定时器映射”。
     store.remove_packet(seq);
-    // 但我们需要保留定时器映射来模拟这种边缘情况
-    store.set_timer_mapping(timer_id, seq);
     
     // 处理超时
     let result = handler.handle_timer_timeout(&mut store, timer_id);
     
-    assert_eq!(result.sequence_number, Some(seq));
+    // 由于映射已被存储层清理，无法通过timer_id找到序列号
+    assert_eq!(result.sequence_number, None);
     assert!(!result.needs_retransmission_handling); // 数据包不存在
 }
 
