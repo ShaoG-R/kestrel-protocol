@@ -478,10 +478,9 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
             }
             StreamCommand::Close => {
                 self.shutdown().await;
-                // Only attempt to send a FIN packet if we're not already closed
-                if !self.lifecycle_manager.should_close() {
-                    self.packetize_and_send().await?;
-                }
+                // 不在这里立即打包发送。让事件循环在处理完所有挂起的流命令后，
+                // 统一执行打包与发送，以保证应用层最终ACK数据先进入发送缓冲区，
+                // 再与FIN正确排序并可能被合并发送。
             }
             StreamCommand::Migrate { new_addr, notifier } => {
                 info!(cid = self.identity.local_cid(), new_addr = %new_addr, "Actively migrating to new address.");
