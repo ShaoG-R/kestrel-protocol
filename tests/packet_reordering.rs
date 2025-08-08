@@ -3,7 +3,7 @@
 
 pub mod common;
 
-use common::harness::{init_tracing, TestHarness};
+use common::harness::TestHarness;
 use kestrel_protocol::{
     socket::handle::initial_data::InitialData,
     config::Config,
@@ -51,7 +51,7 @@ impl NetworkSimulator {
 /// 测试基础的早到帧缓存功能
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_basic_early_frame_caching() {
-    init_tracing();
+
     info!("--- 测试基础早到帧缓存功能 ---");
 
     let TestHarness {
@@ -115,7 +115,7 @@ async fn test_basic_early_frame_caching() {
 /// 测试多客户端场景下的早到帧处理
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_client_early_frames() {
-    init_tracing();
+
     const NUM_CLIENTS: usize = 3; // 减少并发数量避免超时
     info!("--- 测试多客户端早到帧处理 ({} 客户端) ---", NUM_CLIENTS);
 
@@ -230,7 +230,7 @@ async fn test_multi_client_early_frames() {
 /// 测试早到帧的超时清理机制
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_early_frame_timeout_cleanup() {
-    init_tracing();
+
     info!("--- 测试早到帧超时清理机制 ---");
 
     // 创建两个独立的测试环境避免连接冲突
@@ -348,7 +348,7 @@ async fn test_early_frame_timeout_cleanup() {
 /// 测试高频率的包乱序场景
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_high_frequency_packet_reordering() {
-    init_tracing();
+
     const NUM_RAPID_CLIENTS: usize = 50;
     info!("--- 测试高频率包乱序场景 ({} 快速客户端) ---", NUM_RAPID_CLIENTS);
 
@@ -443,7 +443,7 @@ async fn test_high_frequency_packet_reordering() {
 /// 测试早到帧缓存的内存管理
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn test_early_frame_memory_management() {
-    init_tracing();
+
     const NUM_PHASES: usize = 5;
     const CLIENTS_PER_PHASE: usize = 20;
     info!("--- 测试早到帧缓存内存管理 ({} 阶段, 每阶段 {} 客户端) ---", NUM_PHASES, CLIENTS_PER_PHASE);
@@ -549,7 +549,7 @@ async fn test_early_frame_memory_management() {
 /// 测试极端乱序场景下的数据完整性
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_extreme_reordering_data_integrity() {
-    init_tracing();
+
     info!("--- 测试极端乱序场景数据完整性 ---");
 
     let TestHarness {

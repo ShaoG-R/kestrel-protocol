@@ -11,7 +11,7 @@ use tokio::{sync::oneshot, time::timeout};
 
 #[tokio::test]
 async fn test_shutdown_when_established() {
-    crate::core::test_utils::init_tracing();
+
     // Standard case: closing an established connection should send a FIN.
     let (client, mut server) = setup_client_server_pair().await;
 
@@ -101,7 +101,7 @@ async fn test_shutdown_when_connecting() {
 
 #[tokio::test]
 async fn test_shutdown_when_syn_received() {
-    crate::core::test_utils::init_tracing();
+
     // Test closing a server connection before the app `accepts` it (i.e., sends data).
     let mut harness = setup_server_harness().await;
 
@@ -265,7 +265,7 @@ async fn test_simultaneous_close() {
 
 #[tokio::test]
 async fn test_shutdown_from_fin_wait() {
-    crate::core::test_utils::init_tracing();
+
     // Client closes, server enters FinWait, then server closes.
     let (mut client, mut server) = setup_client_server_pair().await;
 
@@ -339,7 +339,7 @@ async fn test_shutdown_from_fin_wait() {
 
 #[tokio::test]
 async fn test_data_is_fully_read_before_shutdown_eof() {
-    crate::core::test_utils::init_tracing();
+
     // This test targets the race condition where a PUSH and FIN arrive in the
     // same batch. The receiver must process the PUSH data fully before the
     // user stream receives the EOF signal from the FIN.
@@ -388,7 +388,7 @@ async fn test_data_is_fully_read_before_shutdown_eof() {
 
 #[tokio::test]
 async fn test_retransmission_after_fin_is_ignored() {
-    crate::core::test_utils::init_tracing();
+
     // This test verifies that once a FIN has been processed by the receiver,
     // any subsequent (spurious) retransmissions of packets that came before
     // that FIN are ignored.

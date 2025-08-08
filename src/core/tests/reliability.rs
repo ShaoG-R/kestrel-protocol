@@ -88,8 +88,6 @@ async fn test_data_flow_with_acks() {
 
 #[tokio::test]
 async fn test_endpoint_rto_retransmission() {
-    use crate::core::test_utils::init_tracing;
-    init_tracing();
 
     let mut client_config = Config::default();
     client_config.reliability.initial_rto = Duration::from_millis(100);

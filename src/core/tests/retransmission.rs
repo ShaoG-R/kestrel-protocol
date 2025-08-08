@@ -2,7 +2,7 @@
 
 use crate::{
     config::Config,
-    core::test_utils::{init_tracing, new_stream_pair_with_filter},
+    core::test_utils::new_stream_pair_with_filter,
     packet::frame::Frame,
 };
 use std::{
@@ -24,7 +24,7 @@ use tracing::info;
 /// prompting it to re-send the lost packet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_rto_recovery_on_single_packet_loss() {
-    init_tracing();
+
     info!("--- RTO Recovery Test ---");
 
     // 1. Configure a very short RTO for the client to ensure the test runs quickly.

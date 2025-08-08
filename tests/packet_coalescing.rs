@@ -3,7 +3,7 @@
 
 pub mod common;
 
-use common::harness::{init_tracing, TestHarness};
+use common::harness::TestHarness;
 use kestrel_protocol::{
     socket::handle::initial_data::InitialData,
     config::Config,
@@ -22,7 +22,7 @@ use tracing::{info, warn};
 /// 测试SYN-ACK与PUSH帧的基础粘连
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_basic_syn_ack_push_coalescing() {
-    init_tracing();
+
     info!("--- 测试SYN-ACK与PUSH帧基础粘连 ---");
 
     let TestHarness {
@@ -85,7 +85,7 @@ async fn test_basic_syn_ack_push_coalescing() {
 /// 测试大数据包的智能分包
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_large_packet_fragmentation() {
-    init_tracing();
+
     info!("--- 测试大数据包智能分包 ---");
 
     let TestHarness {
@@ -145,7 +145,7 @@ async fn test_large_packet_fragmentation() {
 /// 测试多个小包的高效粘连
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_multiple_small_packet_coalescing() {
-    init_tracing();
+
     info!("--- 测试多个小包高效粘连 ---");
 
     let TestHarness {
@@ -226,7 +226,7 @@ async fn test_multiple_small_packet_coalescing() {
 /// 测试粘连分包的边界条件
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_coalescing_boundary_conditions() {
-    init_tracing();
+
     info!("--- 测试粘连分包边界条件 ---");
 
     let TestHarness {
@@ -288,7 +288,7 @@ async fn test_coalescing_boundary_conditions() {
 /// 测试高并发下的包粘连性能
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_concurrent_coalescing_performance() {
-    init_tracing();
+
     const NUM_CLIENTS: usize = 100;
     const DATA_SIZE: usize = 512;
     info!("--- 测试高并发包粘连性能 ({} 客户端, 每个 {}B) ---", NUM_CLIENTS, DATA_SIZE);
@@ -387,7 +387,7 @@ async fn test_concurrent_coalescing_performance() {
 /// 测试不同大小数据的粘连策略
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_variable_size_coalescing_strategy() {
-    init_tracing();
+
     info!("--- 测试不同大小数据的粘连策略 ---");
 
     let TestHarness {
@@ -462,7 +462,7 @@ async fn test_variable_size_coalescing_strategy() {
 /// 测试粘连包的错误恢复机制
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_coalescing_error_recovery() {
-    init_tracing();
+
     info!("--- 测试粘连包错误恢复机制 ---");
 
     let TestHarness {

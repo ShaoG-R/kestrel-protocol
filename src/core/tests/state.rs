@@ -9,7 +9,7 @@ use tokio::{
 };
 use tracing::info;
 
-use crate::{config::Config, core::test_utils::init_tracing};
+use crate::config::Config;
 
 /// Test that a server can handle a new connection from an address that was
 /// just used by a different connection. This validates that the `addr_to_cid`
@@ -19,7 +19,7 @@ use crate::{config::Config, core::test_utils::init_tracing};
 /// 这验证了 `addr_to_cid` 临时映射是否被正确清理。
 #[tokio::test(start_paused = true)]
 async fn test_address_reuse_after_connection_close() {
-    init_tracing();
+
     // 1. Setup a server listener by first grabbing a known available port.
     let temp_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server_addr: SocketAddr = temp_socket.local_addr().unwrap();
@@ -127,7 +127,7 @@ async fn test_address_reuse_after_connection_close() {
 /// 此测试验证了SocketActor中的周期性清理任务是否正常工作。
 #[tokio::test(start_paused = true)]
 async fn test_address_reuse_after_cid_drained() {
-    init_tracing();
+
     let config = Config::default();
 
     // 1. Setup server
@@ -215,7 +215,7 @@ async fn test_address_reuse_after_cid_drained() {
 /// 测试传输层在连接建立后是否正确处理基本的双向通信。
 #[tokio::test(start_paused = true)]
 async fn test_transport_bidirectional_communication() {
-    init_tracing();
+
 
     // 1. Setup server
     let temp_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();

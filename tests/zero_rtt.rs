@@ -3,7 +3,7 @@
 
 pub mod common;
 
-use common::harness::{init_tracing, TestHarness};
+use common::harness::TestHarness;
 use kestrel_protocol::{
     socket::handle::initial_data::InitialData,
     config::Config,
@@ -22,7 +22,7 @@ use tracing::{info, debug, Instrument};
 /// 测试基础的0-RTT连接建立
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_basic_zero_rtt_connection() {
-    init_tracing();
+
     info!("--- 测试基础0-RTT连接建立 ---");
 
     // 1. 设置服务器
@@ -107,7 +107,7 @@ async fn test_basic_zero_rtt_connection() {
 /// 测试多个0-RTT数据包的分包功能
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_zero_rtt_packet_coalescing() {
-    init_tracing();
+
     info!("--- 测试0-RTT包粘连分包功能 ---");
 
     let TestHarness {
@@ -168,7 +168,7 @@ async fn test_zero_rtt_packet_coalescing() {
 /// 测试早到帧缓存机制
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_early_arrival_frame_caching() {
-    init_tracing();
+
     info!("--- 测试早到帧缓存机制 ---");
 
     // 这个测试比较复杂，因为我们需要模拟网络包乱序
@@ -272,7 +272,7 @@ async fn test_early_arrival_frame_caching() {
 /// 测试高并发0-RTT连接
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_concurrent_zero_rtt_connections() {
-    init_tracing();
+
     const NUM_CLIENTS: usize = 100;
     info!("--- 测试高并发0-RTT连接 ({} 个客户端) ---", NUM_CLIENTS);
 
@@ -377,7 +377,7 @@ async fn test_concurrent_zero_rtt_connections() {
 /// 测试0-RTT数据完整性
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_zero_rtt_data_integrity() {
-    init_tracing();
+
     info!("--- 测试0-RTT数据完整性 ---");
 
     let TestHarness {
@@ -445,7 +445,7 @@ async fn test_zero_rtt_data_integrity() {
 /// 测试0-RTT与普通连接的混合场景
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn test_mixed_zero_rtt_and_regular_connections() {
-    init_tracing();
+
     const ZERO_RTT_CLIENTS: usize = 50;
     const REGULAR_CLIENTS: usize = 50;
     info!("--- 测试混合连接场景 ({} 0-RTT + {} 普通) ---", ZERO_RTT_CLIENTS, REGULAR_CLIENTS);

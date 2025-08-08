@@ -2,7 +2,7 @@
 
 pub mod common;
 
-use common::harness::{init_tracing, TestHarness};
+use common::harness::TestHarness;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -10,7 +10,7 @@ use tracing::Instrument;
 
 #[tokio::test]
 async fn test_udp_socket_bind() {
-    init_tracing();
+
     tracing::info!("--- Minimal Tokio UDP Bind Test ---");
     tracing::info!("Attempting to bind UDP socket...");
 
@@ -199,7 +199,7 @@ async fn test_cid_handshake_and_data_transfer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_connections_cid_isolation() {
-    init_tracing();
+
     tracing::info!("[Test] Starting CID isolation test for concurrent connections...");
 
     // 1. Setup server using the harness
@@ -337,7 +337,7 @@ async fn test_concurrent_connections_cid_isolation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 32)]
 async fn test_high_concurrency_1rtt_connections() {
-    init_tracing();
+
     const NUM_CLIENTS: usize = 1000;
     tracing::info!(
         "[Test] Starting high concurrency 1-RTT test with {} clients...",

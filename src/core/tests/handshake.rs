@@ -1,6 +1,5 @@
 //! Tests for 1-RTT and 0-RTT connection handshakes.
 
-use crate::core::test_utils::init_tracing;
 use crate::{
     config::Config,
     core::{endpoint::StreamCommand, test_utils::setup_server_harness},
@@ -12,7 +11,7 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn test_1rtt_handshake_with_server_data() {
-    init_tracing();
+
     // This test simulates a 1-RTT handshake where the server application
     // sends data immediately upon accepting a connection, which is coalesced
     // with the SYN-ACK frame.
@@ -99,7 +98,7 @@ async fn test_1rtt_handshake_with_server_data() {
 
 #[tokio::test]
 async fn test_0rtt_handshake_with_client_data() {
-    init_tracing();
+
     // This test simulates a 0-RTT handshake where the client sends data
     // immediately with its initial SYN packet.
 
