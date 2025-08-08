@@ -11,7 +11,7 @@ use crate::{
     core::reliability::coordination::packet_coordinator::RetransmissionFrameInfo,
     timer::actor::ActorTimerId,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tokio::time::Instant;
 use tracing::{debug, trace};
 
@@ -82,9 +82,9 @@ pub struct InFlightPacketStore {
     /// Fast retransmission candidate cache
     fast_retx_candidates: BTreeMap<u32, u8>, // seq -> duplicate_ack_count
     
-    /// 性能优化：按状态的索引
-    /// Performance optimization: index by state
-    state_index: HashMap<PacketState, Vec<u32>>,
+    /// 性能优化：按状态的索引（使用HashSet避免重复并加速查询）
+    /// Performance optimization: index by state (HashSet to avoid duplicates and speed up lookup)
+    state_index: HashMap<PacketState, HashSet<u32>>,
 }
 
 impl InFlightPacketStore {
@@ -207,8 +207,8 @@ impl InFlightPacketStore {
     /// 获取指定状态的数据包 (优化版本，使用状态索引)
     /// Get packets with specific state (optimized version using state index)
     pub fn get_packets_by_state(&self, state: PacketState) -> Vec<(u32, &InFlightPacket)> {
-        if let Some(seq_list) = self.state_index.get(&state) {
-            seq_list
+        if let Some(seq_set) = self.state_index.get(&state) {
+            seq_set
                 .iter()
                 .filter_map(|&seq| {
                     self.packets.get(&seq).map(|packet| (seq, packet))
@@ -222,7 +222,7 @@ impl InFlightPacketStore {
     /// 获取指定状态的数据包数量 (新增方法，高效计数)
     /// Get count of packets with specific state (new method for efficient counting)
     pub fn count_packets_by_state(&self, state: PacketState) -> usize {
-        self.state_index.get(&state).map_or(0, |seq_list| seq_list.len())
+        self.state_index.get(&state).map_or(0, |seq_set| seq_set.len())
     }
     
     /// 获取在途数据包数量
@@ -273,15 +273,15 @@ impl InFlightPacketStore {
     /// 添加序列号到状态索引
     /// Add sequence number to state index
     fn add_to_state_index(&mut self, state: PacketState, seq: u32) {
-        self.state_index.entry(state).or_insert_with(Vec::new).push(seq);
+        self.state_index.entry(state).or_insert_with(HashSet::new).insert(seq);
     }
     
     /// 从状态索引中移除序列号
     /// Remove sequence number from state index
     fn remove_from_state_index(&mut self, state: PacketState, seq: u32) {
-        if let Some(seq_list) = self.state_index.get_mut(&state) {
-            seq_list.retain(|&s| s != seq);
-            if seq_list.is_empty() {
+        if let Some(seq_set) = self.state_index.get_mut(&state) {
+            seq_set.remove(&seq);
+            if seq_set.is_empty() {
                 self.state_index.remove(&state);
             }
         }
