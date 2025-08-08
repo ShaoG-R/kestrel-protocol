@@ -154,19 +154,17 @@ impl<T: Transport> Endpoint<T> {
     }
 
     async fn should_close(&mut self) -> bool {
-        // Condition 1: We are in a closing state AND all in-flight data is ACKed.
-        // This is the primary condition to transition into the `Closed` state.
+        // 仅当进入 ClosingWait（本端FIN已确认且已收到对端FIN）且在途数据为空时，才真正关闭连接。
+        // Only transition to `Closed` when we're in ClosingWait (local FIN acked and peer FIN received)
+        // and there are no in-flight packets remaining.
         let current_state = self.lifecycle_manager.current_state();
-        if (*current_state == ConnectionState::Closing
-            || *current_state == ConnectionState::ClosingWait)
+        if *current_state == ConnectionState::ClosingWait
             && self.transport.unified_reliability().is_in_flight_empty()
         {
-            // 所有数据已确认，转换到Closed状态 - 使用生命周期管理器
-            // All data acknowledged, transition to Closed state - using lifecycle manager
             if let Ok(()) = self.transition_state(ConnectionState::Closed) {
-                self.transport.unified_reliability_mut().cleanup_all_retransmission_timers().await; // Clean up here
-                // 连接关闭时，关闭用户流接收器
-                // Close user stream receiver when connection closes
+                self.transport.unified_reliability_mut().cleanup_all_retransmission_timers().await;
+                // 连接关闭时，关闭用户流接收器（发送EOF）。
+                // Close user stream receiver (send EOF) when connection is fully closed.
                 *self.channels.tx_to_stream_mut() = None;
                 return true;
             }
