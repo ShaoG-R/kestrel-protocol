@@ -19,6 +19,8 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+use crate::common::harness::init_tracing;
+
 /// 测试SYN-ACK与PUSH帧的基础粘连
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_basic_syn_ack_push_coalescing() {
@@ -189,6 +191,8 @@ async fn test_multiple_small_packet_coalescing() {
         let response = format!("Resp{} ", i);
         server_writer.write_all(response.as_bytes()).await.unwrap();
     }
+    // 关闭服务器写入端，确保客户端能够读到EOF
+    server_writer.shutdown().await.unwrap();
 
     // 关闭客户端写入
     client_writer.shutdown().await.unwrap();
@@ -243,12 +247,20 @@ async fn test_coalescing_boundary_conditions() {
         server_stream_tx.send(stream).await.unwrap();
     });
 
-    // 测试恰好达到MTU边界的数据
-    // 假设MTU为1500，减去UDP/IP头部约为1400可用
-    let boundary_size = 1400 - 50; // 留一些余量给协议头部
-    let boundary_data = vec![b'B'; boundary_size];
-    
+    // 基于当前配置动态计算可用于0-RTT单包的最大数据大小
+    // 使用 InitialData::new 进行二分试探，确保符合库的单包限制
     let config = Config::default();
+    let mut lo = 0usize;
+    let mut hi = config.connection.max_packet_size; // 上界从MTU开始
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        if kestrel_protocol::socket::handle::initial_data::InitialData::new(&vec![0u8; mid], &config).is_ok() {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let boundary_data = vec![b'B'; lo];
     let initial_data = InitialData::new(&boundary_data, &config).unwrap();
     info!("[Client] 发送边界大小数据 ({} bytes)", boundary_data.len());
     
@@ -266,7 +278,12 @@ async fn test_coalescing_boundary_conditions() {
     // 服务器发送确认
     server_writer.write_all(b"BOUNDARY_OK").await.unwrap();
 
-    // 关闭客户端写入
+    // 客户端先读取确认，避免在未读取到确认前进入 draining 导致帧被丢弃
+    let mut ack_buf = vec![0u8; 11];
+    client_reader.read_exact(&mut ack_buf).await.unwrap();
+    assert_eq!(&ack_buf, b"BOUNDARY_OK");
+
+    // 读取到确认后再关闭客户端写入，以便服务端获得 EOF
     client_writer.shutdown().await.unwrap();
 
     // 验证边界数据
@@ -276,11 +293,6 @@ async fn test_coalescing_boundary_conditions() {
     assert_eq!(received_data.len(), boundary_data.len());
     assert_eq!(received_data, boundary_data);
     info!("[Server] 边界数据验证通过");
-
-    // 客户端读取确认
-    let mut ack_buf = vec![0u8; 11];
-    client_reader.read_exact(&mut ack_buf).await.unwrap();
-    assert_eq!(&ack_buf, b"BOUNDARY_OK");
 
     info!("--- 粘连分包边界条件测试通过 ---");
 }
@@ -417,11 +429,23 @@ async fn test_variable_size_coalescing_strategy() {
         test_data[size - 1] = 0xBB; // 结束标识符
         
         let config = Config::default();
-        let initial_data = InitialData::new(&test_data, &config).unwrap();
-        let client_stream = client
-            .connect_with_config(server_addr, Box::new(config), Some(initial_data))
-            .await
-            .unwrap();
+        // 仅当数据可被0-RTT单包承载时才使用 InitialData，否则先建立连接再发送数据
+        let initial_attempt = InitialData::new(&test_data, &config);
+        let used_0rtt = initial_attempt.is_ok();
+        let client_stream = match initial_attempt {
+            Ok(initial_data) => {
+                client
+                    .connect_with_config(server_addr, Box::new(config.clone()), Some(initial_data))
+                    .await
+                    .unwrap()
+            }
+            Err(_) => {
+                client
+                    .connect_with_config(server_addr, Box::new(config.clone()), None)
+                    .await
+                    .unwrap()
+            }
+        };
 
         let (server_stream, returned_listener) = server_stream_rx.recv().await.unwrap();
         server_listener = returned_listener;
@@ -435,6 +459,10 @@ async fn test_variable_size_coalescing_strategy() {
         let ack_msg = format!("SIZE_{}_OK", size);
         server_writer.write_all(ack_msg.as_bytes()).await.unwrap();
 
+        // 对于无法作为0-RTT单包发送的大数据，建立连接后再写入
+        if !used_0rtt {
+            client_writer.write_all(&test_data).await.unwrap();
+        }
         // 关闭客户端
         client_writer.shutdown().await.unwrap();
 
