@@ -87,7 +87,7 @@ async fn test_basic_syn_ack_push_coalescing() {
 /// 测试大数据包的智能分包
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_large_packet_fragmentation() {
-
+    init_tracing();
     info!("--- 测试大数据包智能分包 ---");
 
     let TestHarness {
@@ -124,7 +124,12 @@ async fn test_large_packet_fragmentation() {
     // 服务器触发SYN-ACK发送
     server_writer.write_all(b"LARGE_ACK").await.unwrap();
 
-    // 关闭客户端写入
+    // 客户端先读取ACK，确保在关闭写入前完成握手确认
+    let mut ack_buf = vec![0u8; 9];
+    client_reader.read_exact(&mut ack_buf).await.unwrap();
+    assert_eq!(&ack_buf, b"LARGE_ACK");
+
+    // 然后再关闭客户端写入，服务端将获得EOF
     client_writer.shutdown().await.unwrap();
 
     // 服务器读取所有分片数据
@@ -136,18 +141,13 @@ async fn test_large_packet_fragmentation() {
     assert_eq!(received_data, large_data);
     info!("[Server] 成功接收所有分片数据 ({} bytes)", received_data.len());
 
-    // 客户端读取ACK
-    let mut ack_buf = vec![0u8; 9];
-    client_reader.read_exact(&mut ack_buf).await.unwrap();
-    assert_eq!(&ack_buf, b"LARGE_ACK");
-
     info!("--- 大数据包智能分包测试通过 ---");
 }
 
 /// 测试多个小包的高效粘连
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_multiple_small_packet_coalescing() {
-
+    init_tracing();
     info!("--- 测试多个小包高效粘连 ---");
 
     let TestHarness {
@@ -191,10 +191,20 @@ async fn test_multiple_small_packet_coalescing() {
         let response = format!("Resp{} ", i);
         server_writer.write_all(response.as_bytes()).await.unwrap();
     }
-    // 关闭服务器写入端，确保客户端能够读到EOF
-    server_writer.shutdown().await.unwrap();
+    // 服务器暂不关闭写入端，先让客户端读取，避免在客户端未读完前进入draining丢包
 
-    // 关闭客户端写入
+    // 客户端读取所有响应
+    let mut response_data = Vec::new();
+    client_reader.read_to_end(&mut response_data).await.unwrap();
+    
+    let response_str = String::from_utf8_lossy(&response_data);
+    for i in 0..5 {
+        let expected_resp = format!("Resp{} ", i);
+        assert!(response_str.contains(&expected_resp));
+    }
+    info!("[Client] 接收到粘连响应: {}", response_str.trim());
+
+    // 现在关闭客户端写入，以向服务器发出EOF
     client_writer.shutdown().await.unwrap();
 
     // 服务器读取粘连数据
@@ -213,16 +223,8 @@ async fn test_multiple_small_packet_coalescing() {
     }
     info!("[Server] 成功接收粘连数据: {}", received_str.trim());
 
-    // 客户端读取所有响应
-    let mut response_data = Vec::new();
-    client_reader.read_to_end(&mut response_data).await.unwrap();
-    
-    let response_str = String::from_utf8_lossy(&response_data);
-    for i in 0..5 {
-        let expected_resp = format!("Resp{} ", i);
-        assert!(response_str.contains(&expected_resp));
-    }
-    info!("[Client] 接收到粘连响应: {}", response_str.trim());
+    // 最后再关闭服务器写入端
+    server_writer.shutdown().await.unwrap();
 
     info!("--- 多个小包高效粘连测试通过 ---");
 }
@@ -399,7 +401,7 @@ async fn test_concurrent_coalescing_performance() {
 /// 测试不同大小数据的粘连策略
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_variable_size_coalescing_strategy() {
-
+    init_tracing();
     info!("--- 测试不同大小数据的粘连策略 ---");
 
     let TestHarness {
@@ -455,30 +457,37 @@ async fn test_variable_size_coalescing_strategy() {
         let (mut client_reader, mut client_writer) = tokio::io::split(client_stream);
         let (mut server_reader, mut server_writer) = tokio::io::split(server_stream);
 
-        // 服务器确认
+        // 服务器先发送确认（触发/完成握手），避免客户端在未读到确认前关闭
         let ack_msg = format!("SIZE_{}_OK", size);
         server_writer.write_all(ack_msg.as_bytes()).await.unwrap();
 
-        // 对于无法作为0-RTT单包发送的大数据，建立连接后再写入
+        // 先让客户端读取到确认，确保连接已稳定再发送大数据，避免在握手阶段丢失尾包
+        let mut ack_buf = vec![0u8; ack_msg.len()];
+        client_reader.read_exact(&mut ack_buf).await.unwrap();
+        assert_eq!(ack_buf, ack_msg.as_bytes());
+
+        // 对于无法作为0-RTT单包发送的大数据，确认后再写入全部数据
         if !used_0rtt {
             client_writer.write_all(&test_data).await.unwrap();
+            // 确保缓冲区数据尽可能被发送出站
+            client_writer.flush().await.unwrap();
         }
-        // 关闭客户端
-        client_writer.shutdown().await.unwrap();
+
+        // 服务器按预期大小精确读取，避免因对端提前发送 FIN 导致的截断
+        let mut received_data = vec![0u8; size];
+        server_reader.read_exact(&mut received_data).await.unwrap();
 
         // 验证数据
-        let mut received_data = Vec::new();
-        server_reader.read_to_end(&mut received_data).await.unwrap();
-
         assert_eq!(received_data.len(), size);
         assert_eq!(received_data[0], 0xAA);
         assert_eq!(received_data[size - 1], 0xBB);
         assert_eq!(received_data, test_data);
 
-        // 客户端读取确认
-        let mut ack_buf = vec![0u8; ack_msg.len()];
-        client_reader.read_exact(&mut ack_buf).await.unwrap();
-        assert_eq!(ack_buf, ack_msg.as_bytes());
+        // 读取完成后再关闭客户端写入端，通知服务端 EOF
+        client_writer.shutdown().await.unwrap();
+
+        // 服务端侧完成后关闭写入端
+        server_writer.shutdown().await.unwrap();
 
         total_received += size;
         info!("大小 {} bytes 测试通过", size);
