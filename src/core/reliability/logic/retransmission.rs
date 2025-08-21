@@ -69,7 +69,7 @@ impl RetransmissionDecider {
         store: &mut InFlightPacketStore,
         seq: u32,
         context: &RetransmissionContext,
-        rto: Duration,
+        _rto: Duration,
         now: Instant,
     ) -> RetransmissionDecision {
         let mut decision = RetransmissionDecision {
@@ -79,7 +79,10 @@ impl RetransmissionDecider {
         };
         
         if let Some(packet) = store.get_packet_mut(seq) {
-            if self.should_retransmit_packet(packet, rto, now) {
+            // 定时器事件已明确表明该数据包的RTO已到期。
+            // 为避免由于RTO在事件到达与处理之间动态变化而造成的误判，
+            // 这里不再重复进行“是否超时”的时间条件检查，仅保留状态与次数检查。
+            if self.should_retransmit_on_timer_event(packet) {
                 // 执行重传
                 let retx_frame = self.perform_retransmission(packet, context, now);
                 decision.frames_to_retransmit.push(retx_frame);
@@ -206,6 +209,14 @@ impl RetransmissionDecider {
         let is_sent_state = packet.state == PacketState::Sent || packet.state == PacketState::NeedsRetx;
         
         is_timeout && can_retransmit && is_sent_state
+    }
+    
+    /// 针对定时器事件的重传判断（不重复时间条件检查）
+    /// Retransmission decision for timer events (without re-checking time condition)
+    fn should_retransmit_on_timer_event(&self, packet: &InFlightPacket) -> bool {
+        let can_retransmit = packet.retx_count < self.max_retx_count;
+        let is_sent_state = packet.state == PacketState::Sent || packet.state == PacketState::NeedsRetx;
+        can_retransmit && is_sent_state
     }
     
     /// 执行重传
