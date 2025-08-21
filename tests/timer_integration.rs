@@ -8,7 +8,7 @@ use kestrel_protocol::{
     timer::start_hybrid_timer_task,
 };
 use std::net::SocketAddr;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, timeout};
 
 #[tokio::test]
 async fn test_timer_system_with_real_connection() {
@@ -17,7 +17,7 @@ async fn test_timer_system_with_real_connection() {
     
     // 创建 TimingManager
     let connection_id = 1;
-    let (mut timing_manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
+    let (mut timing_manager, mut timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
     
     // 测试基本的定时器功能
     let config = Config::default();
@@ -33,12 +33,12 @@ async fn test_timer_system_with_real_connection() {
     // 等待定时器到期
     sleep(Duration::from_millis(250)).await;
     
-    // 检查定时器事件
-    let events = timing_manager.check_timer_events();
-    assert!(!events.is_empty(), "No timer events received");
-    
-    // 应该包含路径验证超时事件
-    assert!(events.contains(&TimeoutEvent::PathValidationTimeout));
+    // 通过通道接收定时器事件（符合真实事件驱动架构）
+    let evt = timeout(Duration::from_millis(500), timer_rx.recv())
+        .await
+        .expect("Timed out waiting for timer event")
+        .expect("Timer event channel closed");
+    assert_eq!(evt.timeout_event, TimeoutEvent::PathValidationTimeout);
     
     // 关闭定时器任务
     let _ = timer_handle.shutdown().await;
@@ -48,7 +48,7 @@ async fn test_timer_system_with_real_connection() {
 async fn test_timer_reset_functionality() {
     let timer_handle = start_hybrid_timer_task();
     let connection_id = 2;
-    let (mut timing_manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
+    let (mut timing_manager, mut timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
     
     let config = Config::default();
     
@@ -65,9 +65,10 @@ async fn test_timer_reset_functionality() {
     // 再等待一半时间（总共等待了原始超时时间，但重置后应该不会超时）
     sleep(Duration::from_millis(config.connection.idle_timeout.as_millis() as u64 / 2 + 50)).await;
     
-    // 检查事件（应该没有超时事件）
-    let events = timing_manager.check_timer_events();
-    assert!(events.is_empty(), "Unexpected timeout events after reset: {:?}", events);
+    // 检查事件（应该没有超时事件）——尝试非阻塞读取或短超时
+    if let Ok(Some(evt)) = timeout(Duration::from_millis(50), timer_rx.recv()).await {
+        panic!("Unexpected timeout events after reset: {:?}", evt.timeout_event);
+    }
     
     let _ = timer_handle.shutdown().await;
 }
@@ -105,9 +106,11 @@ async fn test_multiple_connections_timer_isolation() {
     
     // 创建多个连接的定时器管理器
     let mut timing_managers = Vec::new();
+    let mut timer_receivers = Vec::new();
     for i in 1..=5 {
-        let (timing_manager, _timer_rx) = TimingManager::new(i, timer_handle.clone());
+        let (timing_manager, timer_rx) = TimingManager::new(i, timer_handle.clone());
         timing_managers.push(timing_manager);
+        timer_receivers.push(timer_rx);
     }
     
     let _config = Config::default();
@@ -121,11 +124,13 @@ async fn test_multiple_connections_timer_isolation() {
     // 等待所有定时器到期
     sleep(Duration::from_millis(500)).await;
     
-    // 检查每个连接都收到了自己的定时器事件
-    for timing_manager in timing_managers.iter_mut() {
-        let events = timing_manager.check_timer_events();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0], TimeoutEvent::PathValidationTimeout);
+    // 检查每个连接都收到了自己的定时器事件（事件驱动）
+    for timer_rx in timer_receivers.iter_mut() {
+        let evt = timeout(Duration::from_millis(200), timer_rx.recv())
+            .await
+            .expect("Timed out waiting for timer event")
+            .expect("Timer event channel closed");
+        assert_eq!(evt.timeout_event, TimeoutEvent::PathValidationTimeout);
     }
     
     let _ = timer_handle.shutdown().await;

@@ -93,9 +93,9 @@ pub struct TimerManager {
     /// Timer actor handle for batch timer operations
     timer_actor: TimerActorHandle<SenderCallback<TimeoutEvent>>,
 
-    /// 接收超时事件的通道
-    /// Channel for receiving timeout events
-    timeout_rx: mpsc::Receiver<TimerEventData<TimeoutEvent>>,
+    /// 接收超时事件的通道（可选）
+    /// Optional channel for receiving timeout events (present in polling mode)
+    timeout_rx: Option<mpsc::Receiver<TimerEventData<TimeoutEvent>>>,
 
     /// 发送超时事件的通道（用于注册定时器）
     /// Channel for sending timeout events (used for timer registration)
@@ -119,7 +119,7 @@ impl TimerManager {
         Self {
             connection_id,
             timer_actor,
-            timeout_rx,
+            timeout_rx: Some(timeout_rx),
             timeout_tx,
             active_timer_types: HashMap::new(),
         }
@@ -131,7 +131,8 @@ impl TimerManager {
     /// 用于事件驱动架构，将接收通道传递给ChannelManager
     /// Used for event-driven architecture, passing receiver channel to ChannelManager
     pub fn new_with_receiver(connection_id: ConnectionId, timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
-        let (timeout_tx, timeout_rx) = mpsc::channel(32);
+        // 单一通道由外部拥有接收端；内部不保留接收端，避免“双读”与语义歧义
+        let (timeout_tx, external_rx) = mpsc::channel(32);
         
         // 创建定时器Actor用于批量处理
         // Create timer actor for batch processing
@@ -140,12 +141,12 @@ impl TimerManager {
         let manager = Self {
             connection_id,
             timer_actor,
-            timeout_rx: mpsc::channel(1).1, // 创建一个空的接收端，实际接收由外部通道处理
+            timeout_rx: None, // 事件驱动模式：由上层通过返回的接收端消费事件
             timeout_tx,
             active_timer_types: HashMap::new(),
         };
 
-        (manager, timeout_rx)
+        (manager, external_rx)
     }
 
     /// 检查是否有到期的定时器事件（优化版本）
@@ -155,14 +156,19 @@ impl TimerManager {
         // Pre-allocate capacity to avoid dynamic growth
         let mut events = Vec::with_capacity(8);
 
-        while let Ok(event_data) = self.timeout_rx.try_recv() {
-            let timeout_event = event_data.timeout_event;
-            // 从活跃定时器中移除这个事件类型
-            // Remove this event type from active timers
-            self.active_timer_types.remove(&timeout_event);
-            // 避免不必要的克隆，直接移动所有权
-            // Avoid unnecessary cloning, move ownership directly
-            events.push(timeout_event);
+        if let Some(rx) = &mut self.timeout_rx {
+            while let Ok(event_data) = rx.try_recv() {
+                let timeout_event = event_data.timeout_event;
+                // 从活跃定时器中移除这个事件类型
+                // Remove this event type from active timers
+                self.active_timer_types.remove(&timeout_event);
+                // 避免不必要的克隆，直接移动所有权
+                // Avoid unnecessary cloning, move ownership directly
+                events.push(timeout_event);
+            }
+        } else {
+            // 事件驱动模式下，内部不消费事件，返回空列表
+            // In event-driven mode, events are consumed externally
         }
 
         events

@@ -174,5 +174,5 @@ impl<T: Transport> Endpoint<T> {
         // The previous logic for `FinWait` was causing premature termination. The endpoint
         // should wait in `FinWait` for the user to actively close the stream.
         self.lifecycle_manager.should_close()
-        }
+    }
 }
