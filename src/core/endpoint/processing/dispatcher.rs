@@ -49,12 +49,6 @@ impl EventDispatcher {
         endpoint.handle_stream_command(cmd).await
     }
 
-    /// 分发超时事件
-    /// Dispatches timeout events
-    pub async fn dispatch_timeout<T: Transport>(
-        endpoint: &mut Endpoint<T>,
-        now: Instant,
-    ) -> Result<()> {
-        endpoint.handle_timeout(now).await
-    }
+    // 轮询式分发超时事件接口已移除
+    // Polling-based timeout dispatch has been removed
 }

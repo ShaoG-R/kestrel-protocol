@@ -16,7 +16,7 @@ use crate::timer::{
     actor::ActorTimerId,
     task::types::SenderCallback,
 };
-use crate::core::endpoint::unified_scheduler::{TimeoutLayer, TimeoutCheckResult, UnifiedTimeoutScheduler};
+use crate::core::endpoint::unified_scheduler::{TimeoutLayer, UnifiedTimeoutScheduler};
 use std::collections::HashMap;
 use tokio::{
     sync::mpsc,
@@ -93,10 +93,6 @@ pub struct TimerManager {
     /// Timer actor handle for batch timer operations
     timer_actor: TimerActorHandle<SenderCallback<TimeoutEvent>>,
 
-    /// 接收超时事件的通道（可选）
-    /// Optional channel for receiving timeout events (present in polling mode)
-    timeout_rx: Option<mpsc::Receiver<TimerEventData<TimeoutEvent>>>,
-
     /// 发送超时事件的通道（用于注册定时器）
     /// Channel for sending timeout events (used for timer registration)
     timeout_tx: mpsc::Sender<TimerEventData<TimeoutEvent>>,
@@ -107,24 +103,6 @@ pub struct TimerManager {
 }
 
 impl TimerManager {
-    /// 创建新的定时器管理器
-    /// Create new timer manager
-    pub fn new(connection_id: ConnectionId, timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>) -> Self {
-        let (timeout_tx, timeout_rx) = mpsc::channel(32);
-        
-        // 创建定时器Actor用于批量处理
-        // Create timer actor for batch processing
-        let timer_actor = crate::timer::start_timer_actor(timer_handle, None);
-        
-        Self {
-            connection_id,
-            timer_actor,
-            timeout_rx: Some(timeout_rx),
-            timeout_tx,
-            active_timer_types: HashMap::new(),
-        }
-    }
-
     /// 创建新的定时器管理器并返回接收通道
     /// Create new timer manager and return receiver channel
     /// 
@@ -141,7 +119,6 @@ impl TimerManager {
         let manager = Self {
             connection_id,
             timer_actor,
-            timeout_rx: None, // 事件驱动模式：由上层通过返回的接收端消费事件
             timeout_tx,
             active_timer_types: HashMap::new(),
         };
@@ -149,30 +126,8 @@ impl TimerManager {
         (manager, external_rx)
     }
 
-    /// 检查是否有到期的定时器事件（优化版本）
-    /// Check for expired timer events (optimized version)
-    pub fn check_timer_events(&mut self) -> Vec<TimeoutEvent> {
-        // 预分配容量，避免动态增长
-        // Pre-allocate capacity to avoid dynamic growth
-        let mut events = Vec::with_capacity(8);
-
-        if let Some(rx) = &mut self.timeout_rx {
-            while let Ok(event_data) = rx.try_recv() {
-                let timeout_event = event_data.timeout_event;
-                // 从活跃定时器中移除这个事件类型
-                // Remove this event type from active timers
-                self.active_timer_types.remove(&timeout_event);
-                // 避免不必要的克隆，直接移动所有权
-                // Avoid unnecessary cloning, move ownership directly
-                events.push(timeout_event);
-            }
-        } else {
-            // 事件驱动模式下，内部不消费事件，返回空列表
-            // In event-driven mode, events are consumed externally
-        }
-
-        events
-    }
+    // 轮询式事件检查已移除，事件通过外部通道驱动
+    // Polling-based event checks have been removed; events are delivered via external channel
 
     /// 注册定时器（使用TimerActor批量优化）
     /// Register timer (using TimerActor batch optimization)
@@ -362,11 +317,8 @@ impl TimingManager {
         (timing_manager, timer_rx)
     }
 
-    /// 检查是否有到期的定时器事件
-    /// Check for expired timer events
-    pub fn check_timer_events(&mut self) -> Vec<TimeoutEvent> {
-        self.timer_manager.check_timer_events()
-    }
+    // 轮询式定时器事件检查已移除，事件通过外部通道传递
+    // Polling-based timer event check has been removed; events are delivered via external channel
 
     /// 处理超时事件（包含路径验证和FIN处理超时）
     /// Handle timeout event (including path validation and FIN processing timeout handling)
@@ -850,11 +802,8 @@ impl TimingManager {
         self.unified_scheduler.calculate_unified_deadline(layers)
     }
 
-    /// 使用统一调度器检查所有层的超时事件
-    /// Check timeout events for all layers using unified scheduler
-    pub fn check_unified_timeout_events(&mut self, layers: &mut [&mut dyn TimeoutLayer]) -> Vec<TimeoutCheckResult> {
-        self.unified_scheduler.check_unified_timeout_events(layers)
-    }
+    // 轮询式统一超时事件检查已移除
+    // Polling-based unified timeout event check has been removed
 
     /// 获取统一调度器的性能统计
     /// Get performance statistics from unified scheduler
@@ -893,16 +842,6 @@ impl TimeoutLayer for TimingManager {
         // Calculate next deadline using default idle timeout config
         let default_idle_timeout = Duration::from_secs(30);
         Some(self.last_recv_time + default_idle_timeout)
-    }
-    
-    fn check_timeout_events(&mut self, _now: Instant) -> TimeoutCheckResult {
-        // 检查全局定时器事件（职责分离：仅返回事件，不包含重传帧）
-        // Check global timer events (separated responsibility: only events, no retransmission frames)
-        let events = self.check_timer_events();
-        
-        TimeoutCheckResult {
-            events,
-        }
     }
     
     fn layer_name(&self) -> &'static str {

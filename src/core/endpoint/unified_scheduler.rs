@@ -15,7 +15,6 @@ use tokio::time::Instant;
 use tracing::{debug, trace};
 
 use crate::core::endpoint::timing::TimeoutEvent;
-use crate::packet::frame::Frame;
 
 /// 超时源标识，用于区分不同层次的超时
 /// Timeout source identifier to distinguish timeouts from different layers
@@ -34,34 +33,12 @@ pub enum TimeoutSource {
 
 
 
-/// 超时检查结果 - 仅包含超时事件
-/// Timeout check result - only contains timeout events
-#[derive(Debug, Clone)]
-pub struct TimeoutCheckResult {
-    /// 发生的超时事件列表
-    /// List of timeout events that occurred
-    pub events: Vec<TimeoutEvent>,
-}
-
-/// 重传检查结果 - 仅包含重传帧
-/// Retransmission check result - only contains retransmission frames
-#[derive(Debug)]
-pub struct RetransmissionCheckResult {
-    /// 需要重传的帧
-    /// Frames that need retransmission
-    pub frames_to_retransmit: Vec<Frame>,
-}
-
 /// 统一超时层接口，各层需要实现此trait
 /// Unified timeout layer interface, each layer should implement this trait
 pub trait TimeoutLayer {
     /// 获取下一个超时的截止时间
     /// Get the deadline for the next timeout
     fn next_deadline(&self) -> Option<Instant>;
-    
-    /// 检查超时事件并返回结果（职责分离：仅返回事件，不包含重传帧）
-    /// Check timeout events and return results (separated responsibility: only events, no retransmission frames)
-    fn check_timeout_events(&mut self, now: Instant) -> TimeoutCheckResult;
     
     /// 获取层名称（用于调试）
     /// Get layer name (for debugging)
@@ -72,18 +49,6 @@ pub trait TimeoutLayer {
     fn stats(&self) -> Option<String> {
         None
     }
-}
-
-/// 重传层接口，专门处理重传逻辑
-/// Retransmission layer interface, specifically handles retransmission logic
-pub trait RetransmissionLayer {
-    /// 检查重传超时并返回需要重传的帧
-    /// Check retransmission timeouts and return frames that need retransmission
-    fn check_retransmissions(&mut self, now: Instant, context: &crate::packet::frame::RetransmissionContext) -> RetransmissionCheckResult;
-    
-    /// 获取下一个重传超时的截止时间
-    /// Get the deadline for the next retransmission timeout
-    fn next_retransmission_deadline(&self) -> Option<Instant>;
 }
 
 /// 超时模式，用于预测性优化
@@ -258,57 +223,8 @@ impl UnifiedTimeoutScheduler {
         unified_deadline
     }
     
-    /// 执行统一的超时检查（重构版本 - 职责分离）
-    /// Execute unified timeout check (refactored version - separated responsibilities)
-    pub fn check_unified_timeout_events(&mut self, layers: &mut [&mut dyn TimeoutLayer]) -> Vec<TimeoutCheckResult> {
-        let now = self.time_cache.now();
-        let check_start = Instant::now();
-        
-        let mut results = Vec::with_capacity(layers.len());
-        let mut detected_sources = Vec::new();
-        
-        // 批量检查所有层的超时事件
-        // Batch check timeout events for all layers
-        for layer in layers.iter_mut() {
-            let layer_result = layer.check_timeout_events(now);
-            
-            if !layer_result.events.is_empty() {
-                debug!(
-                    "检测到 {} 层超时事件: {:?}",
-                    layer.layer_name(),
-                    layer_result.events
-                );
-                
-                // 记录检测到的超时源
-                // Record detected timeout sources
-                for event in &layer_result.events {
-                    detected_sources.push(TimeoutSource::Connection(*event));
-                }
-            }
-            
-            results.push(layer_result);
-        }
-        
-        // 更新超时模式历史
-        // Update timeout pattern history
-        if !detected_sources.is_empty() {
-            self.update_timeout_patterns(now, detected_sources);
-        }
-        
-        // 更新统计信息
-        // Update statistics
-        self.stats.batch_checks += 1;
-        let total_check_duration = check_start.elapsed();
-        self.stats.total_check_duration += total_check_duration;
-        
-        trace!(
-            "统一超时检查完成, 耗时: {:?}, 检测到 {} 层有超时",
-            total_check_duration,
-            results.iter().filter(|r| !r.events.is_empty()).count()
-        );
-        
-        results
-    }
+    // 轮询式统一超时检查已移除，改为事件驱动模型
+    // The polling-based unified timeout check has been removed in favor of an event-driven model
     
     /// 基于历史模式预测下次超时时间
     /// Predict next timeout based on historical patterns
@@ -361,6 +277,7 @@ impl UnifiedTimeoutScheduler {
     
     /// 更新超时模式历史
     /// Update timeout pattern history
+    #[allow(dead_code)]
     fn update_timeout_patterns(&mut self, now: Instant, sources: Vec<TimeoutSource>) {
         // 计算与上次模式的间隔
         // Calculate interval from last pattern
@@ -454,15 +371,11 @@ impl Default for UnifiedTimeoutScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
     
     // 测试用的模拟超时层
     struct MockTimeoutLayer {
         name: &'static str,
         next_deadline: Option<Instant>,
-        timeout_events: Vec<TimeoutEvent>,
-        check_count: Arc<AtomicUsize>,
     }
     
     impl MockTimeoutLayer {
@@ -470,28 +383,13 @@ mod tests {
             Self {
                 name,
                 next_deadline: deadline_offset.map(|offset| Instant::now() + offset),
-                timeout_events: Vec::new(),
-                check_count: Arc::new(AtomicUsize::new(0)),
             }
-        }
-        
-        fn with_timeout_event(mut self, event: TimeoutEvent) -> Self {
-            self.timeout_events.push(event);
-            self
         }
     }
     
     impl TimeoutLayer for MockTimeoutLayer {
         fn next_deadline(&self) -> Option<Instant> {
             self.next_deadline
-        }
-        
-        fn check_timeout_events(&mut self, _now: Instant) -> TimeoutCheckResult {
-            self.check_count.fetch_add(1, Ordering::Relaxed);
-            
-            TimeoutCheckResult {
-                events: self.timeout_events.clone(),
-            }
         }
         
         fn layer_name(&self) -> &'static str {
@@ -549,22 +447,9 @@ mod tests {
     
     #[tokio::test]
     async fn test_unified_timeout_check() {
-        let mut scheduler = UnifiedTimeoutScheduler::new();
-        
-        let mut layer1 = MockTimeoutLayer::new("test1", Some(Duration::from_millis(100)))
-            .with_timeout_event(TimeoutEvent::IdleTimeout);
-        let mut layer2 = MockTimeoutLayer::new("test2", Some(Duration::from_millis(200)));
-        
-        let layers: &mut [&mut dyn TimeoutLayer] = &mut [&mut layer1, &mut layer2];
-        
-        let results = scheduler.check_unified_timeout_events(layers);
-        
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].events.len(), 1);
-        assert_eq!(results[0].events[0], TimeoutEvent::IdleTimeout);
-        assert_eq!(results[1].events.len(), 0);
-        
-        assert_eq!(scheduler.stats().batch_checks, 1);
+        // 轮询式统一超时检查已移除，此测试不再适用
+        // The polling-based unified timeout check has been removed; this test is no longer applicable
+        let _scheduler = UnifiedTimeoutScheduler::new();
     }
     
     #[test]

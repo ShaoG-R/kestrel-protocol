@@ -512,20 +512,8 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
         Ok(())
     }
 
-    /// 处理超时事件（向后兼容方法）
-    /// Handle timeout events (backward compatibility method)
-    ///
-    /// 该方法保持向后兼容性，内部委托给新的统一超时管理接口。
-    /// 建议使用 `check_all_timeouts` 方法替代此方法。
-    ///
-    /// This method maintains backward compatibility by internally delegating
-    /// to the new unified timeout management interface. It's recommended to
-    /// use the `check_all_timeouts` method instead of this one.
-    pub async fn handle_timeout(&mut self, now: Instant) -> Result<()> {
-        // 委托给新的统一超时检查方法
-        // Delegate to the new unified timeout check method
-        self.check_all_timeouts(now).await
-    }
+    // 轮询式超时处理入口已移除，改为事件驱动的 timer_event_rx → handle_timeout_event 流程
+    // Polling-style timeout handling entry removed; using event-driven timer_event_rx → handle_timeout_event
 
 
     async fn shutdown(&mut self) {

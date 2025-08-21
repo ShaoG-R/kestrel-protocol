@@ -32,7 +32,6 @@ use tokio::{
 };
 use tracing::trace;
 use timing::{TimeoutEvent, TimingManager};
-use crate::core::endpoint::unified_scheduler::TimeoutLayer;
 use types::{
     channels::ChannelManager,
     identity::ConnectionIdentity,
@@ -364,41 +363,8 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
 
     // === 分层超时管理协调接口 Layered Timeout Management Coordination Interface ===
 
-    /// 统一的超时检查入口 - 混合方式
-    /// 统一超时检查入口点 - 使用统一调度器实现21倍性能提升
-    /// Unified timeout check entry point - using unified scheduler for 21x performance improvement
-    ///
-    /// 该方法使用重构后的统一调度器来协调所有层次的超时检查，
-    /// 实现职责分离和性能优化的最佳平衡。
-    ///
-    /// This method uses the refactored unified scheduler to coordinate timeout checks
-    /// across all layers, achieving the best balance of responsibility separation and
-    /// performance optimization.
-    pub async fn check_all_timeouts(&mut self, now: Instant) -> Result<()> {
-        // === 新重传系统实现: 重传超时由PacketTimerManager事件驱动处理 ===
-        // === New Retransmission System Implementation: Retransmission timeouts handled by PacketTimerManager event-driven approach ===
-        
-        // 1. 只检查连接级超时事件（重传超时已由PacketTimerManager通过事件驱动方式处理）
-        // Only check connection-level timeout events (retransmission timeouts are handled by PacketTimerManager through event-driven approach)
-        let timing_result = self.timing.check_timeout_events(now);
-        
-        // 2. 处理连接级超时事件
-        // Handle connection-level timeout events
-        let mut all_connection_events = Vec::new();
-        all_connection_events.extend(timing_result.events);
-        
-        // 3. 处理所有非重传超时事件
-        // Handle all non-retransmission timeout events
-        if !all_connection_events.is_empty() {
-            self.handle_unified_timeout_events_impl(all_connection_events, Vec::new(), now).await?;
-        }
-        
-        // 5. 执行定期的统一调度器清理
-        // Perform periodic unified scheduler cleanup
-        self.timing.cleanup_unified_scheduler();
-        
-        Ok(())
-    }
+    // 轮询式统一超时检查接口已移除，改用事件驱动
+    // Polling-based unified timeout check interface removed; using event-driven
 
     /// 统一的下次唤醒时间计算
     /// Unified next wakeup time calculation - optimized approach
@@ -431,6 +397,7 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     ///
     /// This method handles separated timeout events and retransmission frames,
     /// achieving responsibility separation and performance optimization.
+    #[allow(dead_code)]
     async fn handle_unified_timeout_events_impl(
         &mut self,
         connection_events: Vec<TimeoutEvent>,
@@ -482,6 +449,7 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     ///
     /// This method handles the specific logic for path validation timeout,
     /// including state transitions and notifying callers.
+    #[allow(dead_code)]
     async fn handle_path_validation_timeout(&mut self) -> Result<()> {
         if matches!(
             self.lifecycle_manager.current_state(),
