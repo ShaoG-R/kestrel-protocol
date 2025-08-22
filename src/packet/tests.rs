@@ -3,8 +3,8 @@ use super::command::Command;
 use super::frame::Frame;
 use super::header::{LongHeader, ShortHeader};
 use super::sack::{self, SackRange};
-use bytes::{Bytes, BytesMut};
 use crate::packet::header;
+use bytes::{Bytes, BytesMut};
 
 fn frame_roundtrip_test(frame: Frame) {
     let mut buf = BytesMut::new();
@@ -27,10 +27,7 @@ fn test_push_frame_roundtrip() {
         sequence_number: 100,
         recv_next_sequence: 50,
     };
-    let frame = Frame::Push {
-        header,
-        payload,
-    };
+    let frame = Frame::Push { header, payload };
     frame_roundtrip_test(frame);
 }
 
@@ -53,10 +50,7 @@ fn test_ack_frame_roundtrip() {
         sequence_number: 100,
         recv_next_sequence: 50,
     };
-    let frame = Frame::Ack {
-        header,
-        payload,
-    };
+    let frame = Frame::Ack { header, payload };
     frame_roundtrip_test(frame);
 }
 
@@ -98,9 +92,7 @@ fn test_syn_frame_roundtrip() {
         destination_cid: 9876,
         source_cid: 5432,
     };
-    let frame = Frame::Syn {
-        header,
-    };
+    let frame = Frame::Syn { header };
     frame_roundtrip_test(frame);
 }
 
@@ -224,4 +216,4 @@ fn test_coalesced_frames_decode() {
         fin_frame, decoded_fin,
         "Decoded FIN frame should match original"
     );
-} 
+}

@@ -2,18 +2,12 @@
 //!
 //! 基于传输的 `SocketActor` 实现。
 
-use super::{
-    command::SocketActorCommand,
-    transport::BindableTransport,
-};
-use crate::{
-    error::Result,
-    packet::frame::Frame,
-};
+use super::{command::SocketActorCommand, transport::BindableTransport};
+use crate::{error::Result, packet::frame::Frame};
+use session_coordinator::SocketSessionCoordinator;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tracing::debug;
-use session_coordinator::SocketSessionCoordinator;
 
 pub mod draining;
 pub mod routing;
@@ -49,14 +43,13 @@ impl<T: BindableTransport> SocketEventLoop<T> {
     ///
     /// 运行 actor 的主事件循环。
     pub(crate) async fn run(&mut self) {
-        let mut cleanup_interval = 
-            tokio::time::interval(std::time::Duration::from_secs(2));
+        let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(2));
 
         loop {
             // 获取传输引用用于接收操作
             // Get transport reference for receive operations
             let transport = self.session_coordinator.transport_manager().transport();
-            
+
             tokio::select! {
                 // 1. Handle incoming actor commands.
                 // 1. 处理传入的 actor 命令。
@@ -124,7 +117,8 @@ impl<T: BindableTransport> SocketEventLoop<T> {
                 initial_data,
                 response_tx,
             } => {
-                let result = self.session_coordinator
+                let result = self
+                    .session_coordinator
                     .create_client_connection(remote_addr, *config, initial_data)
                     .await;
                 let _ = response_tx.send(result);
@@ -133,7 +127,8 @@ impl<T: BindableTransport> SocketEventLoop<T> {
                 new_local_addr,
                 response_tx,
             } => {
-                let result = self.session_coordinator
+                let result = self
+                    .session_coordinator
                     .transport_manager_mut()
                     .rebind(new_local_addr)
                     .await
@@ -151,13 +146,10 @@ impl<T: BindableTransport> SocketEventLoop<T> {
                     .remove_connection_by_cid(cid);
             }
             SocketActorCommand::GetLocalAddr { response_tx } => {
-                let result = self.session_coordinator
-                    .transport_manager()
-                    .local_addr();
+                let result = self.session_coordinator.transport_manager().local_addr();
                 let _ = response_tx.send(result);
             }
         }
         Ok(())
     }
-
 }

@@ -6,22 +6,19 @@
 //! This module provides a fully generic-based timer task command system
 //! that supports zero-cost abstractions.
 
-use crate::timer::{
-    event::ConnectionId,
-    wheel::TimerEntryId,
-};
 use crate::timer::event::traits::EventDataTrait;
+use crate::timer::{event::ConnectionId, wheel::TimerEntryId};
 use tokio::sync::oneshot;
 
 use super::types::{
-    TimerRegistration, BatchTimerRegistration, BatchTimerCancellation,
-    BatchTimerResult, TimerHandle, TimerCallback,
+    BatchTimerCancellation, BatchTimerRegistration, BatchTimerResult, TimerCallback, TimerHandle,
+    TimerRegistration,
 };
 
 /// 定时器任务命令（泛型版本）
 /// Timer task commands (generic version)
 #[derive(Debug)]
-pub enum TimerTaskCommand<E, C> 
+pub enum TimerTaskCommand<E, C>
 where
     E: EventDataTrait,
     C: TimerCallback<E>,

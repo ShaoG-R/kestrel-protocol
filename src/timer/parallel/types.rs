@@ -1,10 +1,10 @@
 //! 并行处理相关的数据类型定义
 //! Data type definitions for parallel processing
 
-use crate::timer::event::traits::EventDataTrait;
 use crate::timer::event::ConnectionId;
-use crate::timer::wheel::TimerEntryId;
+use crate::timer::event::traits::EventDataTrait;
 use crate::timer::parallel::strategy::OptimalParallelStrategy;
+use crate::timer::wheel::TimerEntryId;
 use std::time::Duration;
 
 /// 处理后的定时器数据

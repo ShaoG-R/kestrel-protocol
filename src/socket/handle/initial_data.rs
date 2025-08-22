@@ -70,4 +70,4 @@ impl InitialData {
     pub(crate) fn into_bytes(self) -> Bytes {
         self.0
     }
-} 
+}

@@ -1,8 +1,8 @@
 //! 定义了库中所有可能的错误类型。
 //! Defines all possible error types in the library.
 
-use thiserror::Error;
 use std::net::SocketAddr;
+use thiserror::Error;
 use tokio::time::Instant;
 
 /// 帧处理器错误上下文，包含错误发生时的详细信息
@@ -12,23 +12,23 @@ pub struct ProcessorErrorContext {
     /// 处理器名称
     /// Processor name
     pub processor_name: &'static str,
-    
+
     /// 连接ID
     /// Connection ID
     pub connection_id: u32,
-    
+
     /// 源地址
     /// Source address
     pub src_addr: SocketAddr,
-    
+
     /// 连接状态（发生错误时）
     /// Connection state (when error occurred)
     pub connection_state: String,
-    
+
     /// 时间戳
     /// Timestamp
     pub timestamp: Instant,
-    
+
     /// 额外的上下文信息
     /// Additional context information
     pub additional_info: Option<String>,
@@ -53,7 +53,7 @@ impl ProcessorErrorContext {
             additional_info: None,
         }
     }
-    
+
     /// 添加额外的上下文信息
     /// Add additional context information
     pub fn with_info<S: Into<String>>(mut self, info: S) -> Self {
@@ -69,11 +69,11 @@ impl std::fmt::Display for ProcessorErrorContext {
             "Processor: {}, CID: {}, Addr: {}, State: {}",
             self.processor_name, self.connection_id, self.src_addr, self.connection_state
         )?;
-        
+
         if let Some(ref info) = self.additional_info {
             write!(f, ", Info: {info}")?;
         }
-        
+
         Ok(())
     }
 }
@@ -102,14 +102,10 @@ pub enum Error {
     #[error("Invalid frame: {0}")]
     InvalidFrame(String),
 
-
     /// 帧类型不匹配错误
     /// Frame type mismatch error
     #[error("{err}")]
-    FrameTypeMismatch {
-        err: Box<FrameTypeMismatchError>
-    },
-
+    FrameTypeMismatch { err: Box<FrameTypeMismatchError> },
 
     /// The connection was closed by the peer.
     /// 连接被对端关闭。

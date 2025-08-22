@@ -1,6 +1,13 @@
 //! The core event loop and logic for the `Endpoint`.
 
 use crate::core::endpoint::Endpoint;
+use crate::core::endpoint::core::frame::{
+    create_path_challenge_frame, create_path_response_frame, create_syn_ack_frame,
+};
+use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
+use crate::core::endpoint::types::command::StreamCommand;
+use crate::core::endpoint::types::state::ConnectionState;
+use crate::core::reliability::logic::congestion::traits::CongestionController;
 use crate::{
     error::Result,
     packet::{frame::Frame, sack::decode_sack_ranges},
@@ -8,16 +15,8 @@ use crate::{
 };
 use tokio::time::Instant;
 use tracing::{info, trace};
-use crate::core::endpoint::core::frame::{
-    create_path_challenge_frame, create_path_response_frame, create_syn_ack_frame,
-};
-use crate::core::reliability::logic::congestion::traits::CongestionController;
-use crate::core::endpoint::lifecycle::ConnectionLifecycleManager;
-use crate::core::endpoint::types::command::StreamCommand;
-use crate::core::endpoint::types::state::ConnectionState;
 
 impl<T: Transport, C: CongestionController> Endpoint<T, C> {
-
     // handle_frame 方法已被 EventDispatcher 替代
     // handle_frame method has been replaced by EventDispatcher
 
@@ -29,19 +28,23 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
             let challenge_data = rand::random();
             let (tx, _rx) = tokio::sync::oneshot::channel();
             self.start_path_validation(src_addr, challenge_data, tx)?;
-            
+
             // 注册路径验证超时定时器
             // Register path validation timeout timer
             let path_validation_timeout = self.config.connection.path_validation_timeout;
-            if let Err(e) = self.timing.register_path_validation_timeout(path_validation_timeout).await {
+            if let Err(e) = self
+                .timing
+                .register_path_validation_timeout(path_validation_timeout)
+                .await
+            {
                 tracing::warn!("Failed to register path validation timeout: {}", e);
             }
-            
+
             // 使用新的路径验证管理器启动验证
             // Use new path validation manager to start validation
             // 注意：路径验证现在由 lifecycle manager 管理，而不是 timing manager
             // Note: Path validation is now managed by lifecycle manager, not timing manager
-            
+
             let challenge_frame = create_path_challenge_frame(
                 self.identity.peer_cid(),
                 self.transport.unified_reliability_mut(),
@@ -101,7 +104,10 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                 // This is now primarily handled by the Socket creating the Endpoint.
                 // If we receive another SYN, it might be a retransmission from the client
                 // because it hasn't received our SYN-ACK yet.
-                info!(cid = self.identity.local_cid(), "Received duplicate SYN, ignoring.");
+                info!(
+                    cid = self.identity.local_cid(),
+                    "Received duplicate SYN, ignoring."
+                );
                 // If we have already been triggered to send a SYN-ACK (i.e., data is in the
                 // send buffer), we can resend it.
                 if !self.transport.unified_reliability().is_send_buffer_empty() {
@@ -111,7 +117,8 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
             Frame::Push { header, payload } => {
                 // For 0-RTT PUSH frames received during the `SynReceived` state, the ACK
                 // will be piggybacked onto the eventual SYN-ACK.
-                self.transport.unified_reliability_mut()
+                self.transport
+                    .unified_reliability_mut()
                     .receive_packet(header.sequence_number, payload);
             }
             Frame::Ack { header, payload } => {
@@ -120,7 +127,11 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
             Frame::Fin { header, .. } => {
                 // Handle FIN even in SynReceived state - this can happen with 0-RTT
                 // where client sends data and immediately closes
-                if self.transport.unified_reliability_mut().receive_fin(header.sequence_number) {
+                if self
+                    .transport
+                    .unified_reliability_mut()
+                    .receive_fin(header.sequence_number)
+                {
                     self.send_standalone_ack().await?;
                     // 在0-RTT场景中，从SynReceived状态转换到FinWait - 使用生命周期管理器
                     // In 0-RTT scenario, transition from SynReceived to FinWait - using lifecycle manager
@@ -153,7 +164,8 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
         match frame {
             Frame::Push { header, payload } => {
                 if self
-                    .transport.unified_reliability_mut()
+                    .transport
+                    .unified_reliability_mut()
                     .receive_packet(header.sequence_number, payload)
                 {
                     self.send_standalone_ack().await?;
@@ -166,7 +178,11 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                 // Just receive the FIN and ACK it. Do NOT change state here.
                 // The state transition to FinWait is driven by the `reassemble`
                 // method in the main loop, which is the single source of truth.
-                if self.transport.unified_reliability_mut().receive_fin(header.sequence_number) {
+                if self
+                    .transport
+                    .unified_reliability_mut()
+                    .receive_fin(header.sequence_number)
+                {
                     self.send_standalone_ack().await?;
                 }
             }
@@ -222,7 +238,8 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
 
                         // Notify ReliableUdpSocket to update the addr_to_cid map.
                         let _ = self
-                            .channels.command_tx
+                            .channels
+                            .command_tx
                             .send(SocketActorCommand::UpdateAddr {
                                 cid: self.identity.local_cid(),
                                 new_addr,
@@ -240,7 +257,8 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
             Frame::Push { header, payload } => {
                 // Continue processing data frames during path validation
                 if self
-                    .transport.unified_reliability_mut()
+                    .transport
+                    .unified_reliability_mut()
                     .receive_packet(header.sequence_number, payload)
                 {
                     self.send_standalone_ack().await?;
@@ -250,7 +268,11 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                 self.handle_ack_frame(header, payload).await?;
             }
             Frame::Fin { header, .. } => {
-                if self.transport.unified_reliability_mut().receive_fin(header.sequence_number) {
+                if self
+                    .transport
+                    .unified_reliability_mut()
+                    .receive_fin(header.sequence_number)
+                {
                     self.send_standalone_ack().await?;
                     // 路径验证期间收到FIN，转换到FinWait - 使用生命周期管理器
                     // Received FIN during path validation, transition to FinWait - using lifecycle manager
@@ -285,7 +307,8 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                 // It's possible to receive data after we've decided to close,
                 // as the peer might have sent it before receiving our FIN.
                 if self
-                    .transport.unified_reliability_mut()
+                    .transport
+                    .unified_reliability_mut()
                     .receive_packet(header.sequence_number, payload)
                 {
                     self.send_standalone_ack().await?;
@@ -295,7 +318,11 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                 self.handle_ack_frame(header, payload).await?;
             }
             Frame::Fin { header, .. } => {
-                if self.transport.unified_reliability_mut().receive_fin(header.sequence_number) {
+                if self
+                    .transport
+                    .unified_reliability_mut()
+                    .receive_fin(header.sequence_number)
+                {
                     self.send_standalone_ack().await?;
                     // 在Closing状态收到FIN，转换到ClosingWait - 使用生命周期管理器
                     // Received FIN in Closing state, transition to ClosingWait - using lifecycle manager
@@ -355,7 +382,8 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
         match frame {
             Frame::Push { header, payload } => {
                 if self
-                    .transport.unified_reliability_mut()
+                    .transport
+                    .unified_reliability_mut()
                     .receive_packet(header.sequence_number, payload)
                 {
                     self.send_standalone_ack().await?;
@@ -368,7 +396,11 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                 // This is a retransmitted FIN from the peer. Just acknowledge it again.
                 // Do NOT change state here. The state should only transition to `Closing`
                 // when the local application calls `shutdown()`.
-                if self.transport.unified_reliability_mut().receive_fin(header.sequence_number) {
+                if self
+                    .transport
+                    .unified_reliability_mut()
+                    .receive_fin(header.sequence_number)
+                {
                     self.send_standalone_ack().await?;
                 }
             }
@@ -396,18 +428,19 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
         header: crate::packet::header::ShortHeader,
         payload: bytes::Bytes,
     ) -> Result<()> {
-        self.transport.set_peer_recv_window(header.recv_window_size as u32);
+        self.transport
+            .set_peer_recv_window(header.recv_window_size as u32);
         let sack_ranges = decode_sack_ranges(payload);
         let now = Instant::now();
         let context = self.create_retransmission_context();
-        let frames_to_retx = self.transport.unified_reliability_mut().handle_ack_comprehensive(
-            header.recv_next_sequence,
-            sack_ranges,
-            now,
-            &context,
-        ).await;
+        let frames_to_retx = self
+            .transport
+            .unified_reliability_mut()
+            .handle_ack_comprehensive(header.recv_next_sequence, sack_ranges, now, &context)
+            .await;
         if !frames_to_retx.frames_to_retransmit.is_empty() {
-            self.send_frames(frames_to_retx.frames_to_retransmit).await?;
+            self.send_frames(frames_to_retx.frames_to_retransmit)
+                .await?;
         }
         Ok(())
     }
@@ -438,19 +471,25 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                     self.transition_state(ConnectionState::Established)?;
 
                     // 1. Queue the user's data into the reliability layer's stream buffer.
-                    self.transport.unified_reliability_mut().write_to_send_buffer(data);
+                    self.transport
+                        .unified_reliability_mut()
+                        .write_to_send_buffer(data);
 
                     // 2. Create the payload-less SYN-ACK frame.
-                    let syn_ack_frame =
-                        create_syn_ack_frame(&self.config, self.identity.peer_cid(), self.identity.local_cid());
+                    let syn_ack_frame = create_syn_ack_frame(
+                        &self.config,
+                        self.identity.peer_cid(),
+                        self.identity.local_cid(),
+                    );
 
                     // 3. Use intelligent 0-RTT packet splitting to ensure SYN-ACK is in the first packet
                     let peer_recv_window = self.transport.peer_recv_window();
-                    let packet_groups = self.transport.unified_reliability_mut().packetize_zero_rtt(
-                        self.identity.peer_cid(),
-                        peer_recv_window,
-                        syn_ack_frame,
-                    );
+                    let packet_groups =
+                        self.transport.unified_reliability_mut().packetize_zero_rtt(
+                            self.identity.peer_cid(),
+                            peer_recv_window,
+                            syn_ack_frame,
+                        );
 
                     // 4. Register timers for all frames in packet groups
                     // 4. 为数据包组中的所有帧注册定时器
@@ -458,9 +497,11 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                     for packet_group in &packet_groups {
                         all_frames.extend(packet_group.iter().cloned());
                     }
-                    
+
                     if !all_frames.is_empty() {
-                        let timer_count = self.transport.unified_reliability_mut()
+                        let timer_count = self
+                            .transport
+                            .unified_reliability_mut()
                             .track_frames_for_retransmission(&all_frames)
                             .await;
                         trace!(
@@ -473,7 +514,9 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                     // 5. Send each packet group separately to maintain the intelligent splitting
                     self.send_zero_rtt_packets(packet_groups).await?;
                 } else {
-                    self.transport.unified_reliability_mut().write_to_send_buffer(data);
+                    self.transport
+                        .unified_reliability_mut()
+                        .write_to_send_buffer(data);
                 }
             }
             StreamCommand::Close => {
@@ -486,11 +529,7 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                 info!(cid = self.identity.local_cid(), new_addr = %new_addr, "Actively migrating to new address.");
                 let challenge_data = rand::random();
 
-                if let Err(_e) = self.start_path_validation(
-                    new_addr,
-                    challenge_data,
-                    notifier,
-                ) {
+                if let Err(_e) = self.start_path_validation(new_addr, challenge_data, notifier) {
                     // 如果状态管理器返回错误，通知调用者
                     return Ok(());
                 }
@@ -515,7 +554,6 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     // 轮询式超时处理入口已移除，改为事件驱动的 timer_event_rx → handle_timeout_event 流程
     // Polling-style timeout handling entry removed; using event-driven timer_event_rx → handle_timeout_event
 
-
     async fn shutdown(&mut self) {
         // 用户主动关闭，根据状态决定处理方式
         // User-initiated close, handle based on current state
@@ -534,7 +572,10 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                 // 尝试优雅关闭
                 if let Ok(()) = self.begin_graceful_shutdown() {
                     if self.lifecycle_manager.should_close() {
-                        self.transport.unified_reliability_mut().cleanup_all_retransmission_timers().await;
+                        self.transport
+                            .unified_reliability_mut()
+                            .cleanup_all_retransmission_timers()
+                            .await;
                         // 确保用户流已关闭
                         *self.channels.tx_to_stream_mut() = None;
                     }
@@ -543,8 +584,14 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
             crate::core::endpoint::types::state::ConnectionState::Connecting => {
                 if self.transport.unified_reliability().is_send_buffer_empty() {
                     // 没有待发送数据，直接关闭
-                    if let Ok(()) = self.lifecycle_manager.transition_to(crate::core::endpoint::types::state::ConnectionState::Closed) {
-                        self.transport.unified_reliability_mut().cleanup_all_retransmission_timers().await;
+                    if let Ok(()) = self
+                        .lifecycle_manager
+                        .transition_to(crate::core::endpoint::types::state::ConnectionState::Closed)
+                    {
+                        self.transport
+                            .unified_reliability_mut()
+                            .cleanup_all_retransmission_timers()
+                            .await;
                         // 连接直接关闭时才关闭用户流
                         *self.channels.tx_to_stream_mut() = None;
                     }
@@ -553,7 +600,10 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                     if let Ok(()) = self.begin_graceful_shutdown() {
                         // 不要在这里关闭用户流，等待连接完全关闭
                         if self.lifecycle_manager.should_close() {
-                            self.transport.unified_reliability_mut().cleanup_all_retransmission_timers().await;
+                            self.transport
+                                .unified_reliability_mut()
+                                .cleanup_all_retransmission_timers()
+                                .await;
                             *self.channels.tx_to_stream_mut() = None;
                         }
                     }
@@ -565,7 +615,10 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                 if let Ok(()) = self.begin_graceful_shutdown() {
                     // 只有连接完全关闭时才关闭用户流
                     if self.lifecycle_manager.should_close() {
-                        self.transport.unified_reliability_mut().cleanup_all_retransmission_timers().await;
+                        self.transport
+                            .unified_reliability_mut()
+                            .cleanup_all_retransmission_timers()
+                            .await;
                         *self.channels.tx_to_stream_mut() = None;
                     }
                 }

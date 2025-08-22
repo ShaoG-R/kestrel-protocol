@@ -1,9 +1,9 @@
-use tokio::time::Instant;
-use bytes::Bytes;
 use crate::core::reliability::coordination::packet_coordinator::RetransmissionFrameInfo;
 use crate::core::reliability::data::{InFlightPacket, InFlightPacketStore, PacketState};
 use crate::packet::frame::FrameType;
 use crate::timer::actor::ActorTimerId;
+use bytes::Bytes;
+use tokio::time::Instant;
 
 fn create_test_store() -> InFlightPacketStore {
     InFlightPacketStore::new()
@@ -123,7 +123,7 @@ fn test_batch_remove_packets() {
 fn test_fast_retx_candidates_management() {
     let mut store = create_test_store();
     let now = Instant::now();
-    
+
     // 添加数据包
     store.add_packet(1, create_test_packet(1, now));
 

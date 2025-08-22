@@ -51,4 +51,4 @@ pub fn decode_sack_ranges(mut buf: Bytes) -> Vec<SackRange> {
         ranges.push(SackRange { start, end });
     }
     ranges
-} 
+}

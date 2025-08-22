@@ -17,49 +17,56 @@ pub struct StateValidator;
 impl StateValidator {
     /// 验证状态转换是否合法
     /// Validate if state transition is legal
-    pub fn is_valid_transition(current_state: &ConnectionState, new_state: &ConnectionState) -> bool {
+    pub fn is_valid_transition(
+        current_state: &ConnectionState,
+        new_state: &ConnectionState,
+    ) -> bool {
         use ConnectionState::*;
 
         match (current_state, new_state) {
             // 从任何状态都可以转换到Closed（中止连接）
             // Can transition to Closed from any state (abort connection)
             (_, Closed) => true,
-            
+
             // Connecting状态的转换
             // Transitions from Connecting state
             (Connecting, Established) => true,
             (Connecting, Closing) => true,
-            
+
             // SynReceived状态的转换
             // Transitions from SynReceived state
             (SynReceived, Established) => true,
             (SynReceived, FinWait) => true,
             (SynReceived, Closing) => true,
-            
+
             // Established状态的转换
             // Transitions from Established state
             (Established, FinWait) => true,
             (Established, Closing) => true,
             (Established, ValidatingPath { .. }) => true,
-            
+
             // ValidatingPath状态的转换
             // Transitions from ValidatingPath state
             (ValidatingPath { .. }, Established) => true,
             (ValidatingPath { .. }, FinWait) => true,
             (ValidatingPath { .. }, Closing) => true,
-            
+
             // FinWait状态的转换
             // Transitions from FinWait state
             (FinWait, Closing) => true,
-            
+
             // Closing状态的转换
             // Transitions from Closing state
             (Closing, ClosingWait) => true,
-            
+
             // 同状态转换（幂等）
             // Same state transition (idempotent)
-            (state1, state2) if std::mem::discriminant(state1) == std::mem::discriminant(state2) => true,
-            
+            (state1, state2)
+                if std::mem::discriminant(state1) == std::mem::discriminant(state2) =>
+            {
+                true
+            }
+
             // 其他转换都是无效的
             // All other transitions are invalid
             _ => false,
@@ -95,7 +102,9 @@ impl StateValidator {
     pub fn is_active(state: &ConnectionState) -> bool {
         matches!(
             state,
-            ConnectionState::Established | ConnectionState::SynReceived | ConnectionState::Connecting
+            ConnectionState::Established
+                | ConnectionState::SynReceived
+                | ConnectionState::Connecting
         )
     }
 
@@ -117,7 +126,10 @@ impl StateValidator {
     /// 验证优雅关闭的前置条件
     /// Validate preconditions for graceful shutdown
     pub fn can_begin_graceful_shutdown(state: &ConnectionState) -> bool {
-        !matches!(state, ConnectionState::Closed | ConnectionState::ClosingWait)
+        !matches!(
+            state,
+            ConnectionState::Closed | ConnectionState::ClosingWait
+        )
     }
 
     /// 验证是否正在进行路径验证
@@ -143,23 +155,23 @@ mod tests {
             &ConnectionState::Connecting,
             &ConnectionState::Established
         ));
-        
+
         assert!(StateValidator::is_valid_transition(
             &ConnectionState::Established,
             &ConnectionState::Closing
         ));
-        
+
         assert!(StateValidator::is_valid_transition(
             &ConnectionState::Closing,
             &ConnectionState::ClosingWait
         ));
-        
+
         // 从任何状态都可以转到Closed（强制关闭）
         assert!(StateValidator::is_valid_transition(
             &ConnectionState::Established,
             &ConnectionState::Closed
         ));
-        
+
         assert!(StateValidator::is_valid_transition(
             &ConnectionState::Connecting,
             &ConnectionState::Closed
@@ -173,13 +185,13 @@ mod tests {
             &ConnectionState::Closed,
             &ConnectionState::Established
         ));
-        
+
         // 不能从Connecting直接到FinWait
         assert!(!StateValidator::is_valid_transition(
             &ConnectionState::Connecting,
             &ConnectionState::FinWait
         ));
-        
+
         // 不能从ClosingWait到Established
         assert!(!StateValidator::is_valid_transition(
             &ConnectionState::ClosingWait,
@@ -191,16 +203,18 @@ mod tests {
     fn test_data_permissions() {
         // Established状态可以发送和接收
         assert!(StateValidator::can_send_data(&ConnectionState::Established));
-        assert!(StateValidator::can_receive_data(&ConnectionState::Established));
-        
+        assert!(StateValidator::can_receive_data(
+            &ConnectionState::Established
+        ));
+
         // FinWait状态可以发送但不能接收
         assert!(StateValidator::can_send_data(&ConnectionState::FinWait));
         assert!(!StateValidator::can_receive_data(&ConnectionState::FinWait));
-        
+
         // Closing状态不能发送但可以接收
         assert!(!StateValidator::can_send_data(&ConnectionState::Closing));
         assert!(StateValidator::can_receive_data(&ConnectionState::Closing));
-        
+
         // Closed状态既不能发送也不能接收
         assert!(!StateValidator::can_send_data(&ConnectionState::Closed));
         assert!(!StateValidator::can_receive_data(&ConnectionState::Closed));
@@ -212,16 +226,16 @@ mod tests {
         assert!(StateValidator::is_active(&ConnectionState::Connecting));
         assert!(StateValidator::is_active(&ConnectionState::SynReceived));
         assert!(StateValidator::is_active(&ConnectionState::Established));
-        
+
         // 非活跃状态
         assert!(!StateValidator::is_active(&ConnectionState::Closing));
         assert!(!StateValidator::is_active(&ConnectionState::Closed));
-        
+
         // 关闭状态
         assert!(StateValidator::is_closing(&ConnectionState::Closing));
         assert!(StateValidator::is_closing(&ConnectionState::FinWait));
         assert!(StateValidator::is_closing(&ConnectionState::ClosingWait));
-        
+
         // 非关闭状态
         assert!(!StateValidator::is_closing(&ConnectionState::Established));
         assert!(!StateValidator::is_closing(&ConnectionState::Connecting));
@@ -230,10 +244,16 @@ mod tests {
     #[test]
     fn test_path_validation_checks() {
         // 只有Established状态可以开始路径验证
-        assert!(StateValidator::can_start_path_validation(&ConnectionState::Established));
-        assert!(!StateValidator::can_start_path_validation(&ConnectionState::Connecting));
-        assert!(!StateValidator::can_start_path_validation(&ConnectionState::Closing));
-        
+        assert!(StateValidator::can_start_path_validation(
+            &ConnectionState::Established
+        ));
+        assert!(!StateValidator::can_start_path_validation(
+            &ConnectionState::Connecting
+        ));
+        assert!(!StateValidator::can_start_path_validation(
+            &ConnectionState::Closing
+        ));
+
         // 检查是否正在进行路径验证
         let validating_state = ConnectionState::ValidatingPath {
             new_addr: create_test_address(),
@@ -241,19 +261,31 @@ mod tests {
             notifier: None,
         };
         assert!(StateValidator::is_path_validating(&validating_state));
-        assert!(!StateValidator::is_path_validating(&ConnectionState::Established));
+        assert!(!StateValidator::is_path_validating(
+            &ConnectionState::Established
+        ));
     }
 
     #[test]
     fn test_graceful_shutdown_checks() {
         // 大部分状态都可以开始优雅关闭
-        assert!(StateValidator::can_begin_graceful_shutdown(&ConnectionState::Connecting));
-        assert!(StateValidator::can_begin_graceful_shutdown(&ConnectionState::Established));
-        assert!(StateValidator::can_begin_graceful_shutdown(&ConnectionState::FinWait));
-        
+        assert!(StateValidator::can_begin_graceful_shutdown(
+            &ConnectionState::Connecting
+        ));
+        assert!(StateValidator::can_begin_graceful_shutdown(
+            &ConnectionState::Established
+        ));
+        assert!(StateValidator::can_begin_graceful_shutdown(
+            &ConnectionState::FinWait
+        ));
+
         // 已经关闭或正在等待关闭的状态不能再次开始关闭
-        assert!(!StateValidator::can_begin_graceful_shutdown(&ConnectionState::Closed));
-        assert!(!StateValidator::can_begin_graceful_shutdown(&ConnectionState::ClosingWait));
+        assert!(!StateValidator::can_begin_graceful_shutdown(
+            &ConnectionState::Closed
+        ));
+        assert!(!StateValidator::can_begin_graceful_shutdown(
+            &ConnectionState::ClosingWait
+        ));
     }
 
     #[test]
@@ -263,4 +295,4 @@ mod tests {
         assert!(!StateValidator::should_close(&ConnectionState::Established));
         assert!(!StateValidator::should_close(&ConnectionState::Closing));
     }
-} 
+}

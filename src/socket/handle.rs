@@ -3,20 +3,20 @@
 use super::{
     command::SocketActorCommand,
     event_loop::SocketEventLoop,
-    transport::{transport_sender_task, BindableTransport, TransportCommand},
+    transport::{BindableTransport, TransportCommand, transport_sender_task},
 };
+use crate::socket::event_loop::draining::DrainingPool;
+use crate::socket::event_loop::routing::FrameRouter;
+use crate::socket::event_loop::session_coordinator::SocketSessionCoordinator;
 use crate::{
     config::Config,
     core::stream::Stream,
     error::{Error, Result},
 };
+use initial_data::InitialData;
 use std::{marker::PhantomData, net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
 use tracing::info;
-use initial_data::InitialData;
-use crate::socket::event_loop::draining::DrainingPool;
-use crate::socket::event_loop::routing::FrameRouter;
-use crate::socket::event_loop::session_coordinator::SocketSessionCoordinator;
 
 pub mod initial_data;
 
@@ -87,12 +87,10 @@ impl<T: BindableTransport> TransportReliableUdpSocket<T> {
         // 创建传输管理器
         // Create transport manager
         let transport_manager = super::transport::TransportManager::new(transport, send_tx);
-        
+
         // 创建帧路由管理器
         // Create frame router manager
-        let frame_router = FrameRouter::new(
-            DrainingPool::new(config.connection.drain_timeout)
-        );
+        let frame_router = FrameRouter::new(DrainingPool::new(config.connection.drain_timeout));
 
         // 创建会话协调器
         // Create session coordinator

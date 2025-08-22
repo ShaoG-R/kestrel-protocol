@@ -12,10 +12,7 @@ pub mod manager;
 pub mod sender;
 pub mod udp;
 
-use crate::{
-    error::Result,
-    packet::frame::Frame,
-};
+use crate::{error::Result, packet::frame::Frame};
 use async_trait::async_trait;
 use std::{fmt::Debug, net::SocketAddr};
 

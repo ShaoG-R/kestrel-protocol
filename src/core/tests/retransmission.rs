@@ -1,14 +1,10 @@
 //! Tests for retransmission logic (RTO and Fast Retransmission).
 
-use crate::{
-    config::Config,
-    core::test_utils::new_stream_pair_with_filter,
-    packet::frame::Frame,
-};
+use crate::{config::Config, core::test_utils::new_stream_pair_with_filter, packet::frame::Frame};
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -24,7 +20,6 @@ use tracing::info;
 /// prompting it to re-send the lost packet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_rto_recovery_on_single_packet_loss() {
-
     info!("--- RTO Recovery Test ---");
 
     // 1. Configure a very short RTO for the client to ensure the test runs quickly.
@@ -47,7 +42,10 @@ async fn test_rto_recovery_on_single_packet_loss() {
             if handshake_complete.load(Ordering::SeqCst) {
                 if let Frame::Push { .. } = frame {
                     if !packet_dropped.load(Ordering::SeqCst) {
-                        info!(seq = frame.sequence_number().unwrap(), "Intentionally dropping client data packet post-handshake");
+                        info!(
+                            seq = frame.sequence_number().unwrap(),
+                            "Intentionally dropping client data packet post-handshake"
+                        );
                         packet_dropped.store(true, Ordering::SeqCst);
                         return false; // Drop the packet
                     }

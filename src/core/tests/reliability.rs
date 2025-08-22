@@ -11,8 +11,8 @@ use crate::{
 use bytes::Bytes;
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -88,13 +88,13 @@ async fn test_data_flow_with_acks() {
 
 #[tokio::test]
 async fn test_endpoint_rto_retransmission() {
-
     let mut client_config = Config::default();
     client_config.reliability.initial_rto = Duration::from_millis(100);
     client_config.reliability.min_rto = Duration::from_millis(100);
 
     // Filter to drop all ACK packets sent from the server.
-    let server_tx_filter = Arc::new(|frame: &Frame| -> bool { !matches!(frame, Frame::Ack { .. }) });
+    let server_tx_filter =
+        Arc::new(|frame: &Frame| -> bool { !matches!(frame, Frame::Ack { .. }) });
     // Client filter allows all packets.
     let client_tx_filter = Arc::new(|_: &Frame| -> bool { true });
 
@@ -105,7 +105,8 @@ async fn test_endpoint_rto_retransmission() {
             client_tx_filter,
             server_tx_filter,
             None,
-        ).await;
+        )
+        .await;
 
     // Establish connection.
     server
@@ -159,8 +160,11 @@ async fn test_endpoint_rto_retransmission() {
     );
 
     // Verify the server does NOT receive the data again at the application layer.
-    let retransmit_recv_result =
-        tokio::time::timeout(Duration::from_millis(50), server.rx_from_endpoint_user.recv()).await;
+    let retransmit_recv_result = tokio::time::timeout(
+        Duration::from_millis(50),
+        server.rx_from_endpoint_user.recv(),
+    )
+    .await;
     assert!(
         retransmit_recv_result.is_err(),
         "Server should not receive the retransmitted data at the application layer"
@@ -234,7 +238,8 @@ async fn test_endpoint_fast_retransmission() {
         client_tx_filter,
         server_tx_filter,
         None,
-    ).await;
+    )
+    .await;
 
     // Establish connection.
     server
@@ -263,11 +268,13 @@ async fn test_endpoint_fast_retransmission() {
     let total_len: usize = sent_data.iter().map(|d| d.len()).sum();
 
     while all_received_data.len() < total_len {
-        let chunks =
-            tokio::time::timeout(Duration::from_millis(200), server.rx_from_endpoint_user.recv())
-                .await
-                .expect("Server should eventually receive all data")
-                .unwrap();
+        let chunks = tokio::time::timeout(
+            Duration::from_millis(200),
+            server.rx_from_endpoint_user.recv(),
+        )
+        .await
+        .expect("Server should eventually receive all data")
+        .unwrap();
         for chunk in chunks {
             all_received_data.extend_from_slice(&chunk);
         }
@@ -276,4 +283,4 @@ async fn test_endpoint_fast_retransmission() {
     // Verify that all data was received correctly and in order.
     let expected_data: Vec<u8> = sent_data.into_iter().flatten().collect();
     assert_eq!(all_received_data, expected_data);
-} 
+}

@@ -4,7 +4,7 @@ impl<T> EventDataTrait for T where T: Clone + std::fmt::Debug + Default + Send +
 
 // 从这里开始是您的代码的重构版本
 // From here is the refactored version of your code
-use crate::timer::event::{pool::TimerEventPool, ConnectionId, TimerEventData};
+use crate::timer::event::{ConnectionId, TimerEventData, pool::TimerEventPool};
 use std::marker::PhantomData;
 
 /// 策略选择特征，用于在编译时选择最优的事件创建策略
@@ -159,14 +159,18 @@ impl<E: EventDataTrait> EventFactory<E> {
         // 对于不使用池的类型，Vec 会自动清理
         // For types that don't use pools, Vec will be automatically cleaned up
     }
-    
+
     // --- 策略分发方法 ---
     // Strategy dispatch methods
-    
+
     /// 智能分发单个事件创建
     /// Smart dispatch for single event creation
     #[inline(always)]
-    fn dispatch_create_single(&self, connection_id: ConnectionId, timeout_event: E) -> TimerEventData<E> {
+    fn dispatch_create_single(
+        &self,
+        connection_id: ConnectionId,
+        timeout_event: E,
+    ) -> TimerEventData<E> {
         // 运行时检查是否为 Copy 类型（基于类型特征）
         // Runtime check if it's a Copy type (based on type characteristics)
         if self.is_copy_like() {
@@ -217,7 +221,10 @@ impl<E: EventDataTrait> EventFactory<E> {
     /// Copy 优化的批量创建
     /// Copy-optimized batch creation
     #[inline(always)]
-    fn create_batch_copy_optimized(&self, requests: &[(ConnectionId, E)]) -> Vec<TimerEventData<E>> {
+    fn create_batch_copy_optimized(
+        &self,
+        requests: &[(ConnectionId, E)],
+    ) -> Vec<TimerEventData<E>> {
         // 对于小且简单的类型，clone 实际上是按位复制
         // For small and simple types, clone is actually bitwise copy
         requests
@@ -241,40 +248,40 @@ impl<E: EventDataTrait> EventFactory<E> {
 mod tests {
     use super::*;
     use crate::timer::event::pool::PoolConfig;
-    
+
     // 测试用的简单 Copy 类型
     #[derive(Debug, Clone, Copy, Default, PartialEq)]
     struct SimpleCopyEvent(u32);
-    
+
     // 测试用的复杂非 Copy 类型
     #[derive(Debug, Clone, Default, PartialEq)]
     struct ComplexCloneEvent {
         data: Vec<u8>,
         id: String,
     }
-    
+
     #[test]
     fn test_copy_type_strategy_selection() {
         let factory = EventFactory::<SimpleCopyEvent>::new();
-        
+
         // 验证 Copy 类型被识别为 copy-like
         assert!(factory.is_copy_like());
         assert!(!factory.should_use_pool());
-        
+
         // 测试单个事件创建
         let event = factory.create_event(123, SimpleCopyEvent(456));
         assert_eq!(event.connection_id, 123);
         assert_eq!(event.timeout_event, SimpleCopyEvent(456));
     }
-    
+
     #[test]
     fn test_clone_type_strategy_selection() {
         let factory = EventFactory::<ComplexCloneEvent>::new();
-        
+
         // 验证复杂类型不被识别为 copy-like
         assert!(!factory.is_copy_like());
         assert!(factory.should_use_pool());
-        
+
         // 测试单个事件创建
         let complex_event = ComplexCloneEvent {
             data: vec![1, 2, 3],
@@ -284,92 +291,108 @@ mod tests {
         assert_eq!(event.connection_id, 123);
         assert_eq!(event.timeout_event, complex_event);
     }
-    
+
     #[test]
     fn test_batch_creation_copy_type() {
         let factory = EventFactory::<SimpleCopyEvent>::new();
-        
+
         let requests = vec![
             (1, SimpleCopyEvent(100)),
             (2, SimpleCopyEvent(200)),
             (3, SimpleCopyEvent(300)),
         ];
-        
+
         let events = factory.batch_create_events(&requests);
         assert_eq!(events.len(), 3);
-        
+
         for (i, event) in events.iter().enumerate() {
             assert_eq!(event.connection_id, requests[i].0);
             assert_eq!(event.timeout_event, requests[i].1);
         }
     }
-    
+
     #[test]
     fn test_batch_creation_clone_type() {
         let factory = EventFactory::<ComplexCloneEvent>::new();
-        
+
         let requests = vec![
-            (1, ComplexCloneEvent { data: vec![1], id: "first".to_string() }),
-            (2, ComplexCloneEvent { data: vec![2], id: "second".to_string() }),
+            (
+                1,
+                ComplexCloneEvent {
+                    data: vec![1],
+                    id: "first".to_string(),
+                },
+            ),
+            (
+                2,
+                ComplexCloneEvent {
+                    data: vec![2],
+                    id: "second".to_string(),
+                },
+            ),
         ];
-        
+
         let events = factory.batch_create_events(&requests);
         assert_eq!(events.len(), 2);
-        
+
         for (i, event) in events.iter().enumerate() {
             assert_eq!(event.connection_id, requests[i].0);
             assert_eq!(event.timeout_event, requests[i].1);
         }
     }
-    
+
     #[test]
     fn test_pool_usage_copy_type() {
         let factory = EventFactory::<SimpleCopyEvent>::new();
         let pool = TimerEventPool::new(PoolConfig::default());
-        
+
         // Copy 类型应该忽略池，直接创建
         let event = factory.create_with_pool(&pool, 123, SimpleCopyEvent(456));
         assert_eq!(event.connection_id, 123);
         assert_eq!(event.timeout_event, SimpleCopyEvent(456));
-        
+
         // 返回到池中应该是无操作
         factory.return_to_pool(event, &pool);
     }
-    
+
     #[test]
     fn test_pool_usage_clone_type() {
         let factory = EventFactory::<ComplexCloneEvent>::new();
         let pool = TimerEventPool::new(PoolConfig::default());
-        
+
         let complex_event = ComplexCloneEvent {
             data: vec![1, 2, 3],
             id: "test".to_string(),
         };
-        
+
         // 复杂类型应该使用池
         let event = factory.create_with_pool(&pool, 123, complex_event.clone());
         assert_eq!(event.connection_id, 123);
         assert_eq!(event.timeout_event, complex_event);
-        
+
         // 返回到池中应该真正释放到池
         factory.return_to_pool(event, &pool);
         assert!(pool.stats().current_size > 0);
     }
-    
+
     #[test]
     fn test_strategy_traits_copy() {
         // 测试 CopyStrategy 的行为
-        let event = <CopyStrategy as EventCreationStrategy<SimpleCopyEvent>>::create_single(123, SimpleCopyEvent(456));
+        let event = <CopyStrategy as EventCreationStrategy<SimpleCopyEvent>>::create_single(
+            123,
+            SimpleCopyEvent(456),
+        );
         assert_eq!(event.connection_id, 123);
         assert_eq!(event.timeout_event, SimpleCopyEvent(456));
-        
+
         let requests = vec![(1, SimpleCopyEvent(100)), (2, SimpleCopyEvent(200))];
-        let events = <CopyStrategy as EventCreationStrategy<SimpleCopyEvent>>::create_batch(&requests);
+        let events =
+            <CopyStrategy as EventCreationStrategy<SimpleCopyEvent>>::create_batch(&requests);
         assert_eq!(events.len(), 2);
-        
+
         assert!(!<CopyStrategy as EventCreationStrategy<SimpleCopyEvent>>::should_use_pool());
     }
-    
+
     #[test]
     fn test_strategy_traits_clone() {
         // 测试 CloneStrategy 的行为
@@ -377,16 +400,22 @@ mod tests {
             data: vec![1, 2, 3],
             id: "test".to_string(),
         };
-        
-        let event = <CloneStrategy as EventCreationStrategy<ComplexCloneEvent>>::create_single(123, complex_event.clone());
+
+        let event = <CloneStrategy as EventCreationStrategy<ComplexCloneEvent>>::create_single(
+            123,
+            complex_event.clone(),
+        );
         assert_eq!(event.connection_id, 123);
         assert_eq!(event.timeout_event, complex_event);
-        
+
         let requests = vec![(1, complex_event.clone())];
-        let events = <CloneStrategy as EventCreationStrategy<ComplexCloneEvent>>::create_batch(&requests);
+        let events =
+            <CloneStrategy as EventCreationStrategy<ComplexCloneEvent>>::create_batch(&requests);
         assert_eq!(events.len(), 1);
-        
+
         // 对于复杂的 ComplexCloneEvent，应该建议使用池
-        assert!(<CloneStrategy as EventCreationStrategy<ComplexCloneEvent>>::should_use_pool());
+        assert!(<CloneStrategy as EventCreationStrategy<
+            ComplexCloneEvent,
+        >>::should_use_pool());
     }
 }

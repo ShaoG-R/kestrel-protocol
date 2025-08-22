@@ -1,17 +1,13 @@
 //! Tests for the connection shutdown logic.
 
-use crate::core::test_utils::{setup_client_server_pair, setup_server_harness, MockTransport};
-use crate::{
-    core::endpoint::StreamCommand,
-    packet::frame::Frame,
-};
+use crate::core::test_utils::{MockTransport, setup_client_server_pair, setup_server_harness};
+use crate::{core::endpoint::StreamCommand, packet::frame::Frame};
 use bytes::Bytes;
 use std::{net::SocketAddr, time::Duration};
 use tokio::{sync::oneshot, time::timeout};
 
 #[tokio::test]
 async fn test_shutdown_when_established() {
-
     // Standard case: closing an established connection should send a FIN.
     let (client, mut server) = setup_client_server_pair().await;
 
@@ -62,13 +58,11 @@ async fn test_shutdown_when_connecting() {
     // To prevent `send_initial_syn` from erroring on a closed channel, we create a
     // dummy receiver task that just drains messages.
     let (sender_task_tx, mut sender_task_rx) = tokio::sync::mpsc::channel(32);
-    tokio::spawn(async move {
-        while sender_task_rx.recv().await.is_some() {}
-    });
+    tokio::spawn(async move { while sender_task_rx.recv().await.is_some() {} });
 
     // 启动测试用全局定时器任务
     // Start global timer task for testing
-            let timer_handle = crate::timer::start_hybrid_timer_task();
+    let timer_handle = crate::timer::start_hybrid_timer_task();
 
     let (mut client_endpoint, tx_to_stream, _) =
         crate::core::endpoint::Endpoint::<MockTransport>::new_client_with_vegas(
@@ -80,7 +74,9 @@ async fn test_shutdown_when_connecting() {
             tokio::sync::mpsc::channel(32).0, // dummy tx
             None,
             timer_handle,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
     // Send a close command to the connecting client.
     tx_to_stream.send(StreamCommand::Close).await.unwrap();
@@ -101,7 +97,6 @@ async fn test_shutdown_when_connecting() {
 
 #[tokio::test]
 async fn test_shutdown_when_syn_received() {
-
     // Test closing a server connection before the app `accepts` it (i.e., sends data).
     let mut harness = setup_server_harness().await;
 
@@ -129,8 +124,11 @@ async fn test_shutdown_when_syn_received() {
 
     // 3. Verify the endpoint task terminates quickly.
     // The user stream receiver will be dropped. We wait for it to return None.
-    let user_stream_result =
-        timeout(Duration::from_millis(100), harness.rx_from_endpoint_user.recv()).await;
+    let user_stream_result = timeout(
+        Duration::from_millis(100),
+        harness.rx_from_endpoint_user.recv(),
+    )
+    .await;
 
     assert!(
         user_stream_result.is_ok(),
@@ -219,21 +217,15 @@ async fn test_simultaneous_close() {
         .await
         .unwrap();
 
-    let client_recv = timeout(
-        Duration::from_secs(1),
-        client.rx_from_endpoint_user.recv(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let client_recv = timeout(Duration::from_secs(1), client.rx_from_endpoint_user.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(client_recv[0], "pong");
-    let server_recv = timeout(
-        Duration::from_secs(1),
-        server.rx_from_endpoint_user.recv(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let server_recv = timeout(Duration::from_secs(1), server.rx_from_endpoint_user.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(server_recv[0], "ping");
 
     // 2. Both initiate shutdown
@@ -265,7 +257,6 @@ async fn test_simultaneous_close() {
 
 #[tokio::test]
 async fn test_shutdown_from_fin_wait() {
-
     // Client closes, server enters FinWait, then server closes.
     let (mut client, mut server) = setup_client_server_pair().await;
 
@@ -280,21 +271,15 @@ async fn test_shutdown_from_fin_wait() {
         .send(StreamCommand::SendData(Bytes::from("pong")))
         .await
         .unwrap();
-    let client_recv = timeout(
-        Duration::from_secs(1),
-        client.rx_from_endpoint_user.recv(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let client_recv = timeout(Duration::from_secs(1), client.rx_from_endpoint_user.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(client_recv[0], "pong");
-    let server_recv = timeout(
-        Duration::from_secs(1),
-        server.rx_from_endpoint_user.recv(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let server_recv = timeout(Duration::from_secs(1), server.rx_from_endpoint_user.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(server_recv[0], "ping");
 
     // 2. Client initiates shutdown
@@ -339,7 +324,6 @@ async fn test_shutdown_from_fin_wait() {
 
 #[tokio::test]
 async fn test_data_is_fully_read_before_shutdown_eof() {
-
     // This test targets the race condition where a PUSH and FIN arrive in the
     // same batch. The receiver must process the PUSH data fully before the
     // user stream receives the EOF signal from the FIN.
@@ -347,7 +331,7 @@ async fn test_data_is_fully_read_before_shutdown_eof() {
 
     // 1. Establish connection (can be done implicitly by sending data)
     let test_data = Bytes::from("important data that must not be lost");
-    
+
     // 2. Client sends data and immediately requests to close the stream.
     // This makes it highly likely that the resulting PUSH and FIN frames
     // will be processed by the server endpoint in the same event loop tick.
@@ -363,32 +347,32 @@ async fn test_data_is_fully_read_before_shutdown_eof() {
         .unwrap();
 
     // 3. Server must receive the data first.
-    let server_recv_data =
-        timeout(Duration::from_secs(1), server.rx_from_endpoint_user.recv())
-            .await
-            .expect("Server should receive the data packet before timeout")
-            .expect("Server's stream should not be closed yet")
-            .into_iter()
-            .flatten()
-            .collect::<Bytes>();
+    let server_recv_data = timeout(Duration::from_secs(1), server.rx_from_endpoint_user.recv())
+        .await
+        .expect("Server should receive the data packet before timeout")
+        .expect("Server's stream should not be closed yet")
+        .into_iter()
+        .flatten()
+        .collect::<Bytes>();
 
-    assert_eq!(server_recv_data, test_data, "The received data did not match what was sent.");
+    assert_eq!(
+        server_recv_data, test_data,
+        "The received data did not match what was sent."
+    );
 
     // 4. After the data is read, the *next* read should signal EOF.
     // Our deferred EOF logic ensures the user channel is closed only after
     // the receive buffer is drained.
-    let server_recv_eof =
-        timeout(Duration::from_secs(1), server.rx_from_endpoint_user.recv())
-            .await
-            .expect("Server should not time out waiting for EOF")
-            .is_none();
-    
+    let server_recv_eof = timeout(Duration::from_secs(1), server.rx_from_endpoint_user.recv())
+        .await
+        .expect("Server should not time out waiting for EOF")
+        .is_none();
+
     assert!(server_recv_eof, "Server stream should now be closed (EOF)");
 }
 
 #[tokio::test]
 async fn test_retransmission_after_fin_is_ignored() {
-
     // This test verifies that once a FIN has been processed by the receiver,
     // any subsequent (spurious) retransmissions of packets that came before
     // that FIN are ignored.
@@ -479,8 +463,14 @@ async fn test_retransmission_after_fin_is_ignored() {
 
     // IMPORTANT: Consume the two legitimate ACKs that were sent for the
     // initial PUSH and FIN frames.
-    assert!(harness.rx_from_endpoint_network.recv().await.is_some(), "Should have received ACK for PUSH");
-    assert!(harness.rx_from_endpoint_network.recv().await.is_some(), "Should have received ACK for FIN");
+    assert!(
+        harness.rx_from_endpoint_network.recv().await.is_some(),
+        "Should have received ACK for PUSH"
+    );
+    assert!(
+        harness.rx_from_endpoint_network.recv().await.is_some(),
+        "Should have received ACK for FIN"
+    );
 
     // 5. Send a spurious retransmission of the first PUSH packet.
     harness
@@ -501,4 +491,4 @@ async fn test_retransmission_after_fin_is_ignored() {
         spurious_ack.is_err(),
         "Server should not send any packets in response to a retransmission after FIN"
     );
-} 
+}

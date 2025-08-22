@@ -4,18 +4,18 @@
 pub mod common;
 
 use common::harness::TestHarness;
-use kestrel_protocol::{
-    socket::handle::initial_data::InitialData,
-    config::Config,
-};
+use kestrel_protocol::{config::Config, socket::handle::initial_data::InitialData};
 use std::{
-    sync::{Arc, atomic::{AtomicU32, AtomicUsize, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicU32, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::mpsc,
-    time::{sleep, Instant},
+    time::{Instant, sleep},
 };
 use tracing::{info, warn};
 
@@ -24,7 +24,6 @@ use crate::common::harness::init_tracing;
 /// 测试SYN-ACK与PUSH帧的基础粘连
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_basic_syn_ack_push_coalescing() {
-
     info!("--- 测试SYN-ACK与PUSH帧基础粘连 ---");
 
     let TestHarness {
@@ -80,7 +79,7 @@ async fn test_basic_syn_ack_push_coalescing() {
     server_reader.read_to_end(&mut initial_data).await.unwrap();
     assert_eq!(&initial_data, b"Coalescing test data");
     info!("[Server] 接收到粘连的0-RTT数据");
-    
+
     info!("--- SYN-ACK与PUSH帧基础粘连测试通过 ---");
 }
 
@@ -108,7 +107,7 @@ async fn test_large_packet_fragmentation() {
     let large_data = vec![b'X'; 1024];
     let config = Config::default();
     let initial_data = InitialData::new(&large_data, &config).unwrap();
-    
+
     info!("[Client] 发送大数据包 ({} bytes)", large_data.len());
     let client_stream = client
         .connect_with_config(server_addr, Box::new(config), Some(initial_data))
@@ -139,7 +138,10 @@ async fn test_large_packet_fragmentation() {
     // 验证数据完整性
     assert_eq!(received_data.len(), large_data.len());
     assert_eq!(received_data, large_data);
-    info!("[Server] 成功接收所有分片数据 ({} bytes)", received_data.len());
+    info!(
+        "[Server] 成功接收所有分片数据 ({} bytes)",
+        received_data.len()
+    );
 
     info!("--- 大数据包智能分包测试通过 ---");
 }
@@ -170,11 +172,14 @@ async fn test_multiple_small_packet_coalescing() {
         let chunk = format!("Chunk{:02} ", i);
         combined_data.extend_from_slice(chunk.as_bytes());
     }
-    
+
     let config = Config::default();
     let initial_data = InitialData::new(&combined_data, &config).unwrap();
-    info!("[Client] 发送多个小包粘连数据 ({} bytes)", combined_data.len());
-    
+    info!(
+        "[Client] 发送多个小包粘连数据 ({} bytes)",
+        combined_data.len()
+    );
+
     let client_stream = client
         .connect_with_config(server_addr, Box::new(config), Some(initial_data))
         .await
@@ -196,7 +201,7 @@ async fn test_multiple_small_packet_coalescing() {
     // 客户端读取所有响应
     let mut response_data = Vec::new();
     client_reader.read_to_end(&mut response_data).await.unwrap();
-    
+
     let response_str = String::from_utf8_lossy(&response_data);
     for i in 0..5 {
         let expected_resp = format!("Resp{} ", i);
@@ -214,7 +219,7 @@ async fn test_multiple_small_packet_coalescing() {
     // 验证数据完整性
     assert_eq!(received_data.len(), combined_data.len());
     assert_eq!(received_data, combined_data);
-    
+
     // 验证数据内容
     let received_str = String::from_utf8_lossy(&received_data);
     for i in 0..20 {
@@ -232,7 +237,6 @@ async fn test_multiple_small_packet_coalescing() {
 /// 测试粘连分包的边界条件
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_coalescing_boundary_conditions() {
-
     info!("--- 测试粘连分包边界条件 ---");
 
     let TestHarness {
@@ -256,7 +260,12 @@ async fn test_coalescing_boundary_conditions() {
     let mut hi = config.connection.max_packet_size; // 上界从MTU开始
     while lo < hi {
         let mid = (lo + hi + 1) / 2;
-        if kestrel_protocol::socket::handle::initial_data::InitialData::new(&vec![0u8; mid], &config).is_ok() {
+        if kestrel_protocol::socket::handle::initial_data::InitialData::new(
+            &vec![0u8; mid],
+            &config,
+        )
+        .is_ok()
+        {
             lo = mid;
         } else {
             hi = mid - 1;
@@ -265,7 +274,7 @@ async fn test_coalescing_boundary_conditions() {
     let boundary_data = vec![b'B'; lo];
     let initial_data = InitialData::new(&boundary_data, &config).unwrap();
     info!("[Client] 发送边界大小数据 ({} bytes)", boundary_data.len());
-    
+
     let client_stream = client
         .connect_with_config(server_addr, Box::new(config), Some(initial_data))
         .await
@@ -302,10 +311,12 @@ async fn test_coalescing_boundary_conditions() {
 /// 测试高并发下的包粘连性能
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_concurrent_coalescing_performance() {
-
     const NUM_CLIENTS: usize = 100;
     const DATA_SIZE: usize = 512;
-    info!("--- 测试高并发包粘连性能 ({} 客户端, 每个 {}B) ---", NUM_CLIENTS, DATA_SIZE);
+    info!(
+        "--- 测试高并发包粘连性能 ({} 客户端, 每个 {}B) ---",
+        NUM_CLIENTS, DATA_SIZE
+    );
 
     let TestHarness {
         server_addr,
@@ -356,10 +367,10 @@ async fn test_concurrent_coalescing_performance() {
             let mut test_data = vec![(i % 256) as u8; DATA_SIZE];
             test_data[0] = (i >> 8) as u8;
             test_data[1] = (i & 0xFF) as u8;
-            
+
             let config = Config::default();
             let initial_data = InitialData::new(&test_data, &config).unwrap();
-            
+
             let stream = client
                 .connect_with_config(server_addr, Box::new(config), Some(initial_data))
                 .await
@@ -392,7 +403,10 @@ async fn test_concurrent_coalescing_performance() {
     info!("处理字节数: {}/{} bytes", processed_bytes, expected_bytes);
     info!("总耗时: {:?}", elapsed);
     info!("吞吐量: {:.2} MB/s", throughput);
-    info!("平均延迟: {:.2} ms", elapsed.as_millis() as f64 / NUM_CLIENTS as f64);
+    info!(
+        "平均延迟: {:.2} ms",
+        elapsed.as_millis() as f64 / NUM_CLIENTS as f64
+    );
 
     assert_eq!(processed_bytes, expected_bytes);
     info!("--- 高并发包粘连性能测试通过 ---");
@@ -416,42 +430,41 @@ async fn test_variable_size_coalescing_strategy() {
 
     for (idx, &size) in test_sizes.iter().enumerate() {
         info!("=== 测试大小: {} bytes ===", size);
-        
+
         let client = TestHarness::create_client().await;
         let (server_stream_tx, mut server_stream_rx) = mpsc::channel(1);
 
         let server_handle = tokio::spawn(async move {
             let (stream, _) = server_listener.accept().await.unwrap();
-            server_stream_tx.send((stream, server_listener)).await.unwrap();
+            server_stream_tx
+                .send((stream, server_listener))
+                .await
+                .unwrap();
         });
 
         // 创建特定大小的测试数据
         let mut test_data = vec![(idx % 256) as u8; size];
         test_data[0] = 0xAA; // 标识符
         test_data[size - 1] = 0xBB; // 结束标识符
-        
+
         let config = Config::default();
         // 仅当数据可被0-RTT单包承载时才使用 InitialData，否则先建立连接再发送数据
         let initial_attempt = InitialData::new(&test_data, &config);
         let used_0rtt = initial_attempt.is_ok();
         let client_stream = match initial_attempt {
-            Ok(initial_data) => {
-                client
-                    .connect_with_config(server_addr, Box::new(config.clone()), Some(initial_data))
-                    .await
-                    .unwrap()
-            }
-            Err(_) => {
-                client
-                    .connect_with_config(server_addr, Box::new(config.clone()), None)
-                    .await
-                    .unwrap()
-            }
+            Ok(initial_data) => client
+                .connect_with_config(server_addr, Box::new(config.clone()), Some(initial_data))
+                .await
+                .unwrap(),
+            Err(_) => client
+                .connect_with_config(server_addr, Box::new(config.clone()), None)
+                .await
+                .unwrap(),
         };
 
         let (server_stream, returned_listener) = server_stream_rx.recv().await.unwrap();
         server_listener = returned_listener;
-        
+
         server_handle.await.unwrap();
 
         let (mut client_reader, mut client_writer) = tokio::io::split(client_stream);
@@ -493,13 +506,15 @@ async fn test_variable_size_coalescing_strategy() {
         info!("大小 {} bytes 测试通过", size);
     }
 
-    info!("--- 不同大小数据粘连策略测试通过 (总计 {} bytes) ---", total_received);
+    info!(
+        "--- 不同大小数据粘连策略测试通过 (总计 {} bytes) ---",
+        total_received
+    );
 }
 
 /// 测试粘连包的错误恢复机制
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_coalescing_error_recovery() {
-
     info!("--- 测试粘连包错误恢复机制 ---");
 
     let TestHarness {
@@ -556,11 +571,14 @@ async fn test_coalescing_error_recovery() {
         let data = b"Normal connection data";
         let config = Config::default();
         let initial_data = InitialData::new(data, &config).unwrap();
-        
-        match client1.connect_with_config(server_addr, Box::new(config), Some(initial_data)).await {
+
+        match client1
+            .connect_with_config(server_addr, Box::new(config), Some(initial_data))
+            .await
+        {
             Ok(stream) => {
                 let (mut reader, mut writer) = tokio::io::split(stream);
-                
+
                 let mut buf = vec![0u8; 10];
                 if let Ok(_) = reader.read_exact(&mut buf).await {
                     assert_eq!(&buf, b"RECOVERY_0");
@@ -578,11 +596,14 @@ async fn test_coalescing_error_recovery() {
         let data = b"Problem connection";
         let config = Config::default();
         let initial_data = InitialData::new(data, &config).unwrap();
-        
-        match client2.connect_with_config(server_addr, Box::new(config), Some(initial_data)).await {
+
+        match client2
+            .connect_with_config(server_addr, Box::new(config), Some(initial_data))
+            .await
+        {
             Ok(stream) => {
                 let (reader, mut writer) = tokio::io::split(stream);
-                
+
                 // 立即断开连接以模拟问题
                 writer.shutdown().await.unwrap();
                 drop(reader);
@@ -601,11 +622,14 @@ async fn test_coalescing_error_recovery() {
         let data = b"Recovery connection data";
         let config = Config::default();
         let initial_data = InitialData::new(data, &config).unwrap();
-        
-        match client3.connect_with_config(server_addr, Box::new(config), Some(initial_data)).await {
+
+        match client3
+            .connect_with_config(server_addr, Box::new(config), Some(initial_data))
+            .await
+        {
             Ok(stream) => {
                 let (mut reader, mut writer) = tokio::io::split(stream);
-                
+
                 let mut buf = vec![0u8; 10];
                 if let Ok(_) = reader.read_exact(&mut buf).await {
                     assert_eq!(&buf, b"RECOVERY_2");
@@ -623,7 +647,7 @@ async fn test_coalescing_error_recovery() {
 
     let successful = success_count.load(Ordering::SeqCst);
     info!("成功处理的连接数: {}", successful);
-    
+
     // 至少应该有1个成功连接（问题连接可能导致部分失败）
     assert!(successful >= 1);
 

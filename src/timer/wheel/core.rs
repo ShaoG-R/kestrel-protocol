@@ -1,11 +1,11 @@
 //! 时间轮核心实现
 //! Timing wheel core implementation
 
-use crate::timer::event::traits::EventDataTrait;
 use crate::timer::event::TimerEvent;
+use crate::timer::event::traits::EventDataTrait;
+use crate::timer::task::types::TimerCallback;
 use crate::timer::wheel::entry::{TimerEntry, TimerEntryId};
 use crate::timer::wheel::stats::TimingWheelStats;
-use crate::timer::task::types::TimerCallback;
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -61,8 +61,11 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
     pub fn new(slot_count: usize, slot_duration: Duration) -> Self {
         // 确保槽位数量是2的幂
         // Ensure slot count is power of 2
-        assert!(slot_count.is_power_of_two(), "slot_count must be a power of 2");
-        
+        assert!(
+            slot_count.is_power_of_two(),
+            "slot_count must be a power of 2"
+        );
+
         let now = Instant::now();
         let mut slots = Vec::with_capacity(slot_count);
         for _ in 0..slot_count {
@@ -71,7 +74,7 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
 
         Self {
             slot_count,
-            slot_mask: slot_count - 1,  // 用于快速模运算的掩码
+            slot_mask: slot_count - 1, // 用于快速模运算的掩码
             slot_duration,
             current_slot: 0,
             start_time: now,
@@ -85,7 +88,7 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
 
     /// 创建默认配置的时间轮
     /// Create timing wheel with default configuration
-    /// 
+    ///
     /// 默认配置：512个槽位，每个槽位100毫秒，总覆盖时间约51.2秒
     /// Default config: 512 slots, 100ms per slot, total coverage ~51.2 seconds
     pub fn new_default() -> Self {
@@ -101,7 +104,10 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
     /// # Returns
     /// 返回定时器条目ID列表
     /// Returns list of timer entry IDs
-    pub fn batch_add_timers(&mut self, timers: Vec<(Duration, TimerEvent<E, C>)>) -> Vec<TimerEntryId> {
+    pub fn batch_add_timers(
+        &mut self,
+        timers: Vec<(Duration, TimerEvent<E, C>)>,
+    ) -> Vec<TimerEntryId> {
         if timers.is_empty() {
             return Vec::new();
         }
@@ -109,31 +115,33 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
         let timer_count = timers.len();
         let mut result = Vec::with_capacity(timer_count);
         let mut earliest_expiry: Option<Instant> = self.cached_next_expiry;
-        
+
         // 预分配entry IDs，减少分配开销
         // Pre-allocate entry IDs to reduce allocation overhead
         let start_id = self.next_entry_id;
         self.next_entry_id += timer_count as u64;
-        
+
         // SIMD优化：批量生成ID序列和时间计算
         // SIMD optimization: batch generate ID sequences and time calculations
-        let (entry_ids, expiry_times, slot_indices) = self.simd_calculate_batch_metadata(&timers, start_id);
-        
+        let (entry_ids, expiry_times, slot_indices) =
+            self.simd_calculate_batch_metadata(&timers, start_id);
+
         // 按槽位分组定时器，减少散列访问
         // Group timers by slot to reduce scattered access
-        let mut slot_groups: HashMap<usize, Vec<(TimerEntryId, Instant, TimerEvent<E, C>)>> = HashMap::new();
-        
+        let mut slot_groups: HashMap<usize, Vec<(TimerEntryId, Instant, TimerEvent<E, C>)>> =
+            HashMap::new();
+
         // SIMD优化：批量分析槽位分布，减少HashMap查找
         // SIMD optimization: batch analyze slot distribution to reduce HashMap lookups
         let _slot_distribution = self.simd_analyze_slot_distribution(&slot_indices);
-        
+
         // 使用预计算的结果进行批量处理
         // Use pre-calculated results for batch processing
         for (index, (_delay, event)) in timers.into_iter().enumerate() {
             let entry_id = entry_ids[index];
             let expiry_time = expiry_times[index];
             let slot_index = slot_indices[index];
-            
+
             // 更新最早到期时间
             // Update earliest expiry time
             match earliest_expiry {
@@ -144,40 +152,41 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
                     }
                 }
             }
-            
+
             slot_groups
                 .entry(slot_index)
                 .or_insert_with(|| Vec::with_capacity(4))
                 .push((entry_id, expiry_time, event));
-            
+
             result.push(entry_id);
         }
-        
+
         // 批量插入到各个槽位
         // Batch insert into each slot
         for (slot_index, entries) in slot_groups {
             let slot = &mut self.slots[slot_index];
-            
+
             for (entry_id, expiry_time, event) in entries {
                 let position_in_slot = slot.len();
                 let entry = TimerEntry::new(entry_id, expiry_time, event);
                 slot.push_back(entry);
-                
+
                 // 记录定时器位置
                 // Record timer position
-                self.timer_map.insert(entry_id, (slot_index, position_in_slot));
+                self.timer_map
+                    .insert(entry_id, (slot_index, position_in_slot));
             }
         }
-        
+
         // 更新缓存
         // Update cache
         self.cached_next_expiry = earliest_expiry;
-        
+
         trace!(
             batch_size = result.len(),
             "Batch added timers to timing wheel"
         );
-        
+
         result
     }
 
@@ -197,11 +206,11 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
 
         let mut cancelled_count = 0;
         let mut need_cache_invalidation = false;
-        
+
         // 按槽位分组要取消的定时器，提高cache locality
         // Group timers to cancel by slot for better cache locality
         let mut slot_groups: HashMap<usize, Vec<(TimerEntryId, usize)>> = HashMap::new();
-        
+
         for &entry_id in entry_ids {
             if let Some((slot_index, position_in_slot)) = self.timer_map.get(&entry_id) {
                 slot_groups
@@ -210,21 +219,21 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
                     .push((entry_id, *position_in_slot));
             }
         }
-        
+
         // 批量处理每个槽位的取消操作
         // Batch process cancellation for each slot
         for (slot_index, entries) in slot_groups {
             if slot_index >= self.slots.len() {
                 continue;
             }
-            
+
             let slot = &mut self.slots[slot_index];
-            
+
             // 按位置倒序排序，从后往前删除避免位置偏移
             // Sort by position in reverse order, delete from back to front to avoid position shifts
             let mut entries = entries;
             entries.sort_by(|a, b| b.1.cmp(&a.1));
-            
+
             for (entry_id, position_in_slot) in entries {
                 if position_in_slot < slot.len() {
                     // 检查是否需要缓存失效
@@ -236,7 +245,7 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
                             }
                         }
                     }
-                    
+
                     // 智能删除：如果是最后一个元素，直接弹出；否则交换后弹出
                     // Smart deletion: if last element, pop directly; otherwise swap and pop
                     if position_in_slot == slot.len() - 1 {
@@ -244,32 +253,32 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
                     } else {
                         slot.swap(position_in_slot, slot.len() - 1);
                         slot.pop_back();
-                        
+
                         // 更新被交换元素的位置信息
                         // Update position info for swapped element
                         if let Some(swapped_entry) = slot.get(position_in_slot) {
-                            self.timer_map.insert(swapped_entry.id, (slot_index, position_in_slot));
+                            self.timer_map
+                                .insert(swapped_entry.id, (slot_index, position_in_slot));
                         }
                     }
-                    
+
                     self.timer_map.remove(&entry_id);
                     cancelled_count += 1;
                 }
             }
         }
-        
+
         // 智能缓存失效
         // Smart cache invalidation
         if need_cache_invalidation {
             self.cached_next_expiry = None;
         }
-        
+
         trace!(
             batch_size = entry_ids.len(),
-            cancelled_count,
-            "Batch cancelled timers"
+            cancelled_count, "Batch cancelled timers"
         );
-        
+
         cancelled_count
     }
 
@@ -291,15 +300,16 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
         let slot_index = self.calculate_slot_index(expiry_time);
 
         let entry = TimerEntry::new(entry_id, expiry_time, event);
-        
+
         // 将定时器添加到对应槽位
         // Add timer to corresponding slot
         let position_in_slot = self.slots[slot_index].len();
         self.slots[slot_index].push_back(entry);
-        
+
         // 记录定时器位置以便快速删除
         // Record timer position for fast deletion
-        self.timer_map.insert(entry_id, (slot_index, position_in_slot));
+        self.timer_map
+            .insert(entry_id, (slot_index, position_in_slot));
 
         // 更新缓存的下次到期时间
         // Update cached next expiry time
@@ -337,11 +347,11 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
             // Check if slot and position are valid
             if slot_index < self.slots.len() && position_in_slot < self.slots[slot_index].len() {
                 let slot = &mut self.slots[slot_index];
-                
+
                 // 智能缓存失效：在移除前先获取被取消定时器的到期时间
                 // Smart cache invalidation: get cancelled timer's expiry before removal
                 let cancelled_expiry = slot.get(position_in_slot).map(|entry| entry.expiry_time);
-                
+
                 // 从槽位中移除定时器
                 // Remove timer from slot
                 if position_in_slot == slot.len() - 1 {
@@ -353,17 +363,20 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
                     // Otherwise swap with last element and pop
                     slot.swap(position_in_slot, slot.len() - 1);
                     slot.pop_back();
-                    
+
                     // 更新被交换元素的位置信息
                     // Update position info for swapped element
                     if let Some(swapped_entry) = slot.get(position_in_slot) {
-                        self.timer_map.insert(swapped_entry.id, (slot_index, position_in_slot));
+                        self.timer_map
+                            .insert(swapped_entry.id, (slot_index, position_in_slot));
                     }
                 }
 
                 // 智能缓存失效：只有当取消的定时器可能影响最早时间时才清除缓存
                 // Smart cache invalidation: only clear cache if cancelled timer might affect earliest time
-                if let (Some(cached_expiry), Some(cancelled_expiry)) = (self.cached_next_expiry, cancelled_expiry) {
+                if let (Some(cached_expiry), Some(cancelled_expiry)) =
+                    (self.cached_next_expiry, cancelled_expiry)
+                {
                     // 只有当被取消的定时器到期时间小于等于缓存时间时才清除缓存
                     // Only clear cache if cancelled timer's expiry is less than or equal to cached time
                     if cancelled_expiry <= cached_expiry + Duration::from_millis(1) {
@@ -372,11 +385,14 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
                     // 否则缓存仍然有效，因为被取消的定时器不是最早的
                     // Otherwise cache is still valid as cancelled timer wasn't the earliest
                 }
-                
+
                 trace!(entry_id, "Timer cancelled successfully");
                 true
             } else {
-                warn!(entry_id, slot_index, position_in_slot, "Invalid timer position");
+                warn!(
+                    entry_id,
+                    slot_index, position_in_slot, "Invalid timer position"
+                );
                 false
             }
         } else {
@@ -396,16 +412,16 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
     /// Returns list of expired timers
     pub fn advance(&mut self, now: Instant) -> Vec<TimerEntry<E, C>> {
         let mut expired_timers = Vec::new();
-        
+
         // 首先检查当前槽位是否有已到期的定时器（处理零持续时间和立即到期的情况）
         // First check current slot for already expired timers (handle zero duration and immediate expiry)
         self.check_current_slot_for_expired_timers(now, &mut expired_timers);
-        
+
         // 计算需要推进多少个槽位
         // Calculate how many slots to advance
         let elapsed = now.saturating_duration_since(self.current_time);
         let slots_to_advance = (elapsed.as_nanos() / self.slot_duration.as_nanos()) as usize;
-        
+
         if slots_to_advance == 0 {
             return expired_timers;
         }
@@ -437,12 +453,12 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
                     entries_to_process.push(entry);
                 }
             }
-            
+
             for entry in entries_to_process {
                 // 从映射中移除
                 // Remove from mapping
                 self.timer_map.remove(&entry.id);
-                
+
                 // 检查定时器是否真的到期了
                 // Check if timer has actually expired
                 if entry.expiry_time <= now {
@@ -459,13 +475,10 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
                     let entry_id = entry.id;
                     let position_in_slot = self.slots[new_slot_index].len();
                     self.slots[new_slot_index].push_back(entry);
-                    self.timer_map.insert(entry_id, (new_slot_index, position_in_slot));
-                    
-                    trace!(
-                        entry_id,
-                        new_slot_index,
-                        "Timer moved to new slot"
-                    );
+                    self.timer_map
+                        .insert(entry_id, (new_slot_index, position_in_slot));
+
+                    trace!(entry_id, new_slot_index, "Timer moved to new slot");
                 }
             }
         }
@@ -495,27 +508,27 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
         if let Some(cached) = self.cached_next_expiry {
             return Some(cached);
         }
-        
+
         // 如果没有定时器，直接返回None
         // If no timers, return None directly
         if self.timer_map.is_empty() {
             return None;
         }
-        
+
         // 使用优化算法：按时间顺序检查槽位，大幅提升性能
         // Use optimized algorithm: check slots in time order, significantly improve performance
         let mut earliest_time: Option<Instant> = None;
-        
+
         // 从当前槽位开始，按时间顺序检查最多一轮槽位
         // Starting from current slot, check at most one round of slots in time order
         for offset in 0..self.slot_count {
             let slot_index = (self.current_slot + offset) & self.slot_mask;
             let slot = &self.slots[slot_index];
-            
+
             if slot.is_empty() {
                 continue; // 跳过空槽位，O(1)操作
             }
-            
+
             // 找到第一个非空槽位，在其中寻找最早的定时器
             // Found first non-empty slot, find earliest timer in it
             let mut slot_earliest: Option<Instant> = None;
@@ -529,7 +542,7 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
                     }
                 }
             }
-            
+
             // 比较当前槽位的最早时间和全局最早时间
             // Compare current slot's earliest time with global earliest time
             match (earliest_time, slot_earliest) {
@@ -541,7 +554,7 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
                 }
                 _ => {}
             }
-            
+
             // 早期退出优化：如果找到的时间在当前或更早的时间槽位，
             // 且该时间小于等于下一个槽位的基准时间，则可以确定这是最早的
             // Early exit optimization: if found time is in current or earlier slot,
@@ -595,10 +608,14 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
 
     /// 检查当前槽位中的已到期定时器（处理零持续时间等边界情况）
     /// Check current slot for expired timers (handle zero duration and edge cases)
-    fn check_current_slot_for_expired_timers(&mut self, now: Instant, expired_timers: &mut Vec<TimerEntry<E, C>>) {
+    fn check_current_slot_for_expired_timers(
+        &mut self,
+        now: Instant,
+        expired_timers: &mut Vec<TimerEntry<E, C>>,
+    ) {
         let current_slot = &mut self.slots[self.current_slot];
         let mut i = 0;
-        
+
         // 逆向遍历槽位，避免在移除元素时位置偏移
         // Traverse slot in reverse to avoid position shifts when removing elements
         while i < current_slot.len() {
@@ -608,24 +625,25 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimingWheel<E, C> {
                     // Timer expired, remove and add to results
                     let expired_entry = current_slot.remove(i).unwrap();
                     let entry_id = expired_entry.id;
-                    
+
                     // 从映射中移除
                     // Remove from mapping
                     self.timer_map.remove(&entry_id);
-                    
+
                     trace!(
                         entry_id,
                         expiry_time = ?expired_entry.expiry_time,
                         "Timer expired in current slot"
                     );
-                    
+
                     expired_timers.push(expired_entry);
-                    
+
                     // 更新后续元素的位置映射
                     // Update position mapping for subsequent elements
                     for j in i..current_slot.len() {
                         if let Some(remaining_entry) = current_slot.get(j) {
-                            self.timer_map.insert(remaining_entry.id, (self.current_slot, j));
+                            self.timer_map
+                                .insert(remaining_entry.id, (self.current_slot, j));
                         }
                     }
                 } else {

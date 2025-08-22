@@ -1,29 +1,26 @@
 //! Constructors for the `Endpoint`.
 
+use crate::core::endpoint::lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
+use crate::core::endpoint::timing::{TimeoutEvent, TimingManager};
+use crate::core::endpoint::types::{
+    channels::ChannelManager, identity::ConnectionIdentity, state::ConnectionState,
+    transport::TransportManager,
+};
 use crate::core::endpoint::{Endpoint, StreamCommand};
+use crate::core::reliability::{
+    coordination::flow_control_coordinator::FlowControlCoordinatorConfig,
+    logic::congestion::{traits::CongestionController, vegas_controller::VegasController},
+};
 use crate::socket::{Transport, TransportCommand};
 use crate::{
     config::Config,
-    socket::SocketActorCommand,
     error::Result,
+    socket::SocketActorCommand,
     timer::{HybridTimerTaskHandle, task::types::SenderCallback},
-};
-use crate::core::reliability::{
-    logic::congestion::{traits::CongestionController, vegas_controller::VegasController},
-    coordination::flow_control_coordinator::FlowControlCoordinatorConfig,
 };
 use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
-use crate::core::endpoint::lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
-use crate::core::endpoint::timing::{TimeoutEvent, TimingManager};
-use crate::core::endpoint::types::{
-    channels::ChannelManager,
-    identity::ConnectionIdentity,
-    state::ConnectionState,
-    transport::TransportManager,
-};
-
 
 impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     /// Creates a new `Endpoint` for the client-side.
@@ -38,10 +35,14 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
         timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
         congestion_controller: C,
         flow_control_config: FlowControlCoordinatorConfig,
-    ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
+    ) -> Result<(
+        Self,
+        mpsc::Sender<StreamCommand>,
+        mpsc::Receiver<Vec<Bytes>>,
+    )> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
-        
+
         // 创建定时器Actor用于批量定时器管理
         // Create timer actor for batch timer management
         let timer_actor = crate::timer::start_sender_timer_actor(timer_handle.clone(), None);
@@ -57,33 +58,31 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
             flow_control_config,
             config.clone(),
         );
-        
+
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer
         if let Err(e) = timing.register_idle_timeout(&config).await {
             return Err(crate::error::Error::TimerError(e.to_string()));
         }
-        
+
         if let Some(data) = initial_data {
             // 立即写入0-RTT数据到发送缓冲区
             // Immediately write the 0-RTT data to send buffer
-            transport.unified_reliability_mut().write_to_send_buffer(data);
+            transport
+                .unified_reliability_mut()
+                .write_to_send_buffer(data);
         }
 
-        let mut lifecycle_manager = DefaultLifecycleManager::new(
-            ConnectionState::Connecting,
-            config.clone(),
-        );
+        let mut lifecycle_manager =
+            DefaultLifecycleManager::new(ConnectionState::Connecting, config.clone());
         lifecycle_manager.initialize(local_cid, remote_addr)?;
 
-        
-        
         // 注册初始的空闲超时定时器
         // Register initial idle timeout timer
         if let Err(e) = timing.register_idle_timeout(&config).await {
             return Err(crate::error::Error::TimerError(e.to_string()));
         }
-        
+
         // 为客户端连接注册连接超时定时器（30秒超时）
         // Register connection timeout timer for client connection (30 seconds timeout)
         let connection_timeout = tokio::time::Duration::from_secs(30);
@@ -122,22 +121,24 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
         timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
         congestion_controller: C,
         flow_control_config: FlowControlCoordinatorConfig,
-    ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
+    ) -> Result<(
+        Self,
+        mpsc::Sender<StreamCommand>,
+        mpsc::Receiver<Vec<Bytes>>,
+    )> {
         let (tx_to_endpoint, rx_from_stream) = mpsc::channel(128);
         let (tx_to_stream, rx_from_endpoint) = mpsc::channel(128);
-        
+
         // 创建定时器Actor用于批量定时器管理
         // Create timer actor for batch timer management
         let timer_actor = crate::timer::start_sender_timer_actor(timer_handle.clone(), None);
-        
-        let mut lifecycle_manager = DefaultLifecycleManager::new(
-            ConnectionState::SynReceived,
-            config.clone(),
-        );
+
+        let mut lifecycle_manager =
+            DefaultLifecycleManager::new(ConnectionState::SynReceived, config.clone());
         lifecycle_manager.initialize(local_cid, remote_addr)?;
 
         let (mut timing, timer_event_rx) = TimingManager::new(local_cid, timer_handle);
-        
+
         // 创建使用统一可靠性层的传输管理器
         // Create transport manager with unified reliability layer
         let transport = TransportManager::new(
@@ -188,10 +189,14 @@ impl<T: Transport> Endpoint<T, VegasController> {
         command_tx: mpsc::Sender<SocketActorCommand>,
         initial_data: Option<Bytes>,
         timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
-    ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
+    ) -> Result<(
+        Self,
+        mpsc::Sender<StreamCommand>,
+        mpsc::Receiver<Vec<Bytes>>,
+    )> {
         let congestion_controller = VegasController::new(config.clone());
         let flow_control_config = FlowControlCoordinatorConfig::default();
-        
+
         Self::new_client(
             config,
             remote_addr,
@@ -203,7 +208,8 @@ impl<T: Transport> Endpoint<T, VegasController> {
             timer_handle,
             congestion_controller,
             flow_control_config,
-        ).await
+        )
+        .await
     }
 
     /// Creates a new `Endpoint` for the server-side with Vegas congestion control.
@@ -216,10 +222,14 @@ impl<T: Transport> Endpoint<T, VegasController> {
         sender: mpsc::Sender<TransportCommand<T>>,
         command_tx: mpsc::Sender<SocketActorCommand>,
         timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
-    ) -> Result<(Self, mpsc::Sender<StreamCommand>, mpsc::Receiver<Vec<Bytes>>)> {
+    ) -> Result<(
+        Self,
+        mpsc::Sender<StreamCommand>,
+        mpsc::Receiver<Vec<Bytes>>,
+    )> {
         let congestion_controller = VegasController::new(config.clone());
         let flow_control_config = FlowControlCoordinatorConfig::default();
-        
+
         Self::new_server(
             config,
             remote_addr,
@@ -231,6 +241,7 @@ impl<T: Transport> Endpoint<T, VegasController> {
             timer_handle,
             congestion_controller,
             flow_control_config,
-        ).await
+        )
+        .await
     }
-} 
+}

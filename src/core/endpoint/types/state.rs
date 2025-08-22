@@ -13,11 +13,11 @@ pub enum ConnectionState {
     /// The client is sending the initial SYN.
     /// 客户端正在发送初始SYN。
     Connecting,
-    
+
     /// The server has received the SYN and is waiting for the application to accept.
     /// 服务器已收到SYN，正在等待应用程序接受。
     SynReceived,
-    
+
     /// The connection is fully established and can send/receive data.
     /// 连接已完全建立，可以发送/接收数据。
     Established,
@@ -43,7 +43,7 @@ pub enum ConnectionState {
     /// It can no longer receive data, but can still send.
     /// 端点已从对等方收到FIN。它不能再接收数据，但仍然可以发送。
     FinWait,
-    
+
     /// The connection is fully closed and the endpoint should terminate.
     /// 连接已完全关闭。
     Closed,
@@ -148,4 +148,4 @@ mod tests {
         // Test Debug format
         assert_eq!(format!("{:?}", ConnectionState::Established), "Established");
     }
-} 
+}

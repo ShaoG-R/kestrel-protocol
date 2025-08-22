@@ -10,12 +10,12 @@
 //! patterns and lifecycle.
 
 use crate::{
-    packet::frame::Frame,
-    socket::{SocketActorCommand, Transport},
-    core::endpoint::types::command::StreamCommand,
-    socket::TransportCommand,
-    timer::event::TimerEventData,
     core::endpoint::timing::TimeoutEvent,
+    core::endpoint::types::command::StreamCommand,
+    packet::frame::Frame,
+    socket::TransportCommand,
+    socket::{SocketActorCommand, Transport},
+    timer::event::TimerEventData,
 };
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -27,23 +27,23 @@ pub struct ChannelManager<T: Transport> {
     /// 网络数据接收通道
     /// Network data receive channel
     pub(crate) receiver: mpsc::Receiver<(Frame, SocketAddr)>,
-    
+
     /// 网络数据发送通道
     /// Network data send channel
     pub(crate) sender: mpsc::Sender<TransportCommand<T>>,
-    
+
     /// Socket控制命令发送通道
     /// Socket control command send channel
     pub(crate) command_tx: mpsc::Sender<SocketActorCommand>,
-    
+
     /// 用户流命令接收通道
     /// User stream command receive channel
     pub(crate) rx_from_stream: mpsc::Receiver<StreamCommand>,
-    
+
     /// 用户流数据发送通道
     /// User stream data send channel
     pub(crate) tx_to_stream: Option<mpsc::Sender<Vec<Bytes>>>,
-    
+
     /// 定时器事件接收通道 - 事件驱动架构的核心
     /// Timer event receive channel - core of event-driven architecture
     pub(crate) timer_event_rx: mpsc::Receiver<TimerEventData<TimeoutEvent>>,
@@ -146,7 +146,9 @@ impl<T: Transport> ChannelManager<T> {
 
     /// 尝试非阻塞接收网络数据
     /// Try to receive network data non-blocking
-    pub fn try_recv_network_data(&mut self) -> Result<(Frame, SocketAddr), mpsc::error::TryRecvError> {
+    pub fn try_recv_network_data(
+        &mut self,
+    ) -> Result<(Frame, SocketAddr), mpsc::error::TryRecvError> {
         self.receiver.try_recv()
     }
 
@@ -170,7 +172,9 @@ impl<T: Transport> ChannelManager<T> {
 
     /// 尝试非阻塞接收定时器事件
     /// Try to receive timer event non-blocking
-    pub fn try_recv_timer_event(&mut self) -> Result<TimerEventData<TimeoutEvent>, mpsc::error::TryRecvError> {
+    pub fn try_recv_timer_event(
+        &mut self,
+    ) -> Result<TimerEventData<TimeoutEvent>, mpsc::error::TryRecvError> {
         self.timer_event_rx.try_recv()
     }
 
@@ -183,7 +187,9 @@ impl<T: Transport> ChannelManager<T> {
     /// 检查是否所有输入通道都已关闭
     /// Check if all input channels are closed
     pub fn are_input_channels_closed(&self) -> bool {
-        self.receiver.is_closed() && self.rx_from_stream.is_closed() && self.timer_event_rx.is_closed()
+        self.receiver.is_closed()
+            && self.rx_from_stream.is_closed()
+            && self.timer_event_rx.is_closed()
     }
 }
 
@@ -248,7 +254,7 @@ mod tests {
         // 测试发送数据到用户流
         let test_data = vec![Bytes::from("test data")];
         assert!(manager.send_to_user_stream(test_data.clone()).await.is_ok());
-        
+
         // 验证数据被正确接收
         let received = to_stream_rx.recv().await.unwrap();
         assert_eq!(received.len(), 1);
@@ -257,9 +263,14 @@ mod tests {
         // 测试关闭用户流
         manager.close_user_stream();
         assert!(manager.is_user_stream_closed());
-        
+
         // 关闭后发送应该失败
-        assert!(manager.send_to_user_stream(vec![Bytes::from("fail")]).await.is_err());
+        assert!(
+            manager
+                .send_to_user_stream(vec![Bytes::from("fail")])
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -286,7 +297,7 @@ mod tests {
         drop(frame_tx);
         drop(stream_cmd_tx);
         drop(timer_tx);
-        
+
         // 注意：这个测试可能需要一些时间让通道状态更新
         tokio::task::yield_now().await;
     }

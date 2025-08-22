@@ -5,6 +5,9 @@ use super::{
     event_loop::SocketEventLoop,
     transport::{BindableTransport, FrameBatch, ReceivedDatagram, Transport, TransportCommand},
 };
+use crate::socket::event_loop::draining::DrainingPool;
+use crate::socket::event_loop::routing::FrameRouter;
+use crate::socket::event_loop::session_coordinator::SocketSessionCoordinator;
 use crate::{
     config::Config,
     core::stream::Stream,
@@ -17,11 +20,8 @@ use bytes::Bytes;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
     io::AsyncWriteExt,
-    sync::{mpsc, Mutex},
+    sync::{Mutex, mpsc},
 };
-use crate::socket::event_loop::draining::DrainingPool;
-use crate::socket::event_loop::routing::FrameRouter;
-use crate::socket::event_loop::session_coordinator::SocketSessionCoordinator;
 
 #[cfg(test)]
 mod rebind;
@@ -45,7 +45,6 @@ impl MockTransport {
         };
         (transport, packet_tx)
     }
-
 }
 
 #[async_trait]
@@ -95,20 +94,20 @@ impl ActorTestHarness {
         let (accept_tx, accept_rx) = mpsc::channel(128);
         let (send_tx, outgoing_cmd_rx) = mpsc::channel(128);
 
-        let (mock_transport, incoming_packet_tx) = MockTransport::new("127.0.0.1:9999".parse().unwrap());
+        let (mock_transport, incoming_packet_tx) =
+            MockTransport::new("127.0.0.1:9999".parse().unwrap());
         let mock_transport = Arc::new(mock_transport);
 
         let config = Arc::new(Config::default());
 
         // 创建传输管理器用于测试
         // Create transport manager for testing
-        let transport_manager = super::transport::TransportManager::new(mock_transport.clone(), send_tx);
-        
+        let transport_manager =
+            super::transport::TransportManager::new(mock_transport.clone(), send_tx);
+
         // 创建帧路由管理器用于测试
         // Create frame router manager for testing
-        let frame_router = FrameRouter::new(
-            DrainingPool::new(config.connection.drain_timeout)
-        );
+        let frame_router = FrameRouter::new(DrainingPool::new(config.connection.drain_timeout));
 
         // 启动测试用全局定时器任务
         // Start global timer task for testing
@@ -148,16 +147,13 @@ impl ActorTestHarness {
             source_cid,
             0, // destination_cid is unknown for initial SYN
         );
-        
+
         let datagram = ReceivedDatagram {
             remote_addr: from_addr,
             frames: vec![syn_frame],
         };
-        
-        self.incoming_packet_tx
-            .send(datagram)
-            .await
-            .unwrap();
+
+        self.incoming_packet_tx.send(datagram).await.unwrap();
     }
 
     async fn get_sent_packets(&self) -> Vec<FrameBatch> {
@@ -205,11 +201,13 @@ async fn test_actor_sends_to_correct_address_after_accept() {
 
     // 5. Verification (Part 2): The Actor must send a `TransportCommand` to the transport
     // with the `remote_addr` correctly set to the client's address.
-    let transport_command =
-        tokio::time::timeout(std::time::Duration::from_secs(1), harness.outgoing_cmd_rx.recv())
-            .await
-            .expect("Actor did not dispatch a command to the transport")
-            .unwrap();
+    let transport_command = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        harness.outgoing_cmd_rx.recv(),
+    )
+    .await
+    .expect("Actor did not dispatch a command to the transport")
+    .unwrap();
 
     match transport_command {
         TransportCommand::Send(frame_batch) => {
@@ -398,11 +396,17 @@ async fn test_transport_layer_integration() {
 async fn test_socket_local_addr() {
     use super::handle::TransportReliableUdpSocket;
     use super::transport::udp::UdpTransport;
-    
+
     // 创建两个真实的UDP socket，并测试local_addr API
     // Create two real UDP sockets and test the local_addr API
-    let (socket_a, _listener_a) = TransportReliableUdpSocket::<UdpTransport>::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-    let (socket_b, _listener_b) = TransportReliableUdpSocket::<UdpTransport>::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let (socket_a, _listener_a) =
+        TransportReliableUdpSocket::<UdpTransport>::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+    let (socket_b, _listener_b) =
+        TransportReliableUdpSocket::<UdpTransport>::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
 
     // 获取它们的本地地址
     // Get their local addresses
@@ -411,18 +415,21 @@ async fn test_socket_local_addr() {
 
     // 验证地址不同
     // Verify the addresses are different
-    assert_ne!(addr_a, addr_b, "Different sockets should have different addresses");
-    
+    assert_ne!(
+        addr_a, addr_b,
+        "Different sockets should have different addresses"
+    );
+
     // 验证地址有效
     // Verify the addresses are valid
     assert!(addr_a.port() > 0, "Socket A should have a valid port");
     assert!(addr_b.port() > 0, "Socket B should have a valid port");
-    
+
     // 验证都绑定到localhost
     // Verify both are bound to localhost
     assert_eq!(addr_a.ip().to_string(), "127.0.0.1");
     assert_eq!(addr_b.ip().to_string(), "127.0.0.1");
-    
+
     println!("Socket A local address: {}", addr_a);
     println!("Socket B local address: {}", addr_b);
-} 
+}

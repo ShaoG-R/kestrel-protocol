@@ -2,7 +2,7 @@
 //!
 //! 用于批量帧传输的传输发送任务。
 
-use super::{command::TransportCommand, Transport};
+use super::{Transport, command::TransportCommand};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error};

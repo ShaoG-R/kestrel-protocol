@@ -3,8 +3,8 @@
 
 use crate::timer::event::traits::EventDataTrait;
 use crate::timer::parallel::types::ProcessedTimerData;
-use crate::timer::wheel::TimerEntry;
 use crate::timer::task::types::TimerCallback;
+use crate::timer::wheel::TimerEntry;
 use wide::{u32x8, u64x4};
 
 /// SIMD定时器处理器
@@ -43,13 +43,13 @@ impl<E: EventDataTrait> SIMDTimerProcessor<E> {
         // 预处理：提取连接ID用于u32x8向量化
         let connection_ids: Vec<u32> = timer_entries
             .iter()
-            .map(|entry| entry.event.data.connection_id) 
+            .map(|entry| entry.event.data.connection_id)
             .collect();
 
         // 使用u32x8并行处理连接ID
         self.simd_process_connection_ids(&connection_ids)?;
 
-        // 提取时间戳用于u64x4向量化  
+        // 提取时间戳用于u64x4向量化
         let expiry_times: Vec<u64> = timer_entries
             .iter()
             .map(|entry| {
@@ -82,17 +82,23 @@ impl<E: EventDataTrait> SIMDTimerProcessor<E> {
         connection_ids: &[u32],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut i = 0;
-        
+
         // 8路并行处理连接ID
         while i + 8 <= connection_ids.len() {
             let id_vec = u32x8::new([
-                connection_ids[i], connection_ids[i + 1], connection_ids[i + 2], connection_ids[i + 3],
-                connection_ids[i + 4], connection_ids[i + 5], connection_ids[i + 6], connection_ids[i + 7],
+                connection_ids[i],
+                connection_ids[i + 1],
+                connection_ids[i + 2],
+                connection_ids[i + 3],
+                connection_ids[i + 4],
+                connection_ids[i + 5],
+                connection_ids[i + 6],
+                connection_ids[i + 7],
             ]);
-            
+
             // SIMD并行验证和处理
             let processed_ids = id_vec.to_array();
-            
+
             // 这里可以添加更多SIMD处理逻辑
             for &processed_id in &processed_ids {
                 // 验证连接ID有效性等
@@ -100,16 +106,16 @@ impl<E: EventDataTrait> SIMDTimerProcessor<E> {
                     // 有效连接ID的处理逻辑
                 }
             }
-            
+
             i += 8;
         }
-        
+
         // 处理剩余的连接ID
         while i < connection_ids.len() {
             // 标量处理剩余元素
             i += 1;
         }
-        
+
         Ok(())
     }
 
@@ -120,33 +126,35 @@ impl<E: EventDataTrait> SIMDTimerProcessor<E> {
         timestamps: &[u64],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut i = 0;
-        
+
         // 4路并行处理时间戳
         while i + 4 <= timestamps.len() {
             let time_vec = u64x4::new([
-                timestamps[i], timestamps[i + 1], timestamps[i + 2], timestamps[i + 3]
+                timestamps[i],
+                timestamps[i + 1],
+                timestamps[i + 2],
+                timestamps[i + 3],
             ]);
-            
+
             // SIMD并行时间计算
-            let current_time_vec = u64x4::splat(
-                tokio::time::Instant::now().elapsed().as_nanos() as u64
-            );
-            
+            let current_time_vec =
+                u64x4::splat(tokio::time::Instant::now().elapsed().as_nanos() as u64);
+
             // 计算时间差
             let time_diffs = time_vec - current_time_vec;
             let _diff_array = time_diffs.to_array();
-            
+
             // 这里可以添加更多时间相关的SIMD计算
-            
+
             i += 4;
         }
-        
+
         // 处理剩余时间戳
         while i < timestamps.len() {
             // 标量处理剩余元素
             i += 1;
         }
-        
+
         Ok(())
     }
 }

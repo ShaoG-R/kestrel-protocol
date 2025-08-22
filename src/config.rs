@@ -57,7 +57,7 @@ pub struct ReliabilityConfig {
     pub control_frame_retry_interval: Duration,
     /// Enable layered retransmission mechanism.
     /// 启用分层重传机制。
-    pub enable_layered_retransmission: bool,    
+    pub enable_layered_retransmission: bool,
 
     /// The capacity of the send buffer in bytes.
     /// 发送缓冲区的容量（以字节为单位）。
@@ -196,4 +196,4 @@ impl Default for ConnectionConfig {
             path_validation_timeout: Duration::from_secs(5), // 5 seconds for path validation
         }
     }
-} 
+}

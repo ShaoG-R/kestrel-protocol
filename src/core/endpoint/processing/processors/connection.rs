@@ -8,19 +8,22 @@
 //! including connection establishment, connection acknowledgment,
 //! connection termination, etc.
 
-use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::ConnectionFrame};
-use crate::{
-    error::{Result, ProcessorErrorContext},
-    packet::frame::Frame,
-    socket::{Transport},
+use super::{
+    FrameProcessingContext, TypeSafeFrameProcessor, TypeSafeFrameValidator, UnifiedFrameProcessor,
+    frame_types::ConnectionFrame,
 };
+use crate::{
+    error::{ProcessorErrorContext, Result},
+    packet::frame::Frame,
+    socket::Transport,
+};
+use async_trait::async_trait;
 use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
-use async_trait::async_trait;
 
-use crate::core::endpoint::types::state::ConnectionState;
 use super::super::traits::ProcessorOperations;
+use crate::core::endpoint::types::state::ConnectionState;
 
 /// 连接管理帧处理器
 /// Connection management frame processor
@@ -54,18 +57,16 @@ impl<T: Transport> TypeSafeFrameProcessor<T> for ConnectionProcessor {
 // Implement type-safe validation interface
 impl TypeSafeFrameValidator for ConnectionProcessor {
     type FrameTypeMarker = ConnectionFrame;
-    
+
     /// 验证帧类型是否为连接管理帧
     /// Validate that the frame type is a connection management frame
     fn validate_frame_type(frame: &Frame) -> Result<()> {
         match frame {
             Frame::Syn { .. } | Frame::SynAck { .. } | Frame::Fin { .. } => Ok(()),
-            _ => Err(crate::error::Error::InvalidFrame(
-                format!(
-                    "ConnectionProcessor can only handle connection management frames (SYN/SYN-ACK/FIN), got: {:?}", 
-                    std::mem::discriminant(frame)
-                )
-            ))
+            _ => Err(crate::error::Error::InvalidFrame(format!(
+                "ConnectionProcessor can only handle connection management frames (SYN/SYN-ACK/FIN), got: {:?}",
+                std::mem::discriminant(frame)
+            ))),
         }
     }
 }
@@ -80,17 +81,11 @@ impl ConnectionProcessor {
         now: Instant,
     ) -> Result<()> {
         let context = FrameProcessingContext::new(endpoint, src_addr, now);
-        
+
         match frame {
-            Frame::Syn { header } => {
-                Self::handle_syn_frame(endpoint, header, context).await
-            }
-            Frame::SynAck { header } => {
-                Self::handle_syn_ack_frame(endpoint, header, context).await
-            }
-            Frame::Fin { header } => {
-                Self::handle_fin_frame(endpoint, header, context).await
-            }
+            Frame::Syn { header } => Self::handle_syn_frame(endpoint, header, context).await,
+            Frame::SynAck { header } => Self::handle_syn_ack_frame(endpoint, header, context).await,
+            Frame::Fin { header } => Self::handle_fin_frame(endpoint, header, context).await,
             _ => {
                 let error_context = ProcessorErrorContext::new(
                     "ConnectionProcessor",
@@ -104,7 +99,8 @@ impl ConnectionProcessor {
                         "connection management frame (SYN, SYN-ACK, or FIN)".to_string(),
                         format!("{:?}", std::mem::discriminant(&frame)),
                         error_context,
-                    ).into(),
+                    )
+                    .into(),
                 })
             }
         }
@@ -118,10 +114,9 @@ impl<T: Transport> UnifiedFrameProcessor<T> for ConnectionProcessor {
     type FrameType = ConnectionFrame;
 
     fn can_handle(frame: &Frame) -> bool {
-        matches!(frame, 
-            Frame::Syn { .. } |
-            Frame::SynAck { .. } |
-            Frame::Fin { .. }
+        matches!(
+            frame,
+            Frame::Syn { .. } | Frame::SynAck { .. } | Frame::Fin { .. }
         )
     }
 
@@ -138,8 +133,6 @@ impl<T: Transport> UnifiedFrameProcessor<T> for ConnectionProcessor {
         Self::process_connection_frame_internal(endpoint, frame, src_addr, now).await
     }
 }
-
-
 
 impl ConnectionProcessor {
     /// 处理 SYN 帧
@@ -165,7 +158,7 @@ impl ConnectionProcessor {
                 // If we receive another SYN, it might be a retransmission from the client
                 // because it hasn't received our SYN-ACK yet.
                 info!(cid = context.local_cid, "Received duplicate SYN, ignoring.");
-                
+
                 // 如果我们已经被触发发送 SYN-ACK（即发送缓冲区中有数据），
                 // 我们可以重新发送它。
                 // If we have already been triggered to send a SYN-ACK (i.e., data is in the
@@ -205,7 +198,7 @@ impl ConnectionProcessor {
                 // 取消连接超时定时器
                 // Cancel connection timeout timer
                 endpoint.cancel_connection_timeout().await;
-                
+
                 // 处理连接建立 - 使用新的生命周期管理器API
                 // Handle connection establishment - using new lifecycle manager API
                 endpoint.transition_state(ConnectionState::Established)?;
@@ -220,7 +213,7 @@ impl ConnectionProcessor {
                 } else {
                     endpoint.send_standalone_ack_frame().await?;
                 }
-                
+
                 info!(
                     cid = context.local_cid,
                     peer_cid = header.source_cid,
@@ -257,18 +250,12 @@ impl ConnectionProcessor {
             ConnectionState::SynReceived => {
                 Self::handle_fin_in_syn_received(endpoint, header).await
             }
-            ConnectionState::Established => {
-                Self::handle_fin_in_established(endpoint, header).await
-            }
+            ConnectionState::Established => Self::handle_fin_in_established(endpoint, header).await,
             ConnectionState::ValidatingPath { .. } => {
                 Self::handle_fin_in_validating_path(endpoint, header).await
             }
-            ConnectionState::FinWait => {
-                Self::handle_fin_in_fin_wait(endpoint, header).await
-            }
-            ConnectionState::Closing => {
-                Self::handle_fin_in_closing(endpoint, header).await
-            }
+            ConnectionState::FinWait => Self::handle_fin_in_fin_wait(endpoint, header).await,
+            ConnectionState::Closing => Self::handle_fin_in_closing(endpoint, header).await,
             _ => {
                 warn!(
                     cid = context.local_cid,
@@ -398,9 +385,9 @@ impl ConnectionProcessor {
 mod tests {
     use super::*;
     use crate::core::test_utils::MockTransport;
+    use crate::packet::command::Command;
     use crate::packet::frame::Frame;
     use crate::packet::header::{LongHeader, ShortHeader};
-    use crate::packet::command::Command;
 
     #[test]
     fn test_connection_processor_can_handle() {
@@ -408,7 +395,7 @@ mod tests {
             header: LongHeader {
                 command: Command::Syn,
                 protocol_version: 1,
-                destination_cid: 0, 
+                destination_cid: 0,
                 source_cid: 123,
             },
         };
@@ -434,9 +421,15 @@ mod tests {
             },
         };
 
-        assert!(<ConnectionProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&syn_frame));
-        assert!(<ConnectionProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&syn_ack_frame));
-        assert!(<ConnectionProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&fin_frame));
+        assert!(<ConnectionProcessor as UnifiedFrameProcessor<
+            MockTransport,
+        >>::can_handle(&syn_frame));
+        assert!(<ConnectionProcessor as UnifiedFrameProcessor<
+            MockTransport,
+        >>::can_handle(&syn_ack_frame));
+        assert!(<ConnectionProcessor as UnifiedFrameProcessor<
+            MockTransport,
+        >>::can_handle(&fin_frame));
 
         let push_frame = Frame::Push {
             header: ShortHeader {
@@ -451,11 +444,16 @@ mod tests {
             payload: bytes::Bytes::from("test data"),
         };
 
-        assert!(!<ConnectionProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&push_frame));
+        assert!(!<ConnectionProcessor as UnifiedFrameProcessor<
+            MockTransport,
+        >>::can_handle(&push_frame));
     }
 
     #[test]
     fn test_processor_name() {
-        assert_eq!(<ConnectionProcessor as UnifiedFrameProcessor<MockTransport>>::name(), "ConnectionProcessor");
+        assert_eq!(
+            <ConnectionProcessor as UnifiedFrameProcessor<MockTransport>>::name(),
+            "ConnectionProcessor"
+        );
     }
 }

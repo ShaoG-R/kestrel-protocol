@@ -4,19 +4,19 @@
 pub mod common;
 
 use common::harness::TestHarness;
-use kestrel_protocol::{
-    socket::handle::initial_data::InitialData,
-    config::Config,
-};
+use kestrel_protocol::{config::Config, socket::handle::initial_data::InitialData};
 use std::{
-    sync::{Arc, atomic::{AtomicU32, AtomicBool, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    time::{sleep, Instant},
+    time::{Instant, sleep},
 };
-use tracing::{info, warn, debug, Instrument};
+use tracing::{Instrument, debug, info, warn};
 
 /// 模拟网络延迟的辅助结构
 struct NetworkSimulator {
@@ -51,7 +51,6 @@ impl NetworkSimulator {
 /// 测试基础的早到帧缓存功能
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_basic_early_frame_caching() {
-
     info!("--- 测试基础早到帧缓存功能 ---");
 
     let TestHarness {
@@ -62,7 +61,7 @@ async fn test_basic_early_frame_caching() {
 
     let client = TestHarness::create_client().await;
     let network_sim = Arc::new(NetworkSimulator::new());
-    
+
     // 启用包乱序模拟
     network_sim.enable_reordering();
 
@@ -71,10 +70,12 @@ async fn test_basic_early_frame_caching() {
     let data_send_task = tokio::spawn(async move {
         // 模拟第二个数据包先到达的情况
         network_sim_clone.simulate_delay().await;
-        
+
         let config = Config::default();
         let initial_data = InitialData::new(b"Early frame test data", &config).unwrap();
-        client.connect_with_config(server_addr, Box::new(config), Some(initial_data)).await
+        client
+            .connect_with_config(server_addr, Box::new(config), Some(initial_data))
+            .await
     });
 
     // 服务器端处理
@@ -92,7 +93,10 @@ async fn test_basic_early_frame_caching() {
         reader.read_to_end(&mut buf).await.unwrap();
 
         if !buf.is_empty() {
-            info!("[Server] 成功接收早到帧数据: {:?}", String::from_utf8_lossy(&buf));
+            info!(
+                "[Server] 成功接收早到帧数据: {:?}",
+                String::from_utf8_lossy(&buf)
+            );
             assert_eq!(&buf, b"Early frame test data");
         }
     });
@@ -115,7 +119,6 @@ async fn test_basic_early_frame_caching() {
 /// 测试多客户端场景下的早到帧处理
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_client_early_frames() {
-
     const NUM_CLIENTS: usize = 3; // 减少并发数量避免超时
     info!("--- 测试多客户端早到帧处理 ({} 客户端) ---", NUM_CLIENTS);
 
@@ -150,15 +153,20 @@ async fn test_multi_client_early_frames() {
 
                     let received = String::from_utf8_lossy(&buf);
                     let expected = format!("Data from client {}", i);
-                    
+
                     if received.trim() == expected {
                         counter.fetch_add(1, Ordering::SeqCst);
                         debug!("[Server Handler {}] 成功处理早到帧", i);
                     } else {
-                        warn!("[Server Handler {}] 数据不匹配: 期望 '{}', 收到 '{}'", i, expected, received.trim());
+                        warn!(
+                            "[Server Handler {}] 数据不匹配: 期望 '{}', 收到 '{}'",
+                            i,
+                            expected,
+                            received.trim()
+                        );
                     }
                 }
-                .instrument(tracing::debug_span!("server_handler", id = i))
+                .instrument(tracing::debug_span!("server_handler", id = i)),
             );
             handlers.push(handler);
         }
@@ -185,7 +193,7 @@ async fn test_multi_client_early_frames() {
                 config.reliability.initial_rto = Duration::from_millis(2000); // 更保守的RTO
                 config.reliability.min_rto = Duration::from_millis(1000); // 更保守的最小RTO
                 let initial_data = InitialData::new(test_data.as_bytes(), &config).unwrap();
-                
+
                 let stream = client
                     .connect_with_config(server_addr, Box::new(config), Some(initial_data))
                     .await
@@ -193,24 +201,35 @@ async fn test_multi_client_early_frames() {
 
                 let (mut reader, mut writer) = tokio::io::split(stream);
 
-                    // 读取服务器ACK（动态长度）
-                    let mut ack_buf = Vec::new();
-                    reader.read_to_end(&mut ack_buf).await.unwrap();
-                    
-                    // 转换为字符串并验证
-                    let ack_str = String::from_utf8_lossy(&ack_buf);
-                    assert!(ack_str.starts_with("ACK"), "ACK should start with 'ACK', got: {}", ack_str);
-                    assert!(ack_str.len() >= 4, "ACK should have at least 4 characters, got: {}", ack_str);
-                    
-                    // 验证ACK ID部分是数字
-                    let ack_id_part = &ack_str[3..];
-                    assert!(ack_id_part.chars().all(|c| c.is_ascii_digit()), 
-                            "ACK ID should be digits, got: {}", ack_id_part);
+                // 读取服务器ACK（动态长度）
+                let mut ack_buf = Vec::new();
+                reader.read_to_end(&mut ack_buf).await.unwrap();
+
+                // 转换为字符串并验证
+                let ack_str = String::from_utf8_lossy(&ack_buf);
+                assert!(
+                    ack_str.starts_with("ACK"),
+                    "ACK should start with 'ACK', got: {}",
+                    ack_str
+                );
+                assert!(
+                    ack_str.len() >= 4,
+                    "ACK should have at least 4 characters, got: {}",
+                    ack_str
+                );
+
+                // 验证ACK ID部分是数字
+                let ack_id_part = &ack_str[3..];
+                assert!(
+                    ack_id_part.chars().all(|c| c.is_ascii_digit()),
+                    "ACK ID should be digits, got: {}",
+                    ack_id_part
+                );
 
                 writer.shutdown().await.unwrap();
                 debug!("[Client {}] 连接完成", i);
             }
-            .instrument(tracing::debug_span!("client", id = i))
+            .instrument(tracing::debug_span!("client", id = i)),
         );
         client_handles.push(handle);
     }
@@ -223,14 +242,16 @@ async fn test_multi_client_early_frames() {
 
     let successful = success_counter.load(Ordering::SeqCst);
     assert_eq!(successful as usize, NUM_CLIENTS);
-    
-    info!("--- 多客户端早到帧测试通过 ({}/{}) ---", successful, NUM_CLIENTS);
+
+    info!(
+        "--- 多客户端早到帧测试通过 ({}/{}) ---",
+        successful, NUM_CLIENTS
+    );
 }
 
 /// 测试早到帧的超时清理机制
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_early_frame_timeout_cleanup() {
-
     info!("--- 测试早到帧超时清理机制 ---");
 
     // 创建两个独立的测试环境避免连接冲突
@@ -263,13 +284,18 @@ async fn test_early_frame_timeout_cleanup() {
         info!("[Zombie Client] 发送0-RTT数据但服务器不响应");
         let config = Config::default();
         let initial_data = InitialData::new(b"Zombie data", &config).unwrap();
-        
+
         // 尝试连接但故意让它超时
         let connect_result = tokio::time::timeout(
             Duration::from_millis(500), // 增加超时时间
-            zombie_client.connect_with_config(zombie_server_addr, Box::new(config), Some(initial_data))
-        ).await;
-        
+            zombie_client.connect_with_config(
+                zombie_server_addr,
+                Box::new(config),
+                Some(initial_data),
+            ),
+        )
+        .await;
+
         match connect_result {
             Ok(_) => info!("[Zombie Client] 意外完成连接"),
             Err(_) => info!("[Zombie Client] 连接超时，模拟僵尸连接成功"),
@@ -293,7 +319,7 @@ async fn test_early_frame_timeout_cleanup() {
         // 读取客户端数据
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
-        
+
         assert_eq!(&buf, b"Normal data");
         info!("[Normal Server] 正常连接处理完成");
     });
@@ -306,7 +332,7 @@ async fn test_early_frame_timeout_cleanup() {
         config.connection.idle_timeout = Duration::from_secs(15);
         config.reliability.initial_rto = Duration::from_millis(1500);
         let initial_data = InitialData::new(b"Normal data", &config).unwrap();
-        
+
         let stream = normal_client
             .connect_with_config(normal_server_addr, Box::new(config), Some(initial_data))
             .await
@@ -326,7 +352,7 @@ async fn test_early_frame_timeout_cleanup() {
     // 等待正常连接完成
     let normal_client_result = normal_client_handle.await;
     let normal_server_result = normal_server_handle.await;
-    
+
     // 检查正常连接是否成功
     normal_client_result.unwrap();
     normal_server_result.unwrap();
@@ -348,9 +374,11 @@ async fn test_early_frame_timeout_cleanup() {
 /// 测试高频率的包乱序场景
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_high_frequency_packet_reordering() {
-
     const NUM_RAPID_CLIENTS: usize = 50;
-    info!("--- 测试高频率包乱序场景 ({} 快速客户端) ---", NUM_RAPID_CLIENTS);
+    info!(
+        "--- 测试高频率包乱序场景 ({} 快速客户端) ---",
+        NUM_RAPID_CLIENTS
+    );
 
     let TestHarness {
         server_addr,
@@ -401,10 +429,10 @@ async fn test_high_frequency_packet_reordering() {
             // 创建具有特定模式的数据
             let mut test_data = vec![(i % 256) as u8; 20];
             test_data[0] = (i % 256) as u8; // 标识符
-            
+
             let config = Config::default();
             let initial_data = InitialData::new(&test_data, &config).unwrap();
-            
+
             let stream = client
                 .connect_with_config(server_addr, Box::new(config), Some(initial_data))
                 .await
@@ -430,11 +458,14 @@ async fn test_high_frequency_packet_reordering() {
 
     let elapsed = start_time.elapsed();
     let successful = success_counter.load(Ordering::SeqCst);
-    
+
     info!("--- 高频率包乱序测试结果 ---");
     info!("成功连接: {}/{}", successful, NUM_RAPID_CLIENTS);
     info!("总耗时: {:?}", elapsed);
-    info!("平均连接时间: {:.2} ms", elapsed.as_millis() as f64 / NUM_RAPID_CLIENTS as f64);
+    info!(
+        "平均连接时间: {:.2} ms",
+        elapsed.as_millis() as f64 / NUM_RAPID_CLIENTS as f64
+    );
 
     assert_eq!(successful as usize, NUM_RAPID_CLIENTS);
     info!("--- 高频率包乱序测试通过 ---");
@@ -443,23 +474,25 @@ async fn test_high_frequency_packet_reordering() {
 /// 测试早到帧缓存的内存管理
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn test_early_frame_memory_management() {
-
     const NUM_PHASES: usize = 5;
     const CLIENTS_PER_PHASE: usize = 20;
-    info!("--- 测试早到帧缓存内存管理 ({} 阶段, 每阶段 {} 客户端) ---", NUM_PHASES, CLIENTS_PER_PHASE);
+    info!(
+        "--- 测试早到帧缓存内存管理 ({} 阶段, 每阶段 {} 客户端) ---",
+        NUM_PHASES, CLIENTS_PER_PHASE
+    );
 
     let total_success = Arc::new(AtomicU32::new(0));
 
     for phase in 0..NUM_PHASES {
         info!("=== 阶段 {} ===", phase + 1);
-        
+
         // 为每个阶段创建新的TestHarness
         let TestHarness {
             server_addr,
             mut server_listener,
             ..
         } = TestHarness::new().await;
-        
+
         let phase_success = Arc::new(AtomicU32::new(0));
         let server_counter = phase_success.clone();
         let total_counter = total_success.clone();
@@ -503,7 +536,7 @@ async fn test_early_frame_memory_management() {
                 let data = format!("Phase {} Client {} Data", phase, i);
                 let config = Config::default();
                 let initial_data = InitialData::new(data.as_bytes(), &config).unwrap();
-                
+
                 let stream = client
                     .connect_with_config(server_addr, Box::new(config), Some(initial_data))
                     .await
@@ -524,11 +557,16 @@ async fn test_early_frame_memory_management() {
         for handle in client_handles {
             handle.await.unwrap();
         }
-        
+
         server_handle.await.unwrap();
 
         let phase_count = phase_success.load(Ordering::SeqCst);
-        info!("阶段 {} 完成: {}/{} 成功", phase + 1, phase_count, CLIENTS_PER_PHASE);
+        info!(
+            "阶段 {} 完成: {}/{} 成功",
+            phase + 1,
+            phase_count,
+            CLIENTS_PER_PHASE
+        );
 
         // 在阶段间添加短暂延迟，让缓存清理机制工作
         if phase < NUM_PHASES - 1 {
@@ -538,10 +576,10 @@ async fn test_early_frame_memory_management() {
 
     let total_count = total_success.load(Ordering::SeqCst);
     let expected_total = NUM_PHASES * CLIENTS_PER_PHASE;
-    
+
     info!("--- 早到帧缓存内存管理测试结果 ---");
     info!("总成功连接: {}/{}", total_count, expected_total);
-    
+
     assert_eq!(total_count as usize, expected_total);
     info!("--- 早到帧缓存内存管理测试通过 ---");
 }
@@ -549,7 +587,6 @@ async fn test_early_frame_memory_management() {
 /// 测试极端乱序场景下的数据完整性
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_extreme_reordering_data_integrity() {
-
     info!("--- 测试极端乱序场景数据完整性 ---");
 
     let TestHarness {
@@ -580,7 +617,7 @@ async fn test_extreme_reordering_data_integrity() {
 
         // 验证数据完整性
         assert_eq!(received_data.len(), 512);
-        
+
         // 验证数据模式
         for i in 0..256 {
             assert_eq!(received_data[i], i as u8);

@@ -1,13 +1,8 @@
 //! Commands used by the socket actor and sender task.
 
-use crate::{
-    config::Config,
-    core::stream::Stream,
-    error::Result,
-};
-use std::{net::SocketAddr};
+use crate::{config::Config, core::stream::Stream, error::Result};
+use std::net::SocketAddr;
 use tokio::sync::oneshot;
-
 
 /// Commands sent to the `SocketActor`.
 ///
@@ -45,4 +40,4 @@ pub enum SocketActorCommand {
     GetLocalAddr {
         response_tx: oneshot::Sender<Result<SocketAddr>>,
     },
-} 
+}

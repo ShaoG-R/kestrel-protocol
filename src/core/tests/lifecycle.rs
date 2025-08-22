@@ -6,7 +6,7 @@ use crate::{
         test_utils::{setup_client_server_pair, setup_server_harness},
     },
     packet::frame::Frame,
-    socket::{TransportCommand},
+    socket::TransportCommand,
 };
 use bytes::Bytes;
 use std::time::Duration;
@@ -71,7 +71,6 @@ async fn test_connect_and_send_data() {
 
 #[tokio::test]
 async fn test_connection_migration() {
-
     let mut harness = setup_server_harness().await;
     let old_addr = harness.client_addr;
     let new_addr: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
@@ -123,20 +122,29 @@ async fn test_connection_migration() {
     };
 
     // Verify the PATH_CHALLENGE packet
-    assert_eq!(challenge_cmd.remote_addr, new_addr, "Challenge should be sent to the new address");
-    let challenge_data = if let Frame::PathChallenge { challenge_data, .. } = challenge_cmd.frames[0] {
-        challenge_data
-    } else {
-        panic!("Expected a PathChallenge frame, got {:?}", challenge_cmd.frames[0]);
-    };
+    assert_eq!(
+        challenge_cmd.remote_addr, new_addr,
+        "Challenge should be sent to the new address"
+    );
+    let challenge_data =
+        if let Frame::PathChallenge { challenge_data, .. } = challenge_cmd.frames[0] {
+            challenge_data
+        } else {
+            panic!(
+                "Expected a PathChallenge frame, got {:?}",
+                challenge_cmd.frames[0]
+            );
+        };
 
     // Verify the ACK packet
-    assert_eq!(ack_cmd.remote_addr, old_addr, "ACK should be sent to the old address");
+    assert_eq!(
+        ack_cmd.remote_addr, old_addr,
+        "ACK should be sent to the old address"
+    );
     assert!(matches!(ack_cmd.frames[0], Frame::Ack { .. }));
 
     // 4. Simulate the client sending a PATH_RESPONSE back.
-    let response_frame =
-        Frame::new_path_response(2, 999, 0, challenge_data); // Timestamps aren't critical here
+    let response_frame = Frame::new_path_response(2, 999, 0, challenge_data); // Timestamps aren't critical here
     harness
         .tx_to_endpoint_network
         .send((response_frame, new_addr))
@@ -147,20 +155,27 @@ async fn test_connection_migration() {
     //    and verify it gets sent to the new address.
     harness
         .tx_to_endpoint_user
-        .send(StreamCommand::SendData(Bytes::from_static(b"data after migration")))
+        .send(StreamCommand::SendData(Bytes::from_static(
+            b"data after migration",
+        )))
         .await
         .unwrap();
 
-    let push_after_migration_cmd =
-        tokio::time::timeout(Duration::from_millis(100), harness.rx_from_endpoint_network.recv())
-            .await
-            .expect("should receive a PUSH after migration")
-            .unwrap();
+    let push_after_migration_cmd = tokio::time::timeout(
+        Duration::from_millis(100),
+        harness.rx_from_endpoint_network.recv(),
+    )
+    .await
+    .expect("should receive a PUSH after migration")
+    .unwrap();
 
     if let TransportCommand::Send(cmd) = push_after_migration_cmd {
-        assert_eq!(cmd.remote_addr, new_addr, "PUSH should now be sent to the new, migrated address");
+        assert_eq!(
+            cmd.remote_addr, new_addr,
+            "PUSH should now be sent to the new, migrated address"
+        );
         assert!(matches!(cmd.frames[0], Frame::Push { .. }));
     } else {
         panic!("Expected a Send command");
     }
-} 
+}

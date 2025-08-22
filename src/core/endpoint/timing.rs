@@ -8,15 +8,14 @@
 //! including connection start time, last receive time, timeout checks, etc.
 
 use crate::config::Config;
+use crate::core::endpoint::unified_scheduler::{TimeoutLayer, UnifiedTimeoutScheduler};
 use crate::timer::{
+    HybridTimerTaskHandle, TimerActorHandle,
+    actor::ActorTimerId,
     event::{ConnectionId, TimerEventData},
     task::TimerRegistration,
-    HybridTimerTaskHandle,
-    TimerActorHandle,
-    actor::ActorTimerId,
     task::types::SenderCallback,
 };
-use crate::core::endpoint::unified_scheduler::{TimeoutLayer, UnifiedTimeoutScheduler};
 use std::collections::HashMap;
 use tokio::{
     sync::mpsc,
@@ -105,17 +104,20 @@ pub struct TimerManager {
 impl TimerManager {
     /// 创建新的定时器管理器并返回接收通道
     /// Create new timer manager and return receiver channel
-    /// 
+    ///
     /// 用于事件驱动架构，将接收通道传递给ChannelManager
     /// Used for event-driven architecture, passing receiver channel to ChannelManager
-    pub fn new_with_receiver(connection_id: ConnectionId, timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
+    pub fn new_with_receiver(
+        connection_id: ConnectionId,
+        timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
+    ) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
         // 单一通道由外部拥有接收端；内部不保留接收端，避免“双读”与语义歧义
         let (timeout_tx, external_rx) = mpsc::channel(32);
-        
+
         // 创建定时器Actor用于批量处理
         // Create timer actor for batch processing
         let timer_actor = crate::timer::start_timer_actor(timer_handle, None);
-        
+
         let manager = Self {
             connection_id,
             timer_actor,
@@ -141,9 +143,11 @@ impl TimerManager {
         if self.active_timer_types.contains_key(&timeout_event) {
             // 先取消旧的定时器
             // Cancel old timer first
-            self.timer_actor.cancel_timer(self.connection_id, timeout_event).await;
+            self.timer_actor
+                .cancel_timer(self.connection_id, timeout_event)
+                .await;
         }
-        
+
         // 注册新的定时器
         // Register new timer
         let registration = TimerRegistration::new(
@@ -169,7 +173,10 @@ impl TimerManager {
     /// Cancel timer of specified type
     pub async fn cancel_timer(&mut self, timeout_event: &TimeoutEvent) -> bool {
         if self.active_timer_types.remove(timeout_event).is_some() {
-            let cancelled_count = self.timer_actor.cancel_timer(self.connection_id, *timeout_event).await;
+            let cancelled_count = self
+                .timer_actor
+                .cancel_timer(self.connection_id, *timeout_event)
+                .await;
             let success = cancelled_count > 0;
             trace!(timeout_event = ?timeout_event, cancelled_count = cancelled_count, success = success, "Cancelled timer via TimerActor");
             success
@@ -184,17 +191,19 @@ impl TimerManager {
         if self.active_timer_types.is_empty() {
             return;
         }
-        
+
         // 准备批量取消请求
         // Prepare batch cancellation requests
-        let cancel_requests: Vec<_> = self.active_timer_types.keys()
+        let cancel_requests: Vec<_> = self
+            .active_timer_types
+            .keys()
             .map(|&timeout_event| (self.connection_id, timeout_event))
             .collect();
-        
+
         // 清空活跃定时器跟踪
         // Clear active timer tracking
         self.active_timer_types.clear();
-        
+
         if !cancel_requests.is_empty() {
             let cancelled_count = self.timer_actor.batch_cancel_timers(cancel_requests).await;
             trace!(cancelled = cancelled_count, "Batch cancelled all timers");
@@ -210,14 +219,20 @@ impl TimerManager {
 
     /// 注册路径验证超时定时器
     /// Register path validation timeout timer
-    pub async fn register_path_validation_timeout(&mut self, delay: Duration) -> Result<(), &'static str> {
+    pub async fn register_path_validation_timeout(
+        &mut self,
+        delay: Duration,
+    ) -> Result<(), &'static str> {
         self.register_timer(TimeoutEvent::PathValidationTimeout, delay)
             .await
     }
 
     /// 注册连接超时定时器
     /// Register connection timeout timer
-    pub async fn register_connection_timeout(&mut self, delay: Duration) -> Result<(), &'static str> {
+    pub async fn register_connection_timeout(
+        &mut self,
+        delay: Duration,
+    ) -> Result<(), &'static str> {
         self.register_timer(TimeoutEvent::ConnectionTimeout, delay)
             .await
     }
@@ -249,7 +264,7 @@ pub struct TimingManager {
     /// FIN处理定时器ID（如果有活跃的FIN处理定时器）
     /// FIN processing timer ID (if there's an active FIN processing timer)
     fin_processing_timer_id: Option<ActorTimerId>,
-    
+
     /// FIN是否已发送标志
     /// FIN sent flag
     fin_sent: bool,
@@ -270,12 +285,16 @@ pub struct TimingManager {
 impl TimingManager {
     /// 创建新的时间管理器
     /// Create new timing manager
-    /// 
+    ///
     /// 返回时间管理器和定时器事件接收通道，用于事件驱动架构
     /// Returns timing manager and timer event receiver channel for event-driven architecture
-    pub fn new(connection_id: ConnectionId, timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
+    pub fn new(
+        connection_id: ConnectionId,
+        timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
+    ) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
         let now = Instant::now();
-        let (timer_manager, timer_rx) = TimerManager::new_with_receiver(connection_id, timer_handle.clone());
+        let (timer_manager, timer_rx) =
+            TimerManager::new_with_receiver(connection_id, timer_handle.clone());
 
         let timing_manager = Self {
             start_time: now,
@@ -293,7 +312,7 @@ impl TimingManager {
 
     /// 创建带指定开始时间的时间管理器
     /// Create timing manager with specified start time
-    /// 
+    ///
     /// 返回时间管理器和定时器事件接收通道，用于事件驱动架构
     /// Returns timing manager and timer event receiver channel for event-driven architecture
     pub fn with_start_time(
@@ -301,7 +320,8 @@ impl TimingManager {
         connection_id: ConnectionId,
         timer_handle: HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>>,
     ) -> (Self, mpsc::Receiver<TimerEventData<TimeoutEvent>>) {
-        let (timer_manager, timer_rx) = TimerManager::new_with_receiver(connection_id, timer_handle.clone());
+        let (timer_manager, timer_rx) =
+            TimerManager::new_with_receiver(connection_id, timer_handle.clone());
 
         let timing_manager = Self {
             start_time,
@@ -322,7 +342,10 @@ impl TimingManager {
 
     /// 处理超时事件（包含路径验证和FIN处理超时）
     /// Handle timeout event (including path validation and FIN processing timeout handling)
-    pub async fn handle_timeout_event(&mut self, timeout_event: TimeoutEvent) -> Result<(), &'static str> {
+    pub async fn handle_timeout_event(
+        &mut self,
+        timeout_event: TimeoutEvent,
+    ) -> Result<(), &'static str> {
         match timeout_event {
             TimeoutEvent::PathValidationTimeout => {
                 // 路径验证超时已由lifecycle manager处理，这里只记录统计信息
@@ -335,9 +358,9 @@ impl TimingManager {
                 // 清除定时器ID，因为定时器已触发
                 // Clear timer ID since timer has fired
                 self.fin_processing_timer_id = None;
-                
+
                 trace!("FIN processing timeout triggered, checking if EOF can be sent");
-                
+
                 // 这里我们只是设置一个标志，实际的EOF处理会在上层代码中完成
                 // Here we just set a flag, actual EOF handling will be done in upper layer code
                 // 因为EOF处理需要访问channels等Endpoint的其他字段
@@ -359,7 +382,9 @@ impl TimingManager {
         timeout_event: TimeoutEvent,
         delay: Duration,
     ) -> Result<(), &'static str> {
-        self.timer_manager.register_timer(timeout_event, delay).await
+        self.timer_manager
+            .register_timer(timeout_event, delay)
+            .await
     }
 
     /// 取消指定类型的定时器
@@ -382,13 +407,21 @@ impl TimingManager {
 
     /// 注册路径验证超时定时器
     /// Register path validation timeout timer
-    pub async fn register_path_validation_timeout(&mut self, delay: Duration) -> Result<(), &'static str> {
-        self.timer_manager.register_path_validation_timeout(delay).await
+    pub async fn register_path_validation_timeout(
+        &mut self,
+        delay: Duration,
+    ) -> Result<(), &'static str> {
+        self.timer_manager
+            .register_path_validation_timeout(delay)
+            .await
     }
 
     /// 注册连接超时定时器
     /// Register connection timeout timer
-    pub async fn register_connection_timeout(&mut self, delay: Duration) -> Result<(), &'static str> {
+    pub async fn register_connection_timeout(
+        &mut self,
+        delay: Duration,
+    ) -> Result<(), &'static str> {
         self.timer_manager.register_connection_timeout(delay).await
     }
 
@@ -465,7 +498,10 @@ impl TimingManager {
             // When clearing FIN pending EOF, cancel the timer
             self.fin_pending_eof = false;
             if let Some(timer_id) = self.fin_processing_timer_id.take() {
-                self.timer_manager.timer_actor.cancel_timer_by_id(timer_id).await;
+                self.timer_manager
+                    .timer_actor
+                    .cancel_timer_by_id(timer_id)
+                    .await;
             }
         }
     }
@@ -488,9 +524,12 @@ impl TimingManager {
         // 如果已有活跃的定时器，先取消
         // If there's already an active timer, cancel it first
         if let Some(timer_id) = self.fin_processing_timer_id.take() {
-            self.timer_manager.timer_actor.cancel_timer_by_id(timer_id).await;
+            self.timer_manager
+                .timer_actor
+                .cancel_timer_by_id(timer_id)
+                .await;
         }
-        
+
         // 注册新的FIN处理定时器（10ms后检查）
         // Register new FIN processing timer (check after 10ms)
         let delay = Duration::from_millis(10);
@@ -500,7 +539,12 @@ impl TimingManager {
             TimeoutEvent::FinProcessingTimeout,
             SenderCallback::new(self.timer_manager.timeout_tx.clone()),
         );
-        match self.timer_manager.timer_actor.register_timer(registration).await {
+        match self
+            .timer_manager
+            .timer_actor
+            .register_timer(registration)
+            .await
+        {
             Ok(timer_id) => {
                 self.fin_processing_timer_id = Some(timer_id);
                 trace!("Scheduled FIN processing check in {:?}", delay);
@@ -553,22 +597,24 @@ impl TimingManager {
     pub fn is_fin_sent(&self) -> bool {
         self.fin_sent
     }
-    
+
     /// 标记FIN帧已发送
     /// Mark FIN frame as sent
     pub fn mark_fin_sent(&mut self) {
         self.fin_sent = true;
     }
-    
+
     /// 更新平均验证时间
     /// Update average validation time
     fn update_average_validation_time(&mut self, new_time: Duration) {
         if self.path_validation_stats.successful_validations == 0 {
             self.path_validation_stats.average_validation_time = new_time;
         } else {
-            let total_time = self.path_validation_stats.average_validation_time * (self.path_validation_stats.successful_validations as u32)
+            let total_time = self.path_validation_stats.average_validation_time
+                * (self.path_validation_stats.successful_validations as u32)
                 + new_time;
-            self.path_validation_stats.average_validation_time = total_time / ((self.path_validation_stats.successful_validations + 1) as u32);
+            self.path_validation_stats.average_validation_time =
+                total_time / ((self.path_validation_stats.successful_validations + 1) as u32);
         }
     }
 
@@ -578,13 +624,16 @@ impl TimingManager {
         let now = Instant::now();
         self.last_recv_time = now;
         self.fin_pending_eof = false;
-        
+
         // 取消FIN处理定时器
         // Cancel FIN processing timer
         if let Some(timer_id) = self.fin_processing_timer_id.take() {
-            self.timer_manager.timer_actor.cancel_timer_by_id(timer_id).await;
+            self.timer_manager
+                .timer_actor
+                .cancel_timer_by_id(timer_id)
+                .await;
         }
-        
+
         // 重置路径验证统计信息（可选）
         // Reset path validation statistics (optional)
         // self.path_validation_stats = PathValidationStats::default();
@@ -597,11 +646,14 @@ impl TimingManager {
         self.start_time = now;
         self.last_recv_time = now;
         self.fin_pending_eof = false;
-        
+
         // 取消FIN处理定时器
         // Cancel FIN processing timer
         if let Some(timer_id) = self.fin_processing_timer_id.take() {
-            self.timer_manager.timer_actor.cancel_timer_by_id(timer_id).await;
+            self.timer_manager
+                .timer_actor
+                .cancel_timer_by_id(timer_id)
+                .await;
         }
     }
 
@@ -843,11 +895,11 @@ impl TimeoutLayer for TimingManager {
         let default_idle_timeout = Duration::from_secs(30);
         Some(self.last_recv_time + default_idle_timeout)
     }
-    
+
     fn layer_name(&self) -> &'static str {
         "TimingManager"
     }
-    
+
     fn stats(&self) -> Option<String> {
         Some(format!(
             "connection_duration: {:?}, time_since_last_recv: {:?}, fin_pending_eof: {}",
@@ -864,15 +916,16 @@ impl TimeoutLayer for TimingManager {
 #[cfg(test)]
 mod tests {
     //! Tests for timing module after refactoring to use lifecycle manager for path validation
-    //! 
+    //!
     //! 重构后使用lifecycle manager管理路径验证的timing模块测试
 
     use super::*;
     use crate::config::Config;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     // 创建测试用的定时器句柄
-    fn create_test_timer_handle() -> HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>> {
+    fn create_test_timer_handle()
+    -> HybridTimerTaskHandle<TimeoutEvent, SenderCallback<TimeoutEvent>> {
         crate::timer::start_hybrid_timer_task::<TimeoutEvent, SenderCallback<TimeoutEvent>>()
     }
 
@@ -885,7 +938,7 @@ mod tests {
         assert!(manager.connection_duration() <= Duration::from_millis(1));
         assert!(manager.time_since_last_recv() <= Duration::from_millis(1));
         assert!(!manager.is_fin_pending_eof());
-        
+
         // 清理定时器任务
         let _ = timer_handle.shutdown().await;
     }
@@ -895,11 +948,12 @@ mod tests {
         let start = Instant::now();
         let connection_id = 1;
         let timer_handle = create_test_timer_handle();
-        let (manager, _timer_rx) = TimingManager::with_start_time(start, connection_id, timer_handle.clone());
+        let (manager, _timer_rx) =
+            TimingManager::with_start_time(start, connection_id, timer_handle.clone());
 
         assert_eq!(manager.start_time(), start);
         assert_eq!(manager.last_recv_time(), start);
-        
+
         // 清理定时器任务
         let _ = timer_handle.shutdown().await;
     }
@@ -923,7 +977,7 @@ mod tests {
 
         // 检查开始时间没有改变
         assert_eq!(manager.start_time(), initial_start);
-        
+
         // 清理定时器任务
         let _ = timer_handle.shutdown().await;
     }
@@ -932,13 +986,25 @@ mod tests {
     fn test_timeout_event_enum() {
         // 测试超时事件枚举的基本功能
         assert_eq!(TimeoutEvent::IdleTimeout, TimeoutEvent::IdleTimeout);
-        assert_ne!(TimeoutEvent::IdleTimeout, TimeoutEvent::PathValidationTimeout);
-        
+        assert_ne!(
+            TimeoutEvent::IdleTimeout,
+            TimeoutEvent::PathValidationTimeout
+        );
+
         // 测试新的基于数据包的重传超时事件
-        let packet_timeout1 = TimeoutEvent::PacketRetransmissionTimeout { sequence_number: 1, timer_id: 123 };
-        let packet_timeout2 = TimeoutEvent::PacketRetransmissionTimeout { sequence_number: 1, timer_id: 123 };
-        let packet_timeout3 = TimeoutEvent::PacketRetransmissionTimeout { sequence_number: 2, timer_id: 124 };
-        
+        let packet_timeout1 = TimeoutEvent::PacketRetransmissionTimeout {
+            sequence_number: 1,
+            timer_id: 123,
+        };
+        let packet_timeout2 = TimeoutEvent::PacketRetransmissionTimeout {
+            sequence_number: 1,
+            timer_id: 123,
+        };
+        let packet_timeout3 = TimeoutEvent::PacketRetransmissionTimeout {
+            sequence_number: 2,
+            timer_id: 124,
+        };
+
         assert_eq!(packet_timeout1, packet_timeout2);
         assert_ne!(packet_timeout1, packet_timeout3);
         assert_ne!(packet_timeout1, TimeoutEvent::ConnectionTimeout);
@@ -970,7 +1036,7 @@ mod tests {
         // 清除FIN挂起
         manager.clear_fin_pending_eof().await;
         assert!(!manager.is_fin_pending_eof());
-        
+
         // 清理定时器任务
         let _ = timer_handle.shutdown().await;
     }
@@ -987,13 +1053,15 @@ mod tests {
         assert!(result.is_ok());
 
         // 注册路径验证超时定时器
-        let result = manager.register_path_validation_timeout(Duration::from_millis(100)).await;
+        let result = manager
+            .register_path_validation_timeout(Duration::from_millis(100))
+            .await;
         assert!(result.is_ok());
 
         // 取消定时器
         let cancelled = manager.cancel_timer(&TimeoutEvent::IdleTimeout).await;
         assert!(cancelled);
-        
+
         // 清理定时器任务
         let _ = timer_handle.shutdown().await;
     }
@@ -1005,16 +1073,20 @@ mod tests {
         let (mut manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
 
         // 测试FIN处理超时
-        let result = manager.handle_timeout_event(TimeoutEvent::FinProcessingTimeout).await;
+        let result = manager
+            .handle_timeout_event(TimeoutEvent::FinProcessingTimeout)
+            .await;
         assert!(result.is_ok());
 
         // 测试路径验证超时
-        let result = manager.handle_timeout_event(TimeoutEvent::PathValidationTimeout).await;
+        let result = manager
+            .handle_timeout_event(TimeoutEvent::PathValidationTimeout)
+            .await;
         assert!(result.is_ok());
-        
+
         // 验证统计信息更新
         assert_eq!(manager.path_validation_stats().timeout_count, 1);
-        
+
         // 清理定时器任务
         let _ = timer_handle.shutdown().await;
     }
@@ -1040,12 +1112,15 @@ mod tests {
         let validation_time = Duration::from_millis(100);
         manager.on_path_validation_succeeded(validation_time);
         assert_eq!(manager.path_validation_stats().successful_validations, 1);
-        assert_eq!(manager.path_validation_stats().average_validation_time, validation_time);
+        assert_eq!(
+            manager.path_validation_stats().average_validation_time,
+            validation_time
+        );
 
         // 模拟路径验证失败
         manager.on_path_validation_failed(true);
         assert_eq!(manager.path_validation_stats().challenge_failure_count, 1);
-        
+
         // 清理定时器任务
         let _ = timer_handle.shutdown().await;
     }
@@ -1066,7 +1141,7 @@ mod tests {
         let timeout_time = now + config.connection.idle_timeout + Duration::from_millis(100);
         assert!(manager.check_idle_timeout(&config, timeout_time));
         assert!(manager.should_trigger_timeout_handling(&config, timeout_time));
-        
+
         // 清理定时器任务
         let _ = timer_handle.shutdown().await;
     }
@@ -1088,7 +1163,7 @@ mod tests {
         // 检查最后接收时间是否更新
         assert!(manager.last_recv_time() > initial_time);
         assert!((manager.last_recv_time() - now).as_millis() < 5); // 允许小误差
-        
+
         // 清理定时器任务
         let _ = timer_handle.shutdown().await;
     }
@@ -1109,10 +1184,10 @@ mod tests {
 
         let updated_deadline = manager.next_connection_timeout_deadline(&config);
         assert!(updated_deadline.is_some());
-        
+
         // 新的截止时间应该比初始截止时间晚
         assert!(updated_deadline.unwrap() > initial_deadline.unwrap());
-        
+
         // 清理定时器任务
         let _ = timer_handle.shutdown().await;
     }
@@ -1130,7 +1205,7 @@ mod tests {
 
         // 重置管理器
         manager.reset().await;
-        
+
         // 检查重置后的状态
         assert!(!manager.is_fin_pending_eof());
         assert_eq!(manager.start_time(), original_start); // 开始时间应该保持不变
@@ -1138,7 +1213,7 @@ mod tests {
         // 测试完全重置
         manager.reset_all().await;
         assert!(manager.start_time() > original_start); // 开始时间应该更新
-        
+
         // 清理定时器任务
         let _ = timer_handle.shutdown().await;
     }
@@ -1168,7 +1243,7 @@ mod tests {
 
         // 重置统计信息
         manager.reset_unified_scheduler_stats();
-        
+
         // 清理定时器任务
         let _ = timer_handle.shutdown().await;
     }

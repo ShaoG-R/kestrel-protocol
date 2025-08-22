@@ -6,11 +6,8 @@ use tokio::time::Instant;
 
 use crate::{
     config::Config,
-    core::reliability::{
-        UnifiedReliabilityLayer,
-        logic::congestion::traits::CongestionController,
-    },
-    packet::frame::Frame
+    core::reliability::{UnifiedReliabilityLayer, logic::congestion::traits::CongestionController},
+    packet::frame::Frame,
 };
 
 /// Creates a SYN frame.
@@ -35,13 +32,7 @@ pub(in crate::core::endpoint) fn create_ack_frame<C: CongestionController>(
 ) -> Frame {
     let (sack_ranges, recv_next, window_size) = reliability.get_acknowledgment_info();
     let timestamp = Instant::now().duration_since(start_time).as_millis() as u32;
-    Frame::new_ack(
-        peer_cid,
-        recv_next,
-        window_size,
-        &sack_ranges,
-        timestamp,
-    )
+    Frame::new_ack(peer_cid, recv_next, window_size, &sack_ranges, timestamp)
 }
 
 /// Creates a FIN frame with automatic sequence number management.
@@ -80,7 +71,6 @@ pub(crate) fn create_path_challenge_frame<C: CongestionController>(
     Frame::new_path_challenge(peer_cid, sequence_number, timestamp, challenge_data)
 }
 
-
 /// Creates a PATH_RESPONSE frame.
 pub(crate) fn create_path_response_frame(
     peer_cid: u32,
@@ -95,19 +85,29 @@ pub(crate) fn create_path_response_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use crate::core::reliability::logic::congestion::vegas_controller::VegasController;
+    use bytes::Bytes;
 
     async fn create_test_reliability_layer() -> UnifiedReliabilityLayer<VegasController> {
         let config = Config::default();
         let connection_id = 1; // Test connection ID
-        let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent, crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>>();
+        let timer_handle = crate::timer::start_hybrid_timer_task::<
+            crate::core::endpoint::timing::TimeoutEvent,
+            crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>,
+        >();
         let timer_actor = crate::timer::start_sender_timer_actor(timer_handle, None);
         let (tx_to_endpoint, _rx_from_stream) = tokio::sync::mpsc::channel(128);
         let congestion_controller = VegasController::new(config.clone());
         let flow_control_config = crate::core::reliability::coordination::flow_control_coordinator::FlowControlCoordinatorConfig::default();
-        UnifiedReliabilityLayer::new(connection_id, timer_actor, tx_to_endpoint, congestion_controller, flow_control_config, config)
-    }   
+        UnifiedReliabilityLayer::new(
+            connection_id,
+            timer_actor,
+            tx_to_endpoint,
+            congestion_controller,
+            flow_control_config,
+            config,
+        )
+    }
 
     #[test]
     fn test_create_syn_frame() {
@@ -158,4 +158,4 @@ mod tests {
             _ => panic!("Incorrect frame type"),
         }
     }
-} 
+}

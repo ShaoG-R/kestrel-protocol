@@ -13,9 +13,9 @@ use super::{
     validation::StateValidator,
 };
 use crate::{
+    config::Config,
     core::endpoint::types::state::ConnectionState,
     error::{Error, Result},
-    config::Config,
 };
 use std::net::SocketAddr;
 use tokio::{sync::oneshot, time::Instant};
@@ -176,21 +176,22 @@ impl ConnectionLifecycleManager for DefaultLifecycleManager {
         self.cid = local_cid;
         self.remote_addr = Some(remote_addr);
         self.start_time = Instant::now();
-        
+
         // 更新状态转换执行器的连接ID
         // Update the connection ID in the state transition executor
         self.transition_executor.set_cid(local_cid);
-        
+
         // 触发初始化事件
         // Trigger initialization event
-        self.transition_executor.trigger_initialization_event(local_cid, remote_addr);
-        
+        self.transition_executor
+            .trigger_initialization_event(local_cid, remote_addr);
+
         info!(
             cid = local_cid,
             ?remote_addr,
             "Connection lifecycle initialized"
         );
-        
+
         Ok(())
     }
 
@@ -224,7 +225,10 @@ impl ConnectionLifecycleManager for DefaultLifecycleManager {
 
         // 使用状态转换执行器执行转换
         // Use state transition executor to execute transition
-        match self.transition_executor.execute_transition(&self.current_state, new_state) {
+        match self
+            .transition_executor
+            .execute_transition(&self.current_state, new_state)
+        {
             Ok(resulting_state) => {
                 self.current_state = resulting_state;
                 Ok(())
@@ -258,7 +262,10 @@ impl ConnectionLifecycleManager for DefaultLifecycleManager {
 
         // 使用状态转换执行器处理优雅关闭
         // Use state transition executor to handle graceful shutdown
-        match self.transition_executor.execute_graceful_shutdown(&self.current_state) {
+        match self
+            .transition_executor
+            .execute_graceful_shutdown(&self.current_state)
+        {
             Ok(resulting_state) => {
                 self.current_state = resulting_state;
                 Ok(())
@@ -277,7 +284,7 @@ impl ConnectionLifecycleManager for DefaultLifecycleManager {
         // 触发强制关闭事件
         // Trigger force close event
         self.transition_executor.trigger_force_close_event();
-        
+
         // 执行转换到Closed状态
         // Execute transition to Closed state
         self.transition_to(ConnectionState::Closed)
@@ -310,11 +317,7 @@ impl ConnectionLifecycleManager for DefaultLifecycleManager {
     }
 
     fn complete_path_validation(&mut self, success: bool) -> Result<()> {
-        debug!(
-            cid = self.cid,
-            success,
-            "Completing path validation"
-        );
+        debug!(cid = self.cid, success, "Completing path validation");
 
         // 验证当前是否正在进行路径验证
         // Validate if path validation is currently in progress
@@ -324,8 +327,9 @@ impl ConnectionLifecycleManager for DefaultLifecycleManager {
 
         // 触发路径验证完成事件
         // Trigger path validation completed event
-        self.transition_executor.trigger_path_validation_completed(success);
-        
+        self.transition_executor
+            .trigger_path_validation_completed(success);
+
         // 无论成功还是失败，都转换回Established状态
         // Transition back to Established state regardless of success or failure
         self.transition_to(ConnectionState::Established)
@@ -343,9 +347,9 @@ impl ConnectionLifecycleManager for DefaultLifecycleManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::endpoint::lifecycle::transitions::LifecycleEvent;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};
-    use crate::core::endpoint::lifecycle::transitions::LifecycleEvent;
 
     fn create_test_config() -> Config {
         Config::default()
@@ -374,16 +378,16 @@ mod tests {
         let config = create_test_config();
         let mut manager = DefaultLifecycleManager::new(ConnectionState::Connecting, config);
         let addr = create_test_address();
-        
+
         manager.initialize(12345, addr).unwrap();
 
         // 测试正常的状态转换
         assert!(manager.transition_to(ConnectionState::Established).is_ok());
         assert_eq!(manager.state_name(), "Established");
-        
+
         assert!(manager.transition_to(ConnectionState::Closing).is_ok());
         assert_eq!(manager.state_name(), "Closing");
-        
+
         assert!(manager.transition_to(ConnectionState::Closed).is_ok());
         assert_eq!(manager.state_name(), "Closed");
     }
@@ -393,7 +397,7 @@ mod tests {
         let config = create_test_config();
         let mut manager = DefaultLifecycleManager::new(ConnectionState::Closed, config);
         let addr = create_test_address();
-        
+
         manager.initialize(12345, addr).unwrap();
 
         // 测试无效的状态转换（从Closed到其他状态应该失败，除了到Closed本身）
@@ -406,7 +410,7 @@ mod tests {
         let config = create_test_config();
         let mut manager = DefaultLifecycleManager::new(ConnectionState::Connecting, config);
         let addr = create_test_address();
-        
+
         manager.initialize(12345, addr).unwrap();
 
         // 在Connecting状态下不能发送数据
@@ -434,7 +438,7 @@ mod tests {
         let config = create_test_config();
         let mut manager = DefaultLifecycleManager::new(ConnectionState::Established, config);
         let addr = create_test_address();
-        
+
         manager.initialize(12345, addr).unwrap();
 
         // 从Established状态开始优雅关闭
@@ -443,7 +447,8 @@ mod tests {
         assert!(manager.is_closing());
 
         // 从Connecting状态开始优雅关闭应该转换到Closing状态
-        let mut manager2 = DefaultLifecycleManager::new(ConnectionState::Connecting, create_test_config());
+        let mut manager2 =
+            DefaultLifecycleManager::new(ConnectionState::Connecting, create_test_config());
         manager2.initialize(12346, addr).unwrap();
         assert!(manager2.begin_graceful_shutdown().is_ok());
         assert_eq!(manager2.state_name(), "Closing");
@@ -455,7 +460,7 @@ mod tests {
         let config = create_test_config();
         let mut manager = DefaultLifecycleManager::new(ConnectionState::Established, config);
         let addr = create_test_address();
-        
+
         manager.initialize(12345, addr).unwrap();
 
         // 强制关闭应该总是成功的
@@ -469,7 +474,7 @@ mod tests {
         let config = create_test_config();
         let mut manager = DefaultLifecycleManager::new(ConnectionState::Connecting, config);
         let addr = create_test_address();
-        
+
         manager.initialize(12345, addr).unwrap();
 
         // 测试活跃状态检查
@@ -495,12 +500,12 @@ mod tests {
         let mut manager = DefaultLifecycleManager::new(ConnectionState::Established, config);
         let addr = create_test_address();
         let new_addr = SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 9090);
-        
+
         manager.initialize(12345, addr).unwrap();
 
         // 创建一个dummy的oneshot channel
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        
+
         // 开始路径验证
         assert!(manager.start_path_validation(new_addr, 12345, tx).is_ok());
         assert_eq!(manager.state_name(), "ValidatingPath");
@@ -538,18 +543,34 @@ mod tests {
         // 检查收集到的事件
         let captured_events = events.lock().unwrap();
         assert!(!captured_events.is_empty());
-        
+
         // 应该包含初始化事件
-        assert!(captured_events.iter().any(|e| matches!(e, LifecycleEvent::ConnectionInitialized { .. })));
-        
+        assert!(
+            captured_events
+                .iter()
+                .any(|e| matches!(e, LifecycleEvent::ConnectionInitialized { .. }))
+        );
+
         // 应该包含状态转换事件
-        assert!(captured_events.iter().any(|e| matches!(e, LifecycleEvent::StateTransition { .. })));
-        
+        assert!(
+            captured_events
+                .iter()
+                .any(|e| matches!(e, LifecycleEvent::StateTransition { .. }))
+        );
+
         // 应该包含强制关闭事件
-        assert!(captured_events.iter().any(|e| matches!(e, LifecycleEvent::ForceClose)));
-        
+        assert!(
+            captured_events
+                .iter()
+                .any(|e| matches!(e, LifecycleEvent::ForceClose))
+        );
+
         // 应该包含连接关闭事件
-        assert!(captured_events.iter().any(|e| matches!(e, LifecycleEvent::ConnectionClosed)));
+        assert!(
+            captured_events
+                .iter()
+                .any(|e| matches!(e, LifecycleEvent::ConnectionClosed))
+        );
     }
 
     #[test]
@@ -562,8 +583,8 @@ mod tests {
 
         // 清除监听器
         manager.clear_event_listeners();
-        
+
         // 验证清除成功（通过触发事件，检查没有panic或其他问题）
         manager.trigger_timeout();
     }
-} 
+}

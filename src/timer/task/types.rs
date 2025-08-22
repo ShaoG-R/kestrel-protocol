@@ -3,24 +3,26 @@
 //!
 //! 本模块提供完全基于泛型的定时器回调系统，实现零成本抽象。
 //!
-//! This module provides a fully generic-based timer callback system 
+//! This module provides a fully generic-based timer callback system
 //! that achieves zero-cost abstraction.
 
+use crate::timer::event::traits::EventDataTrait;
 use crate::timer::{
-    event::{TimerEventData, ConnectionId},
+    event::{ConnectionId, TimerEventData},
     wheel::TimerEntryId,
 };
-use crate::timer::event::traits::EventDataTrait;
 use async_trait::async_trait;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use super::commands::{TimerTaskCommand, TimerError};
+use super::commands::{TimerError, TimerTaskCommand};
 
 /// 定时器回调 trait，完全基于泛型
 /// Timer callback trait, fully generic-based
 #[async_trait]
-pub trait TimerCallback<E: EventDataTrait>: Send + Sync + Clone + std::fmt::Debug + 'static {
+pub trait TimerCallback<E: EventDataTrait>:
+    Send + Sync + Clone + std::fmt::Debug + 'static
+{
     /// 处理定时器超时事件
     /// Handle timer timeout event
     async fn on_timeout(&self, event_data: TimerEventData<E>) -> Result<(), ()>;
@@ -57,7 +59,7 @@ impl<E: EventDataTrait> TimerCallback<E> for SenderCallback<E> {
 /// 基于闭包的回调实现
 /// Closure-based callback implementation
 #[derive(Clone)]
-pub struct ClosureCallback<E: EventDataTrait, F> 
+pub struct ClosureCallback<E: EventDataTrait, F>
 where
     F: Fn(TimerEventData<E>) -> Result<(), ()> + Send + Sync + Clone + 'static,
 {
@@ -130,8 +132,8 @@ impl<E: EventDataTrait> TimerCallback<E> for NoOpCallback<E> {
 /// 定时器注册请求（完全泛型版本）
 /// Timer registration request (fully generic version)
 #[derive(Debug, Clone)]
-pub struct TimerRegistration<E, C> 
-where 
+pub struct TimerRegistration<E, C>
+where
     E: EventDataTrait,
     C: TimerCallback<E>,
 {
@@ -149,8 +151,8 @@ where
     pub callback: C,
 }
 
-impl<E, C> TimerRegistration<E, C> 
-where 
+impl<E, C> TimerRegistration<E, C>
+where
     E: EventDataTrait,
     C: TimerCallback<E>,
 {
@@ -199,17 +201,8 @@ impl<E: EventDataTrait> SenderTimerRegistration<E> {
 impl<E: EventDataTrait> NoOpTimerRegistration<E> {
     /// 创建空回调类型的定时器注册
     /// Create no-op callback type timer registration
-    pub fn with_no_op(
-        connection_id: ConnectionId,
-        delay: Duration,
-        timeout_event: E,
-    ) -> Self {
-        Self::new(
-            connection_id,
-            delay,
-            timeout_event,
-            NoOpCallback::new(),
-        )
+    pub fn with_no_op(connection_id: ConnectionId, delay: Duration, timeout_event: E) -> Self {
+        Self::new(connection_id, delay, timeout_event, NoOpCallback::new())
     }
 }
 
@@ -388,9 +381,9 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimerHandle<E, C> {
     /// Cancel timer
     pub async fn cancel(&self) -> Result<bool, TimerError> {
         use tokio::sync::oneshot;
-        
+
         let (response_tx, response_rx) = oneshot::channel();
-        
+
         let command = TimerTaskCommand::CancelTimer {
             entry_id: self.entry_id,
             response_tx,
@@ -401,8 +394,6 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimerHandle<E, C> {
             .await
             .map_err(|_| TimerError::TaskShutdown)?;
 
-        response_rx
-            .await
-            .map_err(|_| TimerError::TaskShutdown)
+        response_rx.await.map_err(|_| TimerError::TaskShutdown)
     }
 }

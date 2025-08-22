@@ -8,18 +8,21 @@
 //! related frames, including path challenges, path responses,
 //! address validation, etc.
 
-use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::PathFrame};
+use super::super::traits::ProcessorOperations;
+use super::{
+    FrameProcessingContext, TypeSafeFrameProcessor, TypeSafeFrameValidator, UnifiedFrameProcessor,
+    frame_types::PathFrame,
+};
+use crate::core::endpoint::types::state::ConnectionState;
 use crate::{
-    error::{Result, ProcessorErrorContext},
+    error::{ProcessorErrorContext, Result},
     packet::frame::Frame,
     socket::{SocketActorCommand, Transport},
 };
+use async_trait::async_trait;
 use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
-use async_trait::async_trait;
-use crate::core::endpoint::types::state::ConnectionState;
-use super::super::traits::ProcessorOperations;
 
 /// 路径验证帧处理器
 /// Path validation frame processor
@@ -53,18 +56,16 @@ impl<T: Transport> TypeSafeFrameProcessor<T> for PathProcessor {
 // Implement type-safe validation interface
 impl TypeSafeFrameValidator for PathProcessor {
     type FrameTypeMarker = PathFrame;
-    
+
     /// 验证帧类型是否为路径验证帧
     /// Validate that the frame type is a path validation frame
     fn validate_frame_type(frame: &Frame) -> Result<()> {
         match frame {
             Frame::PathChallenge { .. } | Frame::PathResponse { .. } => Ok(()),
-            _ => Err(crate::error::Error::InvalidFrame(
-                format!(
-                    "PathProcessor can only handle path validation frames (PathChallenge/PathResponse), got: {:?}", 
-                    std::mem::discriminant(frame)
-                )
-            ))
+            _ => Err(crate::error::Error::InvalidFrame(format!(
+                "PathProcessor can only handle path validation frames (PathChallenge/PathResponse), got: {:?}",
+                std::mem::discriminant(frame)
+            ))),
         }
     }
 }
@@ -84,17 +85,11 @@ impl PathProcessor {
             Frame::PathChallenge {
                 header,
                 challenge_data,
-            } => {
-                Self::handle_path_challenge_frame(endpoint, header, challenge_data, context)
-                    .await
-            }
+            } => Self::handle_path_challenge_frame(endpoint, header, challenge_data, context).await,
             Frame::PathResponse {
                 header,
                 challenge_data,
-            } => {
-                Self::handle_path_response_frame(endpoint, header, challenge_data, context)
-                    .await
-            }
+            } => Self::handle_path_response_frame(endpoint, header, challenge_data, context).await,
             _ => {
                 let error_context = ProcessorErrorContext::new(
                     "PathProcessor",
@@ -108,7 +103,8 @@ impl PathProcessor {
                         "path validation frame (PathChallenge or PathResponse)".to_string(),
                         format!("{:?}", std::mem::discriminant(&frame)),
                         error_context,
-                    ).into(),
+                    )
+                    .into(),
                 })
             }
         }
@@ -122,9 +118,9 @@ impl<T: Transport> UnifiedFrameProcessor<T> for PathProcessor {
     type FrameType = PathFrame;
 
     fn can_handle(frame: &Frame) -> bool {
-        matches!(frame, 
-            Frame::PathChallenge { .. } |
-            Frame::PathResponse { .. }
+        matches!(
+            frame,
+            Frame::PathChallenge { .. } | Frame::PathResponse { .. }
         )
     }
 
@@ -141,8 +137,6 @@ impl<T: Transport> UnifiedFrameProcessor<T> for PathProcessor {
         Self::process_path_frame_internal(endpoint, frame, src_addr, now).await
     }
 }
-
-
 
 impl PathProcessor {
     /// 处理 PathChallenge 帧
@@ -243,7 +237,9 @@ impl PathProcessor {
 
         // 使用高级接口发送路径响应
         // Use high-level interface to send path response
-        endpoint.send_path_response(header.sequence_number, challenge_data, src_addr).await?;
+        endpoint
+            .send_path_response(header.sequence_number, challenge_data, src_addr)
+            .await?;
 
         Ok(())
     }
@@ -306,10 +302,10 @@ impl PathProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_utils::MockTransport;
     use crate::packet::command::Command;
     use crate::packet::frame::Frame;
     use crate::packet::header::ShortHeader;
-    use crate::core::test_utils::MockTransport;
 
     #[test]
     fn test_path_processor_can_handle() {
@@ -339,12 +335,16 @@ mod tests {
             challenge_data: 0x1234567890abcdef,
         };
 
-        assert!(<PathProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(
-            &path_challenge_frame
-        ));
-        assert!(<PathProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(
-            &path_response_frame
-        ));
+        assert!(
+            <PathProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(
+                &path_challenge_frame
+            )
+        );
+        assert!(
+            <PathProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(
+                &path_response_frame
+            )
+        );
 
         let push_frame = Frame::Push {
             header: ShortHeader {
@@ -359,9 +359,7 @@ mod tests {
             payload: bytes::Bytes::from("test data"),
         };
 
-        assert!(!<PathProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(
-            &push_frame
-        ));
+        assert!(!<PathProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&push_frame));
     }
 
     #[test]

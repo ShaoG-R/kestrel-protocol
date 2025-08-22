@@ -5,7 +5,10 @@ use crate::{
     config::Config,
     error::Result,
     packet::frame::Frame,
-    socket::{SocketActorCommand, transport::{FrameBatch, ReceivedDatagram, Transport, TransportCommand}},
+    socket::{
+        SocketActorCommand,
+        transport::{FrameBatch, ReceivedDatagram, Transport, TransportCommand},
+    },
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -13,8 +16,8 @@ use std::{
     collections::VecDeque,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -40,11 +43,8 @@ impl std::fmt::Debug for MockTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "MockTransport {{ local_addr: {}, recv_queue: {:?}, peer_recv_queue: {:?}, sent_packets_count: {:?} }}", 
-            self.local_addr, 
-            self.recv_queue, 
-            self.peer_recv_queue, 
-            self.sent_packets_count
+            "MockTransport {{ local_addr: {}, recv_queue: {:?}, peer_recv_queue: {:?}, sent_packets_count: {:?} }}",
+            self.local_addr, self.recv_queue, self.peer_recv_queue, self.sent_packets_count
         )
     }
 }
@@ -72,7 +72,7 @@ impl Transport for MockTransport {
             .lock()
             .unwrap()
             .push_back(received_datagram);
-        
+
         Ok(())
     }
 
@@ -146,7 +146,11 @@ pub fn spawn_endpoint(
         loop {
             if let Ok(datagram) = transport.recv_frames().await {
                 for frame in datagram.frames {
-                    if tx_to_endpoint_network.send((frame, datagram.remote_addr)).await.is_err() {
+                    if tx_to_endpoint_network
+                        .send((frame, datagram.remote_addr))
+                        .await
+                        .is_err()
+                    {
                         break; // Endpoint closed
                     }
                 }
@@ -174,7 +178,8 @@ pub async fn setup_client_server_pair() -> (EndpointHarness, EndpointHarness) {
         client_tx_filter,
         server_tx_filter,
         None,
-    ).await;
+    )
+    .await;
     (client_harness, server_harness)
 }
 
@@ -238,7 +243,9 @@ pub async fn setup_client_server_with_filter(
             command_tx.clone(),
             initial_data,
             timer_handle,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         endpoint.set_peer_cid(peer_cid);
 
         spawn_endpoint(
@@ -275,7 +282,9 @@ pub async fn setup_client_server_with_filter(
             sender_task_tx.clone(),
             command_tx,
             timer_handle,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         spawn_endpoint(
             endpoint,
@@ -308,10 +317,8 @@ pub async fn new_stream_pair_with_filter<F>(
     server_config: Config,
     // The filter is applied to packets sent by the CLIENT.
     client_packet_filter: F,
-) -> (
-    crate::core::stream::Stream,
-    crate::core::stream::Stream,
-) where
+) -> (crate::core::stream::Stream, crate::core::stream::Stream)
+where
     F: Fn(&Frame) -> bool + Send + Sync + 'static,
 {
     use crate::core::stream::Stream;
@@ -326,7 +333,8 @@ pub async fn new_stream_pair_with_filter<F>(
         client_tx_filter,
         server_tx_filter,
         None,
-    ).await;
+    )
+    .await;
 
     let client_stream = Stream::new(
         client_harness.tx_to_endpoint_user,
@@ -345,12 +353,12 @@ pub async fn new_stream_pair_with_filter<F>(
 ///
 /// This does NOT spawn the relay tasks, allowing the test to act as the network
 /// by directly using the `tx_to_endpoint_network` and `rx_from_endpoint_network` channels.
-/// 
+///
 /// 建立一个server端测试环境，用于测试server端的行为。
-/// 
+///
 /// 这个函数不会自动发送数据到 `tx_to_endpoint_network` 和 `rx_from_endpoint_network` 通道。
 /// 需要手动发送数据到 `tx_to_endpoint_network` 和 `rx_from_endpoint_network` 通道。
-/// 
+///
 pub async fn setup_server_harness() -> ServerTestHarness {
     let _server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let client_addr: SocketAddr = "127.0.0.1:0".parse().unwrap(); // "old" client addr
@@ -376,7 +384,9 @@ pub async fn setup_server_harness() -> ServerTestHarness {
         sender_task_tx,
         command_tx,
         timer_handle,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // Unlike other test setups, we only spawn the main endpoint task.
     // The test itself will drive the network channels.
@@ -392,7 +402,7 @@ pub async fn setup_server_harness() -> ServerTestHarness {
         client_addr,
         server_cid,
     }
-} 
+}
 
 use std::sync::Once;
 use tracing_subscriber::fmt;
@@ -401,8 +411,6 @@ static TRACING_INIT: Once = Once::new();
 
 pub fn init_tracing() {
     TRACING_INIT.call_once(|| {
-        fmt()
-            .with_env_filter("trace")
-            .init();
+        fmt().with_env_filter("trace").init();
     });
 }

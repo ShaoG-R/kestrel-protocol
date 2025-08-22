@@ -295,11 +295,7 @@ impl UdpTransport {
         };
         tokio::spawn(send_actor.run());
 
-        tokio::spawn(receiver_task(
-            shared_socket,
-            datagram_tx,
-            shutdown_rx,
-        ));
+        tokio::spawn(receiver_task(shared_socket, datagram_tx, shutdown_rx));
 
         Ok(Self {
             send_command_tx,
@@ -425,8 +421,8 @@ impl Drop for UdpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use bytes::Bytes;
+    use std::time::Duration;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_send_and_recv_decoupled() {
@@ -459,7 +455,7 @@ mod tests {
         let recv2 = transport2.recv_frames();
 
         let (res1, res2) = tokio::join!(recv1, recv2);
-        
+
         // Check transport 1 received from 2
         let received1 = res1.unwrap();
         assert_eq!(received1.remote_addr, addr2);
@@ -474,11 +470,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_concurrent_send_recv_with_rebind() {
         // Transport that will be the sender and will be rebound
-        let transport = UdpTransport::new("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let transport = UdpTransport::new("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let original_addr = transport.local_addr().unwrap();
 
         // The peer that will receive packets
-        let peer_transport = UdpTransport::new("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let peer_transport = UdpTransport::new("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let peer_addr = peer_transport.local_addr().unwrap();
 
         // Put both into Arcs to share with tasks
@@ -490,8 +490,18 @@ mod tests {
             let transport = transport_arc.clone();
             tokio::spawn(async move {
                 for i in 0..10 {
-                    let frame = Frame::new_push(i as u32, 1, 0, 1024, 0, Bytes::from(format!("data {}", i)));
-                    let batch = FrameBatch { remote_addr: peer_addr, frames: vec![frame] };
+                    let frame = Frame::new_push(
+                        i as u32,
+                        1,
+                        0,
+                        1024,
+                        0,
+                        Bytes::from(format!("data {}", i)),
+                    );
+                    let batch = FrameBatch {
+                        remote_addr: peer_addr,
+                        frames: vec![frame],
+                    };
                     if let Err(e) = transport.send_frames(batch).await {
                         error!("Send failed: {}", e);
                         break; // Stop sending on error
@@ -508,7 +518,9 @@ mod tests {
                 let mut received_count = 0;
                 loop {
                     // Use a timeout to stop the loop gracefully
-                    match tokio::time::timeout(Duration::from_secs(1), peer_transport.recv_frames()).await {
+                    match tokio::time::timeout(Duration::from_secs(1), peer_transport.recv_frames())
+                        .await
+                    {
                         Ok(Ok(_)) => received_count += 1,
                         _ => break, // Break on error or timeout
                     }
@@ -519,19 +531,22 @@ mod tests {
 
         // Let some packets fly before rebinding
         tokio::time::sleep(Duration::from_millis(50)).await;
-        
+
         // Rebind the sender transport while sends are ongoing.
         // This now works because rebind takes &self and can be called on an Arc.
         let new_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         transport_arc.rebind(new_addr).await.unwrap();
-        
+
         let final_addr = transport_arc.local_addr().unwrap();
-        assert_ne!(original_addr, final_addr, "Address should have changed after rebind");
-        
+        assert_ne!(
+            original_addr, final_addr,
+            "Address should have changed after rebind"
+        );
+
         // Wait for tasks to complete
         send_task.await.unwrap();
         let received_count = recv_task.await.unwrap();
-        
+
         assert!(received_count > 0, "Should have received some packets");
         println!("Received {} packets", received_count);
 
@@ -542,7 +557,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown_stops_receiver() {
-        let transport = UdpTransport::new("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let transport = UdpTransport::new("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let transport_arc = Arc::new(transport);
 
         let recv_handle = {
@@ -561,27 +578,35 @@ mod tests {
 
         // The recv_frames call should now unblock and return an error
         let result = tokio::time::timeout(Duration::from_secs(1), recv_handle).await;
-        
+
         assert!(result.is_ok(), "recv_frames did not unblock after shutdown");
         let inner_result = result.unwrap();
         assert!(inner_result.is_ok(), "Join handle failed");
         let final_result = inner_result.unwrap();
         assert!(final_result.is_err(), "Expected channel closed error");
-        assert!(matches!(final_result.unwrap_err(), crate::error::Error::ChannelClosed));
+        assert!(matches!(
+            final_result.unwrap_err(),
+            crate::error::Error::ChannelClosed
+        ));
     }
 
     #[tokio::test]
     async fn test_local_addr_methods() {
-        let transport = UdpTransport::new("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        
+        let transport = UdpTransport::new("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+
         // Test the cached local_addr method
         let cached_addr = transport.local_addr().unwrap();
         assert!(cached_addr.port() > 0);
-        
+
         // Test the fresh_local_addr method that uses GetLocalAddr command
         let fresh_addr = transport.fresh_local_addr().await.unwrap();
-        assert_eq!(cached_addr, fresh_addr, "Cached and fresh addresses should match");
-        
+        assert_eq!(
+            cached_addr, fresh_addr,
+            "Cached and fresh addresses should match"
+        );
+
         // Test that both addresses have the same IP and port
         assert_eq!(cached_addr.ip(), fresh_addr.ip());
         assert_eq!(cached_addr.port(), fresh_addr.port());

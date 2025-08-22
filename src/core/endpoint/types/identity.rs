@@ -17,11 +17,11 @@ pub struct ConnectionIdentity {
     /// 本地连接ID
     /// Local connection ID
     pub(crate) local_cid: u32,
-    
+
     /// 对端连接ID
     /// Peer connection ID  
     pub(crate) peer_cid: u32,
-    
+
     /// 远程地址
     /// Remote address
     pub(crate) remote_addr: SocketAddr,
@@ -100,7 +100,7 @@ mod tests {
     fn test_connection_identity_creation() {
         let addr = create_test_addr();
         let identity = ConnectionIdentity::new(123, 456, addr);
-        
+
         assert_eq!(identity.local_cid(), 123);
         assert_eq!(identity.peer_cid(), 456);
         assert_eq!(identity.remote_addr(), addr);
@@ -110,10 +110,10 @@ mod tests {
     fn test_connection_identity_setters() {
         let addr = create_test_addr();
         let mut identity = ConnectionIdentity::new(123, 0, addr);
-        
+
         identity.set_peer_cid(789);
         assert_eq!(identity.peer_cid(), 789);
-        
+
         let new_addr = SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 9090);
         identity.set_remote_addr(new_addr);
         assert_eq!(identity.remote_addr(), new_addr);
@@ -123,13 +123,13 @@ mod tests {
     fn test_connection_identity_matching() {
         let addr = create_test_addr();
         let identity = ConnectionIdentity::new(123, 456, addr);
-        
+
         assert!(identity.matches_local_cid(123));
         assert!(!identity.matches_local_cid(124));
-        
+
         assert!(identity.matches_peer_cid(456));
         assert!(!identity.matches_peer_cid(457));
-        
+
         assert!(identity.matches_remote_addr(&addr));
         let other_addr = SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 9090);
         assert!(!identity.matches_remote_addr(&other_addr));

@@ -1,9 +1,9 @@
-use std::marker::PhantomData;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::timer::event::traits::EventDataTrait;
+use crate::timer::TimerEventData;
 use crate::timer::event::lockfree_ring::RingBuffer;
 use crate::timer::event::memory_pool::OptimizedBatchProcessor;
-use crate::timer::TimerEventData;
+use crate::timer::event::traits::EventDataTrait;
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// 零拷贝事件传递接口
 /// Zero-copy event delivery interface
@@ -14,7 +14,7 @@ pub trait ZeroCopyEventDelivery<E: EventDataTrait> {
     /// Note: Currently used for trait completeness, may be used for single-event optimization in the future
     #[allow(dead_code)]
     fn deliver_event_ref(&self, event_ref: &TimerEventData<E>) -> bool;
-    
+
     /// 批量传递事件引用
     /// Batch deliver event references
     fn batch_deliver_event_refs(&self, event_refs: &[&TimerEventData<E>]) -> usize;
@@ -114,7 +114,7 @@ impl<E: EventDataTrait> EventSlot<E> {
 /// 引用传递事件处理器
 /// Reference-passing event handler
 pub struct RefEventHandler<E: EventDataTrait, F>
-where 
+where
     F: Fn(&TimerEventData<E>) -> bool + Send + Sync,
 {
     handler: F,
@@ -123,7 +123,7 @@ where
 }
 
 impl<E: EventDataTrait, F> RefEventHandler<E, F>
-where 
+where
     F: Fn(&TimerEventData<E>) -> bool + Send + Sync,
 {
     pub fn new(handler: F) -> Self {
@@ -136,7 +136,7 @@ where
 }
 
 impl<E: EventDataTrait, F> ZeroCopyEventDelivery<E> for RefEventHandler<E, F>
-where 
+where
     F: Fn(&TimerEventData<E>) -> bool + Send + Sync,
 {
     fn deliver_event_ref(&self, event_ref: &TimerEventData<E>) -> bool {
@@ -146,7 +146,7 @@ where
         }
         success
     }
-    
+
     fn batch_deliver_event_refs(&self, event_refs: &[&TimerEventData<E>]) -> usize {
         let mut delivered_count = 0;
         for event_ref in event_refs {
@@ -154,7 +154,8 @@ where
                 delivered_count += 1;
             }
         }
-        self.processed_count.fetch_add(delivered_count, Ordering::Relaxed);
+        self.processed_count
+            .fetch_add(delivered_count, Ordering::Relaxed);
         delivered_count
     }
 }
@@ -249,15 +250,15 @@ where
 
         // 更新统计信息
         // Update statistics
-        self.total_dispatched.fetch_add(dispatched, Ordering::Relaxed);
-        self.total_rejected.fetch_add(events_len - dispatched, Ordering::Relaxed);
+        self.total_dispatched
+            .fetch_add(dispatched, Ordering::Relaxed);
+        self.total_rejected
+            .fetch_add(events_len - dispatched, Ordering::Relaxed);
 
         // 更新分发索引
         // Update dispatch index
-        self.dispatch_index.store(
-            (best_dispatcher + 1) % dispatcher_count,
-            Ordering::Relaxed,
-        );
+        self.dispatch_index
+            .store((best_dispatcher + 1) % dispatcher_count, Ordering::Relaxed);
 
         dispatched
     }
@@ -265,20 +266,20 @@ where
     /// 大批量分发策略：智能分散到多个分发器
     /// Large batch dispatch strategy: intelligently distribute to multiple dispatchers
     fn dispatch_large_batch(
-        &self, 
-        events: Vec<TimerEventData<E>>, 
-        best_dispatcher: usize, 
-        dispatcher_count: usize
+        &self,
+        events: Vec<TimerEventData<E>>,
+        best_dispatcher: usize,
+        dispatcher_count: usize,
     ) -> usize {
         let events_per_dispatcher = events.len() / dispatcher_count;
         let mut total_dispatched = 0;
         let mut event_iter = events.into_iter();
-        
+
         // 首先尝试在最佳分发器上处理更多事件
         // First try to handle more events on the best dispatcher
         let best_batch_size = std::cmp::min(events_per_dispatcher * 2, event_iter.len());
         let mut best_batch = Vec::with_capacity(best_batch_size);
-        
+
         for _ in 0..best_batch_size {
             if let Some(event) = event_iter.next() {
                 best_batch.push(event);
@@ -286,52 +287,54 @@ where
                 break;
             }
         }
-        
+
         if !best_batch.is_empty() {
             total_dispatched += self.event_slots[best_dispatcher].batch_write_events(best_batch);
         }
-        
+
         // 将剩余事件分散到其他分发器
         // Distribute remaining events to other dispatchers
         let mut current_dispatcher = (best_dispatcher + 1) % dispatcher_count;
         let mut current_batch = Vec::with_capacity(events_per_dispatcher);
-        
+
         for event in event_iter {
             current_batch.push(event);
-            
+
             // 当批量达到合适大小或没有更多事件时，写入当前分发器
             // Write to current dispatcher when batch reaches appropriate size or no more events
             if current_batch.len() >= events_per_dispatcher {
-                total_dispatched += self.event_slots[current_dispatcher].batch_write_events(current_batch);
+                total_dispatched +=
+                    self.event_slots[current_dispatcher].batch_write_events(current_batch);
                 current_batch = Vec::with_capacity(events_per_dispatcher);
                 current_dispatcher = (current_dispatcher + 1) % dispatcher_count;
             }
         }
-        
+
         // 处理剩余的事件
         // Handle remaining events
         if !current_batch.is_empty() {
-            total_dispatched += self.event_slots[current_dispatcher].batch_write_events(current_batch);
+            total_dispatched +=
+                self.event_slots[current_dispatcher].batch_write_events(current_batch);
         }
-        
+
         total_dispatched
     }
 
     /// 小批量分发策略：轮询分发确保低延迟
     /// Small batch dispatch strategy: round-robin for low latency
     fn dispatch_small_batch(
-        &self, 
-        events: Vec<TimerEventData<E>>, 
-        best_dispatcher: usize, 
-        dispatcher_count: usize
+        &self,
+        events: Vec<TimerEventData<E>>,
+        best_dispatcher: usize,
+        dispatcher_count: usize,
     ) -> usize {
         let mut dispatched_count = 0;
         let mut current_dispatcher = best_dispatcher;
-        
+
         for mut event in events {
             let mut placed = false;
             let original_dispatcher = current_dispatcher;
-            
+
             // 尝试所有分发器（每个事件只试一轮）
             // Try all dispatchers (only one round per event)
             loop {
@@ -345,7 +348,7 @@ where
                     Err(returned_event) => {
                         event = returned_event;
                         current_dispatcher = (current_dispatcher + 1) % dispatcher_count;
-                        
+
                         // 如果回到起始分发器，说明所有分发器都满了
                         // If we're back to the starting dispatcher, all are full
                         if current_dispatcher == original_dispatcher {
@@ -354,7 +357,7 @@ where
                     }
                 }
             }
-            
+
             // 如果无法放置事件，停止尝试后续事件
             // If unable to place event, stop trying subsequent events
             if !placed {
@@ -375,8 +378,11 @@ where
         // 对于小批量，直接创建事件避免批量处理器的开销
         // For small batches, create events directly to avoid batch processor overhead
         if requests.len() <= 64 {
-            let events: Vec<_> = requests.iter()
-                .map(|(connection_id, event_data)| TimerEventData::new(*connection_id, event_data.clone()))
+            let events: Vec<_> = requests
+                .iter()
+                .map(|(connection_id, event_data)| {
+                    TimerEventData::new(*connection_id, event_data.clone())
+                })
                 .collect();
             return self.batch_dispatch_events(events);
         }
@@ -415,14 +421,18 @@ where
 
         // 获取批量处理器的性能统计
         // Get batch processor performance statistics
-        let (_processed_events, pool_size, _, _, large_batch_ratio) = self.batch_processor.get_performance_stats();
+        let (_processed_events, pool_size, _, _, large_batch_ratio) =
+            self.batch_processor.get_performance_stats();
 
-        let avg_utilization = self.event_slots.iter()
+        let avg_utilization = self
+            .event_slots
+            .iter()
             .map(|slot| {
                 let (_, _, util) = slot.get_stats();
                 util
             })
-            .sum::<f64>() / self.event_slots.len() as f64;
+            .sum::<f64>()
+            / self.event_slots.len() as f64;
 
         DetailedPerformanceStats {
             total_dispatched: dispatched,
@@ -470,7 +480,10 @@ impl DetailedPerformanceStats {
         println!("  - 当前池大小: {}", self.memory_pool_size);
         println!("  - 复用率: {:.1}%", self.memory_pool_reuse_rate * 100.0);
         println!("⚡ 分发器统计:");
-        println!("  - 平均利用率: {:.1}%", self.average_slot_utilization * 100.0);
+        println!(
+            "  - 平均利用率: {:.1}%",
+            self.average_slot_utilization * 100.0
+        );
         println!("  - 分发器数量: {}", self.dispatcher_count);
         println!();
     }

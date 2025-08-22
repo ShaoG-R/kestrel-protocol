@@ -4,8 +4,8 @@
 use crate::timer::event::traits::EventDataTrait;
 use crate::timer::parallel::simd_processor::SIMDTimerProcessor;
 use crate::timer::parallel::types::ProcessedTimerData;
-use crate::timer::wheel::TimerEntry;
 use crate::timer::task::types::TimerCallback;
+use crate::timer::wheel::TimerEntry;
 use rayon::prelude::*;
 
 /// Rayon批量执行器

@@ -30,7 +30,11 @@ use crate::core::reliability::logic::congestion::vegas_controller::VegasControll
 
 /// 服务器端点创建结果类型别名
 /// Type alias for server endpoint creation result
-type ServerEndpointBundle<T> = (Endpoint<T, VegasController>, mpsc::Sender<(Frame, SocketAddr)>, Stream);
+type ServerEndpointBundle<T> = (
+    Endpoint<T, VegasController>,
+    mpsc::Sender<(Frame, SocketAddr)>,
+    Stream,
+);
 
 /// Socket会话协调器 - 统一协调各层交互的中央控制器
 /// Socket Session Coordinator - Central controller that coordinates inter-layer interactions
@@ -212,17 +216,18 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
         let transport_tx = self.transport_manager.send_tx();
 
-        let (endpoint, tx_to_stream_handle, rx_from_stream_handle) = Endpoint::new_server_with_vegas(
-            self.config.as_ref().clone(),
-            remote_addr,
-            local_cid,
-            peer_cid,
-            rx_from_socket,
-            transport_tx,
-            self.command_tx.clone(),
-            self.timer_handle.clone(),
-        )
-        .await?;
+        let (endpoint, tx_to_stream_handle, rx_from_stream_handle) =
+            Endpoint::new_server_with_vegas(
+                self.config.as_ref().clone(),
+                remote_addr,
+                local_cid,
+                peer_cid,
+                rx_from_socket,
+                transport_tx,
+                self.command_tx.clone(),
+                self.timer_handle.clone(),
+            )
+            .await?;
 
         let stream = Stream::new(tx_to_stream_handle, rx_from_stream_handle);
 
@@ -428,17 +433,18 @@ impl<T: BindableTransport> SocketSessionCoordinator<T> {
         let (tx_to_endpoint, rx_from_socket) = mpsc::channel(128);
         let transport_tx = self.transport_manager.send_tx();
 
-        let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) = Endpoint::new_client_with_vegas(
-            config,
-            remote_addr,
-            local_cid,
-            rx_from_socket,
-            transport_tx,
-            self.command_tx.clone(),
-            initial_data,
-            self.timer_handle.clone(),
-        )
-        .await?;
+        let (mut endpoint, tx_to_stream_handle, rx_from_stream_handle) =
+            Endpoint::new_client_with_vegas(
+                config,
+                remote_addr,
+                local_cid,
+                rx_from_socket,
+                transport_tx,
+                self.command_tx.clone(),
+                initial_data,
+                self.timer_handle.clone(),
+            )
+            .await?;
 
         // 生成端点任务
         // Spawn endpoint task

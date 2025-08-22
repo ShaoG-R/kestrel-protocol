@@ -26,8 +26,6 @@ pub(crate) struct TransportManager<T: BindableTransport> {
     send_tx: mpsc::Sender<TransportCommand<T>>,
 }
 
-
-
 impl<T: BindableTransport> TransportManager<T> {
     /// 创建新的传输管理器
     /// Creates a new transport manager
@@ -43,8 +41,6 @@ impl<T: BindableTransport> TransportManager<T> {
         debug!("创建传输管理器 | Creating transport manager");
         Self { transport, send_tx }
     }
-
-
 
     /// 重新绑定传输到新地址
     /// Rebind transport to new address
@@ -69,7 +65,9 @@ impl<T: BindableTransport> TransportManager<T> {
         // Send swap command to transport actor
         let swap_command = TransportCommand::SwapTransport(new_transport.clone());
         if self.send_tx.send(swap_command).await.is_err() {
-            warn!("传输Actor通道已关闭，无法完成重绑定 | Transport actor channel closed, cannot complete rebind");
+            warn!(
+                "传输Actor通道已关闭，无法完成重绑定 | Transport actor channel closed, cannot complete rebind"
+            );
             return Err(Error::ChannelClosed);
         }
 
@@ -104,8 +102,6 @@ impl<T: BindableTransport> TransportManager<T> {
         self.transport.clone()
     }
 
-
-
     /// 获取传输命令发送通道的克隆
     /// Get a clone of the transport command sender channel
     ///
@@ -117,4 +113,4 @@ impl<T: BindableTransport> TransportManager<T> {
     pub(crate) fn send_tx(&self) -> mpsc::Sender<TransportCommand<T>> {
         self.send_tx.clone()
     }
-} 
+}

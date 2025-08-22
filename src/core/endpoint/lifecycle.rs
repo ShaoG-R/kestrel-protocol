@@ -15,5 +15,5 @@ mod validation;
 // 重新导出主要类型和特征，保持API兼容性
 // Re-export main types and traits to maintain API compatibility
 pub use manager::{ConnectionLifecycleManager, DefaultLifecycleManager};
-pub use transitions::{LifecycleEvent, EventListener, StateTransitionExecutor};
+pub use transitions::{EventListener, LifecycleEvent, StateTransitionExecutor};
 pub use validation::StateValidator;

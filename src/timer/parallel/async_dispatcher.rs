@@ -1,8 +1,8 @@
 //! 异步事件分发器
 //! Async Event Dispatcher
 
-use crate::timer::event::traits::EventDataTrait;
 use crate::timer::event::TimerEventData;
+use crate::timer::event::traits::EventDataTrait;
 use crate::timer::parallel::types::ProcessedTimerData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
@@ -28,7 +28,7 @@ impl<E: EventDataTrait> AsyncEventDispatcher<E> {
         // 创建多个事件通道用于负载均衡
         let channel_count = num_cpus::get().max(4);
         let mut event_channels = Vec::with_capacity(channel_count);
-        
+
         for _ in 0..channel_count {
             let (tx, _rx) = mpsc::channel(1024);
             event_channels.push(tx);
@@ -57,16 +57,13 @@ impl<E: EventDataTrait> AsyncEventDispatcher<E> {
                 let channel_index = index % self.event_channels.len();
 
                 let tx = self.event_channels[channel_index].clone();
-                
+
                 tokio::spawn(async move {
                     // 使用智能工厂创建事件 (Copy类型零开销，非Copy类型智能管理)
                     // Use smart factory to create event (zero-cost for Copy types, smart management for non-Copy types)
                     let factory = crate::timer::event::traits::EventFactory::new();
-                    let event_data = factory.create_event(
-                        data.connection_id,
-                        data.timeout_event,
-                    );
-                    
+                    let event_data = factory.create_event(data.connection_id, data.timeout_event);
+
                     // 尝试发送事件（非阻塞）
                     match tx.try_send(event_data) {
                         Ok(_) => Ok::<usize, Box<dyn std::error::Error + Send + Sync>>(1),

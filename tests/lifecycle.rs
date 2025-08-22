@@ -10,7 +10,6 @@ use tracing::Instrument;
 
 #[tokio::test]
 async fn test_udp_socket_bind() {
-
     tracing::info!("--- Minimal Tokio UDP Bind Test ---");
     tracing::info!("Attempting to bind UDP socket...");
 
@@ -23,10 +22,7 @@ async fn test_udp_socket_bind() {
     match bind_result {
         Ok(Ok(socket)) => {
             let local_addr = socket.local_addr().unwrap();
-            tracing::info!(
-                "Successfully bound UDP socket to address: {:?}",
-                local_addr
-            );
+            tracing::info!("Successfully bound UDP socket to address: {:?}", local_addr);
         }
         Ok(Err(e)) => {
             tracing::error!("Failed to bind UDP socket: {}", e);
@@ -109,10 +105,7 @@ async fn test_full_connection_lifecycle() {
         .read(&mut final_buf)
         .await
         .expect("Server should read EOF");
-    assert_eq!(
-        n, 0,
-        "Server should detect connection close (read 0 bytes)"
-    );
+    assert_eq!(n, 0, "Server should detect connection close (read 0 bytes)");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -199,7 +192,6 @@ async fn test_cid_handshake_and_data_transfer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_connections_cid_isolation() {
-
     tracing::info!("[Test] Starting CID isolation test for concurrent connections...");
 
     // 1. Setup server using the harness
@@ -337,7 +329,6 @@ async fn test_concurrent_connections_cid_isolation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 32)]
 async fn test_high_concurrency_1rtt_connections() {
-
     const NUM_CLIENTS: usize = 1000;
     tracing::info!(
         "[Test] Starting high concurrency 1-RTT test with {} clients...",
@@ -616,7 +607,7 @@ async fn test_high_concurrency_large_transfer() {
                 // Each client sends a different pattern to test data integrity
                 let client_pattern = (i % 256) as u8;
                 let client_payload = vec![client_pattern; TRANSFER_SIZE];
-                
+
                 writer
                     .write_all(&client_payload)
                     .await
@@ -625,7 +616,7 @@ async fn test_high_concurrency_large_transfer() {
 
                 // C. Add a small delay before shutdown to ensure data is transmitted
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                
+
                 // Shutdown the writer to send a FIN.
                 writer
                     .shutdown()
@@ -658,4 +649,4 @@ async fn test_high_concurrency_large_transfer() {
         "[Test] High concurrency large transfer test with {} clients passed.",
         NUM_CLIENTS
     );
-} 
+}

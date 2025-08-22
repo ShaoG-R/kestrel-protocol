@@ -11,15 +11,15 @@ use crate::timer::parallel::types::{
     DetailedProcessingStats, ParallelProcessingResult, ParallelProcessingStats, ProcessedTimerData,
     ProcessingResult,
 };
-use crate::timer::wheel::TimerEntry;
 use crate::timer::task::types::TimerCallback;
+use crate::timer::wheel::TimerEntry;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing;
 
 /// 混合并行定时器系统的核心
 /// Core of the hybrid parallel timer system
-/// 
+///
 /// 该系统采用分层优化策略：
 /// 1. 优先使用零拷贝分发器获得最佳性能
 /// 2. 当零拷贝分发失败时，自动fallback到异步分发器确保可靠性
@@ -54,7 +54,7 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
     /// Create a new hybrid parallel timer system
     pub fn new() -> Self {
         let cpu_cores = num_cpus::get();
-        
+
         // 在测试环境中检测并发情况，动态调整配置以减少竞争
         // Detect concurrency in test environment and dynamically adjust configuration to reduce contention
         let is_test_env = cfg!(test);
@@ -65,7 +65,7 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
         } else {
             1024
         };
-        
+
         let dispatcher_count = if is_test_env {
             // 测试环境限制分发器数量，避免过度并发
             // Limit dispatcher count in test environment to avoid excessive concurrency
@@ -73,14 +73,19 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
         } else {
             cpu_cores
         };
-        
+
         Self {
             simd_processor: SIMDTimerProcessor::new(),
             rayon_executor: RayonBatchExecutor::new(cpu_cores),
             async_dispatcher: Arc::new(AsyncEventDispatcher::new()),
-            zero_copy_dispatcher: crate::timer::event::zero_copy::ZeroCopyBatchDispatcher::new(slot_count, dispatcher_count, 1000),
+            zero_copy_dispatcher: crate::timer::event::zero_copy::ZeroCopyBatchDispatcher::new(
+                slot_count,
+                dispatcher_count,
+                1000,
+            ),
             bypass_processor: BypassTimerProcessor::new(),
-            mode_selector: crate::timer::parallel::single_thread_bypass::ExecutionModeSelector::new(),
+            mode_selector: crate::timer::parallel::single_thread_bypass::ExecutionModeSelector::new(
+            ),
             zero_alloc_processor: crate::timer::parallel::memory::ZeroAllocProcessor::new(),
             strategy_selector: StrategySelector::new(cpu_cores),
             stats: ParallelProcessingStats::default(),
@@ -117,7 +122,8 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
                 self.process_simd_only_optimized(timer_entries).await?
             }
             OptimalParallelStrategy::SIMDWithRayon => {
-                self.process_simd_with_rayon_optimized(timer_entries).await?
+                self.process_simd_with_rayon_optimized(timer_entries)
+                    .await?
             }
             OptimalParallelStrategy::FullHybrid => {
                 self.process_full_hybrid_optimized(timer_entries).await?
@@ -125,7 +131,7 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
         };
 
         let processing_duration = start_time.elapsed();
-        
+
         // 更新统计信息
         self.update_stats(strategy, batch_size, processing_duration);
 
@@ -145,28 +151,38 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
         start_time: Instant,
     ) -> Result<ParallelProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         let batch_size = timer_entries.len();
-        
+
         // 根据批量大小选择内存优化策略
         // Choose memory optimization strategy based on batch size
         let processed_data = if batch_size <= 64 {
             // 小批量：使用栈分配
             // Small batch: use stack allocation
-            self.zero_alloc_processor.process_small_batch(&timer_entries)
+            self.zero_alloc_processor
+                .process_small_batch(&timer_entries)
         } else {
             // 大批量：使用内存池
             // Large batch: use memory pool
-            self.zero_alloc_processor.process_large_batch(&timer_entries)
+            self.zero_alloc_processor
+                .process_large_batch(&timer_entries)
         };
 
         // 直通式事件分发（同步，使用零拷贝）
         // Bypass event dispatch (synchronous, using zero-copy)
-        let dummy_handler = crate::timer::event::zero_copy::RefEventHandler::new(|_event_ref: &crate::timer::event::TimerEventData<E>| true);
-        let dispatch_count = self.bypass_processor.dispatch_events_bypass(processed_data, &dummy_handler);
+        let dummy_handler = crate::timer::event::zero_copy::RefEventHandler::new(
+            |_event_ref: &crate::timer::event::TimerEventData<E>| true,
+        );
+        let dispatch_count = self
+            .bypass_processor
+            .dispatch_events_bypass(processed_data, &dummy_handler);
 
         let processing_duration = start_time.elapsed();
-        
+
         // 更新统计信息（直通模式标记为SIMDOnly策略）
-        self.update_stats(OptimalParallelStrategy::SIMDOnly, batch_size, processing_duration);
+        self.update_stats(
+            OptimalParallelStrategy::SIMDOnly,
+            batch_size,
+            processing_duration,
+        );
 
         Ok(ParallelProcessingResult {
             processed_count: batch_size,
@@ -188,41 +204,52 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
         timer_entries: Vec<TimerEntry<E, C>>,
     ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         let processed_data = self.simd_processor.process_batch(&timer_entries)?;
-        
+
         // 使用智能创建和分发，集成内存池优化
         // Use smart creation and dispatch with memory pool optimization
-        let event_requests: Vec<_> = processed_data.iter()
+        let event_requests: Vec<_> = processed_data
+            .iter()
             .map(|data| (data.connection_id, data.timeout_event.clone()))
             .collect();
-        
+
         // 使用智能分发器的创建和分发功能，避免中间事件存储
         // Use smart dispatcher's create and dispatch functionality, avoiding intermediate event storage
-        let dispatch_count = self.zero_copy_dispatcher.create_and_dispatch_events(&event_requests);
-        
+        let dispatch_count = self
+            .zero_copy_dispatcher
+            .create_and_dispatch_events(&event_requests);
+
         // 处理事件回收和内存池管理
         // Handle event recycling and memory pool management
         if dispatch_count > 0 {
             // 批量消费一些已处理的事件进行回收
             // Batch consume some processed events for recycling
-            let consumed_events = self.zero_copy_dispatcher.batch_consume_events(dispatch_count / 2);
+            let consumed_events = self
+                .zero_copy_dispatcher
+                .batch_consume_events(dispatch_count / 2);
             if !consumed_events.is_empty() {
                 // 将消费的事件返回内存池以供复用
                 // Return consumed events to memory pool for reuse
-                self.zero_copy_dispatcher.batch_return_to_pool(consumed_events);
+                self.zero_copy_dispatcher
+                    .batch_return_to_pool(consumed_events);
             }
         }
-        
+
         // 如果零拷贝分发失败（返回0），使用异步分发器作为fallback
         // If zero-copy dispatch fails (returns 0), use async dispatcher as fallback
         let final_dispatch_count = if dispatch_count == 0 {
             // 在测试环境中降低日志级别，避免干扰测试输出
             // Lower log level in test environment to avoid interfering with test output
             if cfg!(test) {
-                tracing::debug!("Zero-copy dispatch failed in test environment (expected due to concurrency), falling back to async dispatcher");
+                tracing::debug!(
+                    "Zero-copy dispatch failed in test environment (expected due to concurrency), falling back to async dispatcher"
+                );
             } else {
                 tracing::warn!("Zero-copy dispatch failed, falling back to async dispatcher");
             }
-            self.async_dispatcher.dispatch_timer_events(processed_data.clone()).await.unwrap_or(0)
+            self.async_dispatcher
+                .dispatch_timer_events(processed_data.clone())
+                .await
+                .unwrap_or(0)
         } else {
             dispatch_count
         };
@@ -245,27 +272,41 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
         timer_entries: Vec<TimerEntry<E, C>>,
     ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         // 使用Rayon并行处理数据
-        let processed_data = self.rayon_executor
+        let processed_data = self
+            .rayon_executor
             .parallel_process_with_simd(timer_entries, &mut self.simd_processor)
             .await?;
 
         // 优先使用零拷贝批量分发，失败时fallback到异步分发器
         // Prefer zero-copy batch dispatch, fallback to async dispatcher on failure
-        let events: Vec<crate::timer::event::TimerEventData<E>> = processed_data.iter()
-            .map(|data| crate::timer::event::TimerEventData::new(data.connection_id, data.timeout_event.clone()))
+        let events: Vec<crate::timer::event::TimerEventData<E>> = processed_data
+            .iter()
+            .map(|data| {
+                crate::timer::event::TimerEventData::new(
+                    data.connection_id,
+                    data.timeout_event.clone(),
+                )
+            })
             .collect();
-        
-        let dispatch_count = self.zero_copy_dispatcher.batch_dispatch_events(events.clone());
-        
+
+        let dispatch_count = self
+            .zero_copy_dispatcher
+            .batch_dispatch_events(events.clone());
+
         // 如果零拷贝分发失败，使用异步分发器作为fallback
         // If zero-copy dispatch fails, use async dispatcher as fallback
         let final_dispatch_count = if dispatch_count == 0 {
             if cfg!(test) {
-                tracing::debug!("Zero-copy dispatch failed in test environment (expected due to concurrency), falling back to async dispatcher");
+                tracing::debug!(
+                    "Zero-copy dispatch failed in test environment (expected due to concurrency), falling back to async dispatcher"
+                );
             } else {
                 tracing::warn!("Zero-copy dispatch failed, falling back to async dispatcher");
             }
-            self.async_dispatcher.dispatch_timer_events(processed_data.clone()).await.unwrap_or(0)
+            self.async_dispatcher
+                .dispatch_timer_events(processed_data.clone())
+                .await
+                .unwrap_or(0)
         } else {
             dispatch_count
         };
@@ -289,13 +330,14 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
         timer_entries: Vec<TimerEntry<E, C>>,
     ) -> Result<ProcessingResult, Box<dyn std::error::Error + Send + Sync>> {
         let batch_size = timer_entries.len();
-        
+
         // 对于中等批量(1024-4095)，使用直接同步路径避免spawn_blocking开销
         // For medium batches (1024-4095), use direct sync path to avoid spawn_blocking overhead
         let processed_data = if batch_size <= 4095 && self.cpu_cores >= 2 {
             // 直接在当前任务中使用Rayon，避免spawn_blocking的上下文切换开销
             // Direct Rayon usage in current task, avoiding spawn_blocking context switch overhead
-            self.rayon_executor.parallel_process_with_simd_sync(timer_entries, &mut self.simd_processor)?
+            self.rayon_executor
+                .parallel_process_with_simd_sync(timer_entries, &mut self.simd_processor)?
         } else {
             // 大批量使用spawn_blocking避免阻塞异步运行时
             // Large batches use spawn_blocking to avoid blocking async runtime
@@ -311,36 +353,49 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
 
         // 步骤2: 使用智能创建和分发，集成内存池优化
         // Step 2: Use smart creation and dispatch with memory pool optimization
-        let event_requests: Vec<_> = processed_data.iter()
+        let event_requests: Vec<_> = processed_data
+            .iter()
             .map(|data| (data.connection_id, data.timeout_event.clone()))
             .collect();
-        
+
         // 使用智能分发器的创建和分发功能，避免中间事件存储
         // Use smart dispatcher's create and dispatch functionality, avoiding intermediate event storage
-        let dispatch_count = self.zero_copy_dispatcher.create_and_dispatch_events(&event_requests);
-        
+        let dispatch_count = self
+            .zero_copy_dispatcher
+            .create_and_dispatch_events(&event_requests);
+
         // 处理事件回收和内存池管理
         // Handle event recycling and memory pool management
         if dispatch_count > 0 {
             // 批量消费一些已处理的事件进行回收
             // Batch consume some processed events for recycling
-            let consumed_events = self.zero_copy_dispatcher.batch_consume_events(dispatch_count / 2);
+            let consumed_events = self
+                .zero_copy_dispatcher
+                .batch_consume_events(dispatch_count / 2);
             if !consumed_events.is_empty() {
                 // 将消费的事件返回内存池以供复用
                 // Return consumed events to memory pool for reuse
-                self.zero_copy_dispatcher.batch_return_to_pool(consumed_events);
+                self.zero_copy_dispatcher
+                    .batch_return_to_pool(consumed_events);
             }
         }
-        
+
         // 如果零拷贝分发失败，使用异步分发器作为fallback
         // If zero-copy dispatch fails, use async dispatcher as fallback
         let total_dispatches = if dispatch_count == 0 {
             if cfg!(test) {
-                tracing::debug!("Zero-copy dispatch failed in test environment (expected due to concurrency), falling back to async dispatcher");
+                tracing::debug!(
+                    "Zero-copy dispatch failed in test environment (expected due to concurrency), falling back to async dispatcher"
+                );
             } else {
-                tracing::warn!("Zero-copy dispatch failed in full hybrid mode, falling back to async dispatcher");
+                tracing::warn!(
+                    "Zero-copy dispatch failed in full hybrid mode, falling back to async dispatcher"
+                );
             }
-            self.async_dispatcher.dispatch_timer_events(processed_data.clone()).await.unwrap_or(0)
+            self.async_dispatcher
+                .dispatch_timer_events(processed_data.clone())
+                .await
+                .unwrap_or(0)
         } else {
             dispatch_count
         };
@@ -359,24 +414,31 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
 
     /// 更新统计信息
     /// 将统计逻辑重构到此函数中，结构更清晰
-    fn update_stats(&mut self, strategy: OptimalParallelStrategy, batch_size: usize, duration: Duration) {
+    fn update_stats(
+        &mut self,
+        strategy: OptimalParallelStrategy,
+        batch_size: usize,
+        duration: Duration,
+    ) {
         self.stats.total_batches_processed += 1;
-        
+
         // 正确的运行平均值计算：先累加总时间，再计算平均值
         // Correct running average calculation: accumulate total time, then calculate average
         let current_duration_ns = duration.as_nanos() as f64;
         self.stats.total_processing_time_ns += current_duration_ns;
-        self.stats.avg_processing_time_ns = self.stats.total_processing_time_ns / self.stats.total_batches_processed as f64;
-        
+        self.stats.avg_processing_time_ns =
+            self.stats.total_processing_time_ns / self.stats.total_batches_processed as f64;
+
         // 累加总操作数
         // Accumulate total operations
         self.stats.total_operations_processed += batch_size as u64;
-        
+
         // 计算整体吞吐量（基于总操作数和总时间）
         // Calculate overall throughput based on total operations and total time
         if self.stats.total_processing_time_ns > 0.0 {
             let total_time_secs = self.stats.total_processing_time_ns / 1_000_000_000.0;
-            self.stats.overall_throughput_ops_per_sec = self.stats.total_operations_processed as f64 / total_time_secs;
+            self.stats.overall_throughput_ops_per_sec =
+                self.stats.total_operations_processed as f64 / total_time_secs;
         }
 
         match strategy {
@@ -398,7 +460,9 @@ impl<E: EventDataTrait> HybridParallelTimerSystem<E> {
         &self,
         processed_data: Vec<ProcessedTimerData<E>>,
     ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-        self.async_dispatcher.dispatch_timer_events(processed_data).await
+        self.async_dispatcher
+            .dispatch_timer_events(processed_data)
+            .await
     }
 
     /// 获取异步分发器的引用（用于高级用途）

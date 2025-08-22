@@ -10,29 +10,27 @@
 
 pub mod actor;
 pub mod event;
+pub mod hybrid_system;
 pub mod parallel;
 pub mod task;
 pub mod wheel;
-pub mod hybrid_system;
 
 #[cfg(test)]
 mod tests;
 
 pub use actor::{
-    TimerActor, TimerActorHandle, TimerActorConfig, TimerActorStats, 
-    start_timer_actor, start_sender_timer_actor, start_noop_timer_actor,
-    SenderTimerActor, NoOpTimerActor, SenderTimerActorHandle, NoOpTimerActorHandle
+    NoOpTimerActor, NoOpTimerActorHandle, SenderTimerActor, SenderTimerActorHandle, TimerActor,
+    TimerActorConfig, TimerActorHandle, TimerActorStats, start_noop_timer_actor,
+    start_sender_timer_actor, start_timer_actor,
 };
 pub use event::{TimerEvent, TimerEventData};
+pub use hybrid_system::{HybridTimerTask, HybridTimerTaskHandle, start_hybrid_timer_task};
 pub use parallel::{
-    HybridParallelTimerSystem, OptimalParallelStrategy, 
-    ProcessedTimerData, ParallelProcessingResult, ParallelProcessingStats
+    HybridParallelTimerSystem, OptimalParallelStrategy, ParallelProcessingResult,
+    ParallelProcessingStats, ProcessedTimerData,
 };
 pub use task::{
-    TimerRegistration, BatchTimerRegistration, BatchTimerCancellation,
-    BatchTimerResult, TimerHandle, TimerTaskCommand, TimerError, TimerTaskStats,
+    BatchTimerCancellation, BatchTimerRegistration, BatchTimerResult, TimerError, TimerHandle,
+    TimerRegistration, TimerTaskCommand, TimerTaskStats,
 };
-pub use hybrid_system::{
-    HybridTimerTask, HybridTimerTaskHandle, start_hybrid_timer_task,
-};
-pub use wheel::{TimingWheel, TimerEntry, TimerEntryId};
+pub use wheel::{TimerEntry, TimerEntryId, TimingWheel};

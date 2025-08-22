@@ -3,8 +3,8 @@
 
 use crate::timer::event::traits::EventDataTrait;
 use crate::timer::event::{ConnectionId, TimerEvent};
-use crate::timer::wheel::entry::TimerEntryId;
 use crate::timer::task::types::TimerCallback;
+use crate::timer::wheel::entry::TimerEntryId;
 use std::time::Duration;
 use tokio::time::Instant;
 use wide::{u32x8, u64x4};
@@ -23,24 +23,25 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
         start_id: TimerEntryId,
     ) -> (Vec<TimerEntryId>, Vec<Instant>, Vec<usize>) {
         let len = timers.len();
-        
+
         // 预分配所有向量以避免动态分配
         // Pre-allocate all vectors to avoid dynamic allocation
         let mut entry_ids = Vec::with_capacity(len);
         let mut expiry_times = Vec::with_capacity(len);
         let mut slot_indices = Vec::with_capacity(len);
-        
+
         // 预计算常量
         // Pre-calculate constants
-        let current_time_nanos = self.current_time.duration_since(self.start_time).as_nanos() as u64;
+        let current_time_nanos =
+            self.current_time.duration_since(self.start_time).as_nanos() as u64;
         let slot_duration_nanos = self.slot_duration.as_nanos() as u64;
         let slot_mask = self.slot_mask as u32;
-        
+
         // 步骤1：混合SIMD向量化ID生成 (u32x8 + u64x4)
         // Step 1: Hybrid SIMD vectorized ID generation (u32x8 + u64x4)
         let mut id = start_id;
         let mut i = 0;
-        
+
         // 如果ID范围在u32内，使用u32x8获得8路并行
         // If ID range is within u32, use u32x8 for 8-way parallelism
         if start_id <= u32::MAX as u64 && (start_id + len as u64) <= u32::MAX as u64 {
@@ -48,8 +49,14 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
             // Process IDs in groups of 8 using u32x8
             while i + 8 <= len {
                 let id_vec = u32x8::new([
-                    id as u32, (id + 1) as u32, (id + 2) as u32, (id + 3) as u32,
-                    (id + 4) as u32, (id + 5) as u32, (id + 6) as u32, (id + 7) as u32
+                    id as u32,
+                    (id + 1) as u32,
+                    (id + 2) as u32,
+                    (id + 3) as u32,
+                    (id + 4) as u32,
+                    (id + 5) as u32,
+                    (id + 6) as u32,
+                    (id + 7) as u32,
                 ]);
                 let id_array = id_vec.to_array();
                 for &id_u32 in &id_array {
@@ -69,7 +76,7 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
                 i += 4;
             }
         }
-        
+
         // 处理剩余的ID
         // Handle remaining IDs
         while i < len {
@@ -77,17 +84,25 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
             id += 1;
             i += 1;
         }
-        
+
         // 步骤2：提取延迟时间数组用于SIMD处理
         // Step 2: Extract delay times array for SIMD processing
-        let delay_nanos: Vec<u64> = timers.iter()
+        let delay_nanos: Vec<u64> = timers
+            .iter()
             .map(|(delay, _)| delay.as_nanos() as u64)
             .collect();
-        
+
         // 使用SIMD并行计算时间和槽位
         // Use SIMD to parallel calculate time and slots
-        self.simd_process_delays(&delay_nanos, current_time_nanos, slot_duration_nanos, slot_mask, &mut expiry_times, &mut slot_indices);
-        
+        self.simd_process_delays(
+            &delay_nanos,
+            current_time_nanos,
+            slot_duration_nanos,
+            slot_mask,
+            &mut expiry_times,
+            &mut slot_indices,
+        );
+
         (entry_ids, expiry_times, slot_indices)
     }
 
@@ -104,11 +119,11 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
     ) {
         let len = delay_nanos.len();
         let mut i = 0;
-        
+
         // 常量向量用于SIMD操作
         // Constant vectors for SIMD operations
         let current_time_vec = u64x4::splat(current_time_nanos);
-        
+
         // 使用SIMD处理4个一组的延迟计算
         // Process delays in groups of 4 using SIMD
         while i + 4 <= len {
@@ -116,15 +131,15 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
             // Load 4 delay values
             let delay_vec = u64x4::new([
                 delay_nanos[i],
-                delay_nanos[i + 1], 
+                delay_nanos[i + 1],
                 delay_nanos[i + 2],
-                delay_nanos[i + 3]
+                delay_nanos[i + 3],
             ]);
-            
+
             // SIMD并行计算总纳秒数
             // SIMD parallel calculation of total nanoseconds
             let total_nanos_vec = current_time_vec + delay_vec;
-            
+
             // SIMD并行计算槽位偏移（手动计算，因为wide不支持u64除法）
             // SIMD parallel calculation of slot offsets (manual calculation as wide doesn't support u64 division)
             let total_nanos = total_nanos_vec.to_array();
@@ -135,12 +150,12 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
                 total_nanos[3] / slot_duration_nanos,
             ];
             let slot_offset_vec = u64x4::new(slot_offsets);
-            
+
             // 提取结果并转换为所需类型
             // Extract results and convert to required types
             let total_nanos = total_nanos_vec.to_array();
             let slot_offsets = slot_offset_vec.to_array();
-            
+
             // 批量添加到结果向量
             // Batch add to result vectors
             for j in 0..4 {
@@ -148,33 +163,33 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
                 // Calculate expiry time
                 let expiry_time = self.start_time + Duration::from_nanos(total_nanos[j]);
                 expiry_times.push(expiry_time);
-                
+
                 // 计算槽位索引（使用位运算）
                 // Calculate slot index (using bitwise operation)
                 let slot_index = (slot_offsets[j] as u32 & slot_mask) as usize;
                 slot_indices.push(slot_index);
             }
-            
+
             i += 4;
         }
-        
+
         // 处理剩余的延迟（非SIMD）
         // Handle remaining delays (non-SIMD)
         while i < len {
             let delay_nanos_val = delay_nanos[i];
             let total_nanos = current_time_nanos + delay_nanos_val;
-            
+
             // 计算到期时间
             // Calculate expiry time
             let expiry_time = self.start_time + Duration::from_nanos(total_nanos);
             expiry_times.push(expiry_time);
-            
+
             // 计算槽位索引
             // Calculate slot index
             let slot_offset = (total_nanos / slot_duration_nanos) as usize;
             let slot_index = slot_offset & (slot_mask as usize);
             slot_indices.push(slot_index);
-            
+
             i += 1;
         }
     }
@@ -184,18 +199,19 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
     #[allow(dead_code)]
     #[inline]
     pub(super) fn simd_batch_slot_calculation(&self, delay_nanos: &[u128]) -> Vec<usize> {
-        let current_time_nanos = self.current_time.duration_since(self.start_time).as_nanos() as u64;
+        let current_time_nanos =
+            self.current_time.duration_since(self.start_time).as_nanos() as u64;
         let slot_duration_nanos = self.slot_duration.as_nanos() as u64;
         let slot_mask = self.slot_mask as u32;
-        
+
         let mut result = Vec::with_capacity(delay_nanos.len());
         let len = delay_nanos.len();
         let mut i = 0;
-        
+
         // 常量向量用于SIMD操作
         // Constant vectors for SIMD operations
         let current_time_vec = u64x4::splat(current_time_nanos);
-        
+
         // 使用SIMD处理4个一组的计算
         // Process calculations in groups of 4 using SIMD
         while i + 4 <= len {
@@ -207,7 +223,7 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
                 delay_nanos[i + 2] as u64,
                 delay_nanos[i + 3] as u64,
             ]);
-            
+
             // SIMD并行计算
             // SIMD parallel calculation
             let total_nanos_vec = current_time_vec + delay_vec;
@@ -219,17 +235,17 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
                 total_nanos[3] / slot_duration_nanos,
             ];
             let slot_offset_vec = u64x4::new(slot_offsets);
-            
+
             // 提取结果并应用掩码
             // Extract results and apply mask
             let slot_offsets = slot_offset_vec.to_array();
             for &offset in &slot_offsets {
                 result.push((offset as u32 & slot_mask) as usize);
             }
-            
+
             i += 4;
         }
-        
+
         // 处理剩余的延迟（非SIMD）
         // Handle remaining delays (non-SIMD)
         while i < len {
@@ -239,23 +255,26 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
             result.push(slot_offset & (slot_mask as usize));
             i += 1;
         }
-        
+
         result
     }
 
     /// SIMD优化的槽位分布分析 (u32x8增强版)
     /// SIMD optimized slot distribution analysis (u32x8 enhanced version)
-    pub(super) fn simd_analyze_slot_distribution(&self, slot_indices: &[usize]) -> Vec<(usize, usize)> {
+    pub(super) fn simd_analyze_slot_distribution(
+        &self,
+        slot_indices: &[usize],
+    ) -> Vec<(usize, usize)> {
         let len = slot_indices.len();
         if len == 0 {
             return Vec::new();
         }
-        
+
         // 预分配计数数组，避免HashMap查找开销
         // Pre-allocate count array to avoid HashMap lookup overhead
         let mut slot_counts = vec![0u32; self.slot_count];
         let mut i = 0;
-        
+
         // 使用u32x8进行8路并行槽位分布计数
         // Use u32x8 for 8-way parallel slot distribution counting
         while i + 8 <= len {
@@ -271,26 +290,27 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
                 slot_indices[i + 6] as u32,
                 slot_indices[i + 7] as u32,
             ]);
-            
+
             // 验证槽位索引有效性的SIMD向量
             // SIMD vector for validating slot index validity
             let max_slot_vec = u32x8::splat(self.slot_count as u32);
             let valid_mask = indices_vec.cmp_lt(max_slot_vec);
-            
+
             // 提取索引并计数（只处理有效的索引）
             // Extract indices and count (only process valid indices)
             let indices_array = indices_vec.to_array();
             let valid_array = valid_mask.to_array();
-            
+
             for j in 0..8 {
-                if valid_array[j] != 0 {  // 有效索引
+                if valid_array[j] != 0 {
+                    // 有效索引
                     slot_counts[indices_array[j] as usize] += 1;
                 }
             }
-            
+
             i += 8;
         }
-        
+
         // 处理剩余的4个槽位索引（如果有）
         // Process remaining 4 slot indices (if any)
         while i + 4 <= len {
@@ -302,7 +322,7 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
                 slot_indices[i + 2] as u32,
                 slot_indices[i + 3] as u32,
             ];
-            
+
             // SIMD并行增量计数
             // SIMD parallel increment counting
             for &idx in &indices {
@@ -310,10 +330,10 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
                     slot_counts[idx as usize] += 1;
                 }
             }
-            
+
             i += 4;
         }
-        
+
         // 处理剩余的索引
         // Handle remaining indices
         while i < len {
@@ -323,7 +343,7 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
             }
             i += 1;
         }
-        
+
         // 构建分布结果（仅包含非零槽位）
         // Build distribution result (only non-zero slots)
         let mut distribution = Vec::new();
@@ -332,7 +352,7 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
                 distribution.push((slot_idx, count as usize));
             }
         }
-        
+
         distribution
     }
 
@@ -348,9 +368,9 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
         let len = entry_ids.len();
         assert_eq!(entry_ids.len(), connection_ids.len());
         assert_eq!(entry_ids.len(), slot_indices.len());
-        
+
         let mut i = 0;
-        
+
         // 使用SIMD批量处理映射更新
         // Use SIMD to batch process mapping updates
         while i + 4 <= len {
@@ -361,26 +381,26 @@ impl<E: EventDataTrait, C: TimerCallback<E>> super::core::TimingWheel<E, C> {
                 let entry_id = entry_ids[idx];
                 let _connection_id = connection_ids[idx];
                 let slot_index = slot_indices[idx];
-                
+
                 // 更新timer_map
                 // Update timer_map
                 self.timer_map.insert(entry_id, (slot_index, 0)); // position will be updated later
-                
+
                 // 更新entry_to_connection映射（如果在task.rs中存在）
                 // Update entry_to_connection mapping (if exists in task.rs)
                 // 这里只能在task.rs中完成，因为wheel.rs不包含connection映射
                 // This can only be done in task.rs as wheel.rs doesn't contain connection mapping
             }
-            
+
             i += 4;
         }
-        
+
         // 处理剩余的映射
         // Handle remaining mappings
         while i < len {
             let entry_id = entry_ids[i];
             let slot_index = slot_indices[i];
-            
+
             self.timer_map.insert(entry_id, (slot_index, 0));
             i += 1;
         }

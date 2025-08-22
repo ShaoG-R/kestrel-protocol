@@ -1,12 +1,12 @@
-use tokio::time::Instant;
-use std::time::Duration;
 use crate::config::Config;
 use crate::core::reliability::{
-    coordination::{
-        flow_control_coordinator::{FlowControlCoordinator, FlowControlCoordinatorConfig},
+    coordination::flow_control_coordinator::{
+        FlowControlCoordinator, FlowControlCoordinatorConfig,
     },
     logic::congestion::vegas_controller::VegasController,
 };
+use std::time::Duration;
+use tokio::time::Instant;
 
 fn create_test_config() -> Config {
     Config::default()
@@ -48,11 +48,15 @@ fn test_peer_receive_window_update() {
     // 测试窗口限制对发送许可的影响
     coordinator.update_in_flight_count(20); // 使用较小的在途数据包数量
     let state = coordinator.get_flow_control_state();
-    
+
     // 验证发送许可的计算逻辑：min(congestion_window - in_flight, peer_window - in_flight)
     let expected_permit = std::cmp::min(
-        state.congestion_window.saturating_sub(state.in_flight_count),
-        state.peer_receive_window.saturating_sub(state.in_flight_count)
+        state
+            .congestion_window
+            .saturating_sub(state.in_flight_count),
+        state
+            .peer_receive_window
+            .saturating_sub(state.in_flight_count),
     );
     assert_eq!(state.send_permit, expected_permit);
     assert!(state.send_permit > 0); // 应该有可用的发送许可
@@ -103,7 +107,7 @@ fn test_zero_max_rate_handling() {
 
     // 测试设置为0的最大速率（应该不会panic）
     coordinator.set_max_send_rate(Some(0));
-    
+
     // 这应该不会导致除零错误
     let state = coordinator.get_flow_control_state();
     let _ = state.send_permit; // 确保可以正常访问状态
@@ -143,7 +147,7 @@ fn test_flow_control_statistics() {
 
     // 获取统计信息
     let stats = coordinator.get_statistics();
-    
+
     assert_eq!(stats.peer_receive_window, 200);
     assert_eq!(stats.in_flight_count, 10);
     assert_eq!(stats.max_send_rate, Some(20));

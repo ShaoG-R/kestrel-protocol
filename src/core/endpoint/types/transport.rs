@@ -8,6 +8,10 @@
 //! including reliability layer, flow control windows, etc. Now refactored
 //! to use the unified reliability layer architecture.
 
+use crate::core::reliability::logic::congestion::{
+    traits::{CongestionController, CongestionStats},
+    vegas_controller::VegasController,
+};
 use crate::{
     config::Config,
     core::{
@@ -22,10 +26,6 @@ use crate::{
         event::{ConnectionId, TimerEventData},
     },
 };
-use crate::core::reliability::logic::congestion::{
-    traits::{CongestionController, CongestionStats},
-    vegas_controller::VegasController,
-};
 use tokio::sync::mpsc;
 
 /// 传输层管理器 - 使用统一可靠性层架构
@@ -34,7 +34,7 @@ pub struct TransportManager<C: CongestionController = VegasController> {
     /// 统一可靠性层，负责ARQ、重传、拥塞控制等
     /// Unified reliability layer responsible for ARQ, retransmission, congestion control, etc.
     unified_reliability: UnifiedReliabilityLayer<C>,
-    
+
     /// 对端接收窗口大小（已集成到统一层中，保留用于向后兼容）
     /// Peer receive window size (integrated into unified layer, kept for backward compatibility)
     peer_recv_window: u32,
@@ -51,7 +51,14 @@ impl TransportManager<VegasController> {
     ) -> Self {
         let congestion_controller = VegasController::new(config.clone());
         let flow_control_config = FlowControlCoordinatorConfig::default();
-        Self::new(connection_id, timer_actor, timeout_tx, congestion_controller, flow_control_config, config)
+        Self::new(
+            connection_id,
+            timer_actor,
+            timeout_tx,
+            congestion_controller,
+            flow_control_config,
+            config,
+        )
     }
 
     /// 创建带指定窗口大小的Vegas传输层管理器（便利方法）
@@ -65,7 +72,15 @@ impl TransportManager<VegasController> {
     ) -> Self {
         let congestion_controller = VegasController::new(config.clone());
         let flow_control_config = FlowControlCoordinatorConfig::default();
-        Self::with_peer_window(connection_id, timer_actor, timeout_tx, congestion_controller, flow_control_config, config, peer_recv_window)
+        Self::with_peer_window(
+            connection_id,
+            timer_actor,
+            timeout_tx,
+            congestion_controller,
+            flow_control_config,
+            config,
+            peer_recv_window,
+        )
     }
 }
 
@@ -88,7 +103,7 @@ impl<C: CongestionController> TransportManager<C> {
             flow_control_config,
             config,
         );
-        
+
         Self {
             unified_reliability,
             peer_recv_window: 32, // 默认窗口大小
@@ -114,10 +129,10 @@ impl<C: CongestionController> TransportManager<C> {
             flow_control_config,
             config,
         );
-        
+
         // 更新对端接收窗口大小到统一层
         unified_reliability.update_peer_receive_window(peer_recv_window);
-        
+
         Self {
             unified_reliability,
             peer_recv_window,
@@ -148,7 +163,8 @@ impl<C: CongestionController> TransportManager<C> {
         self.peer_recv_window = window_size;
         // 同步更新到统一可靠性层
         // Synchronously update to unified reliability layer
-        self.unified_reliability.update_peer_receive_window(window_size);
+        self.unified_reliability
+            .update_peer_receive_window(window_size);
     }
 
     /// 检查发送缓冲区是否为空
@@ -162,7 +178,10 @@ impl<C: CongestionController> TransportManager<C> {
     /// Check if receive buffer is empty (unified layer doesn't have this method, use receive buffer stats)
     pub fn is_recv_buffer_empty(&self) -> bool {
         // 通过统计信息判断接收缓冲区是否为空
-        self.unified_reliability.get_statistics().receive_buffer_utilization == 0.0
+        self.unified_reliability
+            .get_statistics()
+            .receive_buffer_utilization
+            == 0.0
     }
 
     /// 检查在途数据包是否为空
@@ -174,7 +193,10 @@ impl<C: CongestionController> TransportManager<C> {
     /// 获取当前拥塞窗口大小
     /// Get current congestion window size
     pub fn congestion_window(&self) -> u32 {
-        self.unified_reliability.get_statistics().congestion_stats.congestion_window()
+        self.unified_reliability
+            .get_statistics()
+            .congestion_stats
+            .congestion_window()
     }
 
     /// 获取当前平滑往返时间（统一层尚未提供此接口，返回None）
@@ -196,7 +218,9 @@ impl<C: CongestionController> TransportManager<C> {
     /// 清理在途数据包（使用异步方法）
     /// Clear in-flight packets (using async method)
     pub async fn clear_in_flight_packets(&mut self) {
-        self.unified_reliability.cleanup_all_retransmission_timers().await;
+        self.unified_reliability
+            .cleanup_all_retransmission_timers()
+            .await;
     }
 
     /// 重装和发送数据
@@ -232,8 +256,14 @@ impl<C: CongestionController> std::fmt::Debug for TransportManager<C> {
             .field("in_flight_empty", &self.is_in_flight_empty())
             .field("in_flight_count", &unified_stats.total_in_flight)
             .field("active_timers", &unified_stats.active_timers)
-            .field("send_buffer_utilization", &unified_stats.send_buffer_utilization)
-            .field("receive_buffer_utilization", &unified_stats.receive_buffer_utilization)
+            .field(
+                "send_buffer_utilization",
+                &unified_stats.send_buffer_utilization,
+            )
+            .field(
+                "receive_buffer_utilization",
+                &unified_stats.receive_buffer_utilization,
+            )
             .finish()
     }
 }
@@ -245,23 +275,23 @@ pub struct TransportStats {
     /// 对端接收窗口大小
     /// Peer receive window size
     pub peer_recv_window: u32,
-    
+
     /// 平滑往返时间
     /// Smoothed round trip time
     pub smoothed_rtt: Option<std::time::Duration>,
-    
+
     /// RTT变化
     /// RTT variation
     pub rtt_var: Option<std::time::Duration>,
-    
+
     /// 发送缓冲区是否为空
     /// Whether send buffer is empty
     pub send_buffer_empty: bool,
-    
+
     /// 接收缓冲区是否为空
     /// Whether receive buffer is empty
     pub recv_buffer_empty: bool,
-    
+
     /// 在途数据包是否为空
     /// Whether in-flight packets are empty
     pub in_flight_empty: bool,
@@ -290,7 +320,10 @@ mod tests {
     async fn create_test_transport_manager() -> TransportManager<VegasController> {
         let config = Config::default();
         let connection_id = 1; // Test connection ID
-        let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent, crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>>();
+        let timer_handle = crate::timer::start_hybrid_timer_task::<
+            crate::core::endpoint::timing::TimeoutEvent,
+            crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>,
+        >();
         let timer_actor = crate::timer::start_sender_timer_actor(timer_handle, None);
         let (tx_to_endpoint, _rx_from_stream) = tokio::sync::mpsc::channel(128);
         TransportManager::new_with_vegas(connection_id, timer_actor, tx_to_endpoint, config)
@@ -299,7 +332,7 @@ mod tests {
     #[tokio::test]
     async fn test_transport_manager_creation() {
         let manager = create_test_transport_manager().await;
-        
+
         assert_eq!(manager.peer_recv_window(), 32);
         assert!(manager.is_send_buffer_empty());
         assert!(manager.is_recv_buffer_empty());
@@ -310,21 +343,30 @@ mod tests {
     async fn test_transport_manager_with_window() {
         let config = Config::default();
         let connection_id = 1;
-        let timer_handle = crate::timer::start_hybrid_timer_task::<crate::core::endpoint::timing::TimeoutEvent, crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>>();
+        let timer_handle = crate::timer::start_hybrid_timer_task::<
+            crate::core::endpoint::timing::TimeoutEvent,
+            crate::timer::task::types::SenderCallback<crate::core::endpoint::timing::TimeoutEvent>,
+        >();
         let timer_actor = crate::timer::start_sender_timer_actor(timer_handle, None);
         let (tx_to_endpoint, _rx_from_stream) = tokio::sync::mpsc::channel(128);
-        
-        let manager = TransportManager::new_vegas_with_peer_window(connection_id, timer_actor, tx_to_endpoint, config, 64);
-        
+
+        let manager = TransportManager::new_vegas_with_peer_window(
+            connection_id,
+            timer_actor,
+            tx_to_endpoint,
+            config,
+            64,
+        );
+
         assert_eq!(manager.peer_recv_window(), 64);
     }
 
     #[tokio::test]
     async fn test_peer_window_operations() {
         let mut manager = create_test_transport_manager().await;
-        
+
         assert_eq!(manager.peer_recv_window(), 32);
-        
+
         manager.set_peer_recv_window(128);
         assert_eq!(manager.peer_recv_window(), 128);
     }
@@ -332,13 +374,13 @@ mod tests {
     #[tokio::test]
     async fn test_transport_stats() {
         let manager = create_test_transport_manager().await;
-        
+
         let stats = manager.transport_stats();
         assert_eq!(stats.peer_recv_window, 32);
         assert!(stats.send_buffer_empty);
         assert!(stats.recv_buffer_empty);
         assert!(stats.in_flight_empty);
-        
+
         let stats_string = stats.stats_string();
         assert!(stats_string.contains("TransportStats"));
         assert!(stats_string.contains("peer_recv_window: 32"));
@@ -347,7 +389,7 @@ mod tests {
     #[tokio::test]
     async fn test_transport_manager_debug() {
         let manager = create_test_transport_manager().await;
-        
+
         let debug_string = format!("{:?}", manager);
         assert!(debug_string.contains("TransportManager"));
         assert!(debug_string.contains("peer_recv_window"));

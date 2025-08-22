@@ -1,12 +1,12 @@
 //! 帧路由分发层 - 负责帧的智能路由和连接映射管理
 //! Frame Routing Layer - Handles intelligent frame routing and connection mapping
 
-use crate::socket::event_loop::ConnectionMeta;
 use crate::packet::frame::Frame;
-use std::{collections::HashMap, net::SocketAddr};
-use tracing::{debug, warn};
+use crate::socket::event_loop::ConnectionMeta;
 use crate::socket::event_loop::draining::DrainingPool;
+use std::{collections::HashMap, net::SocketAddr};
 use tokio::time::Instant;
+use tracing::{debug, warn};
 
 /// 帧路由管理器 - 负责帧的智能路由和连接映射管理
 /// Frame Router Manager - Handles intelligent frame routing and connection mapping
@@ -96,7 +96,7 @@ impl FrameRouter {
             // Use address hash as cache key for 0-RTT scenarios
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
-            
+
             let mut hasher = DefaultHasher::new();
             remote_addr.hash(&mut hasher);
             // 确保与CID范围不冲突（使用高位）
@@ -209,7 +209,7 @@ impl FrameRouter {
         meta: ConnectionMeta,
     ) {
         debug!(cid = %cid, addr = %remote_addr, "注册新连接 | Registering new connection");
-        
+
         // 如果相同地址已存在连接，先移除旧连接
         // If a connection already exists for the same address, remove the old one first
         if let Some(&old_cid) = self.address_routing.get(&remote_addr) {
@@ -223,7 +223,7 @@ impl FrameRouter {
         // 添加到活跃连接映射
         // Add to active connections mapping
         self.active_connections.insert(cid, meta);
-        
+
         // 添加到地址路由表
         // Add to address routing table
         self.address_routing.insert(remote_addr, cid);
@@ -242,7 +242,7 @@ impl FrameRouter {
     /// the connection's address mapping relationship.
     pub(crate) fn update_connection_address(&mut self, cid: u32, new_addr: SocketAddr) {
         debug!(cid = %cid, new_addr = %new_addr, "更新连接地址映射 | Updating connection address mapping");
-        
+
         // 查找并移除旧的地址映射
         // Find and remove old address mapping
         let mut old_addr = None;
@@ -256,7 +256,7 @@ impl FrameRouter {
             self.address_routing.remove(&addr);
             debug!(cid = %cid, old_addr = %addr, "移除旧地址映射 | Removed old address mapping");
         }
-        
+
         // 添加新的地址映射
         // Add new address mapping
         self.address_routing.insert(new_addr, cid);
@@ -293,7 +293,7 @@ impl FrameRouter {
             self.address_routing.remove(&addr);
             debug!(cid = %cid, addr = %addr, "移除连接的地址映射 | Removed address mapping for connection");
         }
-        
+
         // 不直接丢弃CID，而是将其移至draining状态
         // Instead of forgetting the CID, move it to the draining state
         self.draining_pool.insert(cid);
@@ -335,12 +335,12 @@ impl FrameRouter {
             remote_addr,
             arrival_time: Instant::now(),
         };
-        
+
         self.pending_frames
             .entry(cache_key)
             .or_default()
             .push(pending_frame);
-        
+
         debug!(
             cid = %cid,
             addr = %remote_addr,
@@ -362,30 +362,35 @@ impl FrameRouter {
     /// Successfully forwarded frames will be removed from the cache.
     pub(crate) async fn forward_cached_frames(&mut self, cid: u32, remote_addr: SocketAddr) {
         let mut keys_to_check = Vec::new();
-        
+
         // 检查基于CID的缓存（如果CID非0）
         // Check CID-based cache (if CID is non-zero)
         if cid != 0 {
             keys_to_check.push(cid as u64);
         }
-        
+
         // 检查基于地址的缓存（0-RTT场景）
         // Check address-based cache (0-RTT scenarios)
         let addr_cache_key = self.get_cache_key(0, remote_addr);
         keys_to_check.push(addr_cache_key);
-        
+
         if let Some(meta) = self.active_connections.get(&cid) {
             let mut total_forwarded = 0;
-            
+
             for cache_key in keys_to_check {
                 if let Some(pending_frames) = self.pending_frames.remove(&cache_key) {
                     let mut forwarded_count = 0;
-                    
+
                     for pending_frame in pending_frames {
                         // 确保帧来源地址匹配当前连接
                         // Ensure frame source address matches current connection
                         if pending_frame.remote_addr == remote_addr {
-                            if meta.sender.send((pending_frame.frame.clone(), pending_frame.remote_addr)).await.is_ok() {
+                            if meta
+                                .sender
+                                .send((pending_frame.frame.clone(), pending_frame.remote_addr))
+                                .await
+                                .is_ok()
+                            {
                                 forwarded_count += 1;
                             } else {
                                 warn!(
@@ -404,7 +409,7 @@ impl FrameRouter {
                                 .push(pending_frame);
                         }
                     }
-                    
+
                     total_forwarded += forwarded_count;
                     if forwarded_count > 0 {
                         debug!(
@@ -416,7 +421,7 @@ impl FrameRouter {
                     }
                 }
             }
-            
+
             if total_forwarded > 0 {
                 debug!(
                     cid = %cid,
@@ -438,30 +443,29 @@ impl FrameRouter {
     pub(crate) fn cleanup_expired_frames(&mut self, max_age: std::time::Duration) {
         let now = Instant::now();
         let mut expired_keys = Vec::new();
-        
+
         for (cache_key, frames) in &mut self.pending_frames {
             frames.retain(|frame| now.duration_since(frame.arrival_time) < max_age);
             if frames.is_empty() {
                 expired_keys.push(*cache_key);
             }
         }
-        
+
         for cache_key in expired_keys {
             self.pending_frames.remove(&cache_key);
             debug!(cache_key = %cache_key, "清理超时的早到帧缓存 | Cleaned up expired early arrival frame cache");
         }
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::socket::event_loop::draining::DrainingPool;
     use crate::packet::frame::Frame;
+    use crate::socket::event_loop::draining::DrainingPool;
     use std::net::{Ipv4Addr, SocketAddr};
-    use tokio::sync::mpsc;
     use std::time::Duration;
+    use tokio::sync::mpsc;
 
     fn create_test_router() -> FrameRouter {
         let draining_pool = DrainingPool::new(Duration::from_secs(10));
@@ -479,7 +483,14 @@ mod tests {
         let cid = 123u32;
 
         // Create a PUSH frame that would normally be unroutable
-        let push_frame = Frame::new_push(cid, 0, 0, 1024, 12345, bytes::Bytes::from_static(b"test data"));
+        let push_frame = Frame::new_push(
+            cid,
+            0,
+            0,
+            1024,
+            12345,
+            bytes::Bytes::from_static(b"test data"),
+        );
 
         // Dispatch frame when no connection exists - should be cached
         let result = router.dispatch_frame(push_frame.clone(), remote_addr).await;
@@ -493,7 +504,7 @@ mod tests {
         // Create a mock connection and register it
         let (tx, mut _rx) = mpsc::channel(10);
         let meta = ConnectionMeta { sender: tx };
-        
+
         router.register_connection(cid, remote_addr, meta).await;
 
         // Verify cached frame was cleared (forwarded)
@@ -507,13 +518,15 @@ mod tests {
         let cid = 456u32;
 
         // Create multiple PUSH frames
-        let push_frame1 = Frame::new_push(cid, 0, 0, 1024, 12345, bytes::Bytes::from_static(b"data1"));
-        let push_frame2 = Frame::new_push(cid, 1, 0, 1024, 12346, bytes::Bytes::from_static(b"data2"));
+        let push_frame1 =
+            Frame::new_push(cid, 0, 0, 1024, 12345, bytes::Bytes::from_static(b"data1"));
+        let push_frame2 =
+            Frame::new_push(cid, 1, 0, 1024, 12346, bytes::Bytes::from_static(b"data2"));
 
         // Dispatch frames when no connection exists - should be cached
         let result1 = router.dispatch_frame(push_frame1, remote_addr).await;
         let result2 = router.dispatch_frame(push_frame2, remote_addr).await;
-        
+
         assert!(matches!(result1, RoutingResult::FrameCached));
         assert!(matches!(result2, RoutingResult::FrameCached));
 
@@ -548,7 +561,14 @@ mod tests {
         let cid = 999u32;
 
         // Create a PUSH frame and cache it
-        let push_frame = Frame::new_push(cid, 0, 0, 1024, 12345, bytes::Bytes::from_static(b"test data"));
+        let push_frame = Frame::new_push(
+            cid,
+            0,
+            0,
+            1024,
+            12345,
+            bytes::Bytes::from_static(b"test data"),
+        );
         let result = router.dispatch_frame(push_frame, remote_addr).await;
         assert!(matches!(result, RoutingResult::FrameCached));
 
@@ -570,7 +590,14 @@ mod tests {
         let cid = 555u32;
 
         // Create and cache a PUSH frame
-        let push_frame = Frame::new_push(cid, 0, 0, 1024, 12345, bytes::Bytes::from_static(b"cached data"));
+        let push_frame = Frame::new_push(
+            cid,
+            0,
+            0,
+            1024,
+            12345,
+            bytes::Bytes::from_static(b"cached data"),
+        );
         let _result = router.dispatch_frame(push_frame.clone(), remote_addr).await;
 
         // Create a mock connection with a receiver to verify forwarding
@@ -583,7 +610,7 @@ mod tests {
         // Verify cached frame was forwarded
         let cache_key = cid as u64;
         assert!(!router.pending_frames.contains_key(&cache_key));
-        
+
         // Verify frame was actually sent to the connection
         let received = rx.try_recv();
         assert!(received.is_ok());
@@ -599,7 +626,14 @@ mod tests {
         let cid = 0u32; // 0-RTT scenario with CID=0
 
         // Create a PUSH frame with CID=0 (0-RTT scenario)
-        let push_frame = Frame::new_push(cid, 0, 0, 1024, 12345, bytes::Bytes::from_static(b"0-RTT data"));
+        let push_frame = Frame::new_push(
+            cid,
+            0,
+            0,
+            1024,
+            12345,
+            bytes::Bytes::from_static(b"0-RTT data"),
+        );
 
         // Dispatch frame when no connection exists - should be cached using address hash
         let result = router.dispatch_frame(push_frame.clone(), remote_addr).await;
@@ -614,8 +648,10 @@ mod tests {
         let actual_cid = 123u32;
         let (tx, mut _rx) = mpsc::channel(10);
         let meta = ConnectionMeta { sender: tx };
-        
-        router.register_connection(actual_cid, remote_addr, meta).await;
+
+        router
+            .register_connection(actual_cid, remote_addr, meta)
+            .await;
 
         // Verify cached frame was cleared (forwarded from address-based cache)
         assert!(!router.pending_frames.contains_key(&addr_cache_key));
@@ -628,24 +664,38 @@ mod tests {
         let addr2 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8082);
 
         // Both clients send 0-RTT PUSH frames with CID=0
-        let push_frame1 = Frame::new_push(0, 0, 0, 1024, 12345, bytes::Bytes::from_static(b"client1 data"));
-        let push_frame2 = Frame::new_push(0, 1, 0, 1024, 12346, bytes::Bytes::from_static(b"client2 data"));
+        let push_frame1 = Frame::new_push(
+            0,
+            0,
+            0,
+            1024,
+            12345,
+            bytes::Bytes::from_static(b"client1 data"),
+        );
+        let push_frame2 = Frame::new_push(
+            0,
+            1,
+            0,
+            1024,
+            12346,
+            bytes::Bytes::from_static(b"client2 data"),
+        );
 
         // Dispatch frames - should be cached separately based on addresses
         let result1 = router.dispatch_frame(push_frame1, addr1).await;
         let result2 = router.dispatch_frame(push_frame2, addr2).await;
-        
+
         assert!(matches!(result1, RoutingResult::FrameCached));
         assert!(matches!(result2, RoutingResult::FrameCached));
 
         // Verify frames are cached separately
         let cache_key1 = router.get_cache_key(0, addr1);
         let cache_key2 = router.get_cache_key(0, addr2);
-        
+
         assert!(router.pending_frames.contains_key(&cache_key1));
         assert!(router.pending_frames.contains_key(&cache_key2));
         assert_ne!(cache_key1, cache_key2); // Keys should be different
         assert_eq!(router.pending_frames[&cache_key1].len(), 1);
         assert_eq!(router.pending_frames[&cache_key2].len(), 1);
     }
-} 
+}

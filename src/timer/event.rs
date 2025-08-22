@@ -5,9 +5,9 @@
 //!
 //! This module defines all event types and data structures used in the timer system.
 
-pub(super) mod zero_copy;
-pub mod traits;
 pub mod pool;
+pub mod traits;
+pub(super) mod zero_copy;
 
 #[cfg(test)]
 mod zero_copy_tests;
@@ -18,11 +18,11 @@ mod performance_bench;
 pub mod lockfree_ring;
 pub mod memory_pool;
 
+use crate::timer::event::pool::TimerEventPool;
+use crate::timer::event::traits::EventDataTrait;
+use crate::timer::task::types::TimerCallback;
 use std::fmt;
 use std::fmt::Debug;
-use crate::timer::event::traits::EventDataTrait;
-use crate::timer::event::pool::TimerEventPool;
-use crate::timer::task::types::TimerCallback;
 
 /// 定时器事件ID，用于唯一标识一个定时器
 /// Timer event ID, used to uniquely identify a timer
@@ -61,8 +61,6 @@ impl<E: EventDataTrait> Clone for TimerEventData<E> {
     }
 }
 
-
-
 impl<E: EventDataTrait> TimerEventData<E> {
     /// 创建新的定时器事件数据
     /// Create new timer event data
@@ -75,7 +73,11 @@ impl<E: EventDataTrait> TimerEventData<E> {
 
     /// 使用对象池高效创建定时器事件数据
     /// Efficiently create timer event data using object pool
-    pub fn from_pool(pool: &TimerEventPool<E>, connection_id: ConnectionId, timeout_event: E) -> Self {
+    pub fn from_pool(
+        pool: &TimerEventPool<E>,
+        connection_id: ConnectionId,
+        timeout_event: E,
+    ) -> Self {
         pool.acquire(connection_id, timeout_event)
     }
 
@@ -116,16 +118,8 @@ pub struct TimerEvent<E: EventDataTrait, C: TimerCallback<E>> {
 impl<E: EventDataTrait, C: TimerCallback<E>> TimerEvent<E, C> {
     /// 创建新的定时器事件（传统方式）
     /// Create new timer event (traditional way)
-    pub fn new(
-        id: TimerEventId,
-        data: TimerEventData<E>,
-        callback: C,
-    ) -> Self {
-        Self {
-            id,
-            data,
-            callback,
-        }
+    pub fn new(id: TimerEventId, data: TimerEventData<E>, callback: C) -> Self {
+        Self { id, data, callback }
     }
 
     /// 使用智能工厂创建定时器事件 (推荐)
@@ -144,7 +138,6 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimerEvent<E, C> {
         }
     }
 
-
     /// 批量创建定时器事件（智能工厂版本，推荐）
     /// Batch create timer events (smart factory version, recommended)
     pub fn batch_from_factory(
@@ -160,7 +153,7 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimerEvent<E, C> {
         // 批量获取数据对象 (智能策略选择)
         // Batch acquire data objects (smart strategy selection)
         let data_objects = factory.batch_create_events(requests);
-        
+
         // 构建定时器事件
         // Build timer events
         data_objects
@@ -181,16 +174,13 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimerEvent<E, C> {
         let timer_id = self.id;
         let connection_id = self.data.connection_id;
         let event_type = self.data.timeout_event.clone();
-        
+
         // 使用智能工厂创建数据用于发送（Copy类型零开销，非Copy类型智能管理）
         // Use smart factory to create data for sending (zero-cost for Copy types, smart management for non-Copy types)
         let data_for_send = factory.create_event(connection_id, event_type);
-        
+
         if let Err(_err) = self.callback.on_timeout(data_for_send).await {
-            tracing::warn!(
-                timer_id,
-                "Failed to send timer event to callback channel"
-            );
+            tracing::warn!(timer_id, "Failed to send timer event to callback channel");
         } else {
             tracing::trace!(
                 timer_id,
@@ -199,11 +189,10 @@ impl<E: EventDataTrait, C: TimerCallback<E>> TimerEvent<E, C> {
                 "Timer event triggered successfully"
             );
         }
-        
+
         // 智能工厂会自动处理资源回收，无需手动管理
         // Smart factory automatically handles resource recycling, no manual management needed
     }
-
 }
 
 impl<E: EventDataTrait, C: TimerCallback<E>> fmt::Display for TimerEvent<E, C> {

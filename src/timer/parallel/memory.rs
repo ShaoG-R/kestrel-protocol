@@ -1,7 +1,7 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::timer::event::traits::EventDataTrait;
-use crate::timer::{ProcessedTimerData, TimerEntry};
 use crate::timer::task::types::TimerCallback;
+use crate::timer::{ProcessedTimerData, TimerEntry};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// 预分配内存池
 /// Pre-allocated memory pool  
@@ -20,18 +20,18 @@ pub struct MemoryPool<E: EventDataTrait> {
 impl<E: EventDataTrait> MemoryPool<E> {
     pub fn new(buffer_count: usize, buffer_capacity: usize) -> Self {
         let mut data_buffers = Vec::with_capacity(buffer_count);
-        
+
         for _ in 0..buffer_count {
             data_buffers.push(Vec::with_capacity(buffer_capacity));
         }
-        
+
         Self {
             data_buffers,
             current_buffer_index: AtomicUsize::new(0),
             buffer_count,
         }
     }
-    
+
     /// 获取下一个可用的数据缓冲区
     /// Get next available data buffer
     pub fn get_data_buffer(&mut self) -> &mut Vec<ProcessedTimerData<E>> {
@@ -40,8 +40,6 @@ impl<E: EventDataTrait> MemoryPool<E> {
         buffer.clear();
         buffer
     }
-    
-
 }
 
 /// 零分配处理器 - 最小化内存分配
@@ -68,29 +66,33 @@ impl<E: EventDataTrait> ZeroAllocProcessor<E> {
     pub fn new() -> Self {
         // 创建默认时间戳
         let default_instant = tokio::time::Instant::now();
-        
+
         // 使用数组映射来初始化栈缓冲区
-        let stack_buffer: [ProcessedTimerData<E>; 64] = std::array::from_fn(|_| ProcessedTimerData {
-            entry_id: 0,
-            connection_id: 0,
-            timeout_event: E::default(),
-            expiry_time: default_instant,
-            slot_index: 0,
-        });
-        
+        let stack_buffer: [ProcessedTimerData<E>; 64] =
+            std::array::from_fn(|_| ProcessedTimerData {
+                entry_id: 0,
+                connection_id: 0,
+                timeout_event: E::default(),
+                expiry_time: default_instant,
+                slot_index: 0,
+            });
+
         Self {
             memory_pool: MemoryPool::new(4, 1024), // 4个缓冲区，每个1024容量
             stack_buffer,
             stack_usage: 0,
         }
     }
-    
+
     /// 处理小批量（使用栈分配）
     /// Process small batch (using stack allocation)
-    pub fn process_small_batch<C: TimerCallback<E>>(&mut self, timer_entries: &[TimerEntry<E, C>]) -> &[ProcessedTimerData<E>] {
+    pub fn process_small_batch<C: TimerCallback<E>>(
+        &mut self,
+        timer_entries: &[TimerEntry<E, C>],
+    ) -> &[ProcessedTimerData<E>] {
         if timer_entries.len() <= 64 {
             self.stack_usage = timer_entries.len();
-            
+
             for (i, entry) in timer_entries.iter().enumerate() {
                 self.stack_buffer[i] = ProcessedTimerData {
                     entry_id: entry.id,
@@ -100,19 +102,22 @@ impl<E: EventDataTrait> ZeroAllocProcessor<E> {
                     slot_index: i,
                 };
             }
-            
+
             &self.stack_buffer[..self.stack_usage]
         } else {
             &[]
         }
     }
-    
+
     /// 处理大批量（使用内存池）
     /// Process large batch (using memory pool)
-    pub fn process_large_batch<C: TimerCallback<E>>(&mut self, timer_entries: &[TimerEntry<E, C>]) -> &[ProcessedTimerData<E>] {
+    pub fn process_large_batch<C: TimerCallback<E>>(
+        &mut self,
+        timer_entries: &[TimerEntry<E, C>],
+    ) -> &[ProcessedTimerData<E>] {
         let buffer = self.memory_pool.get_data_buffer();
         buffer.reserve(timer_entries.len());
-        
+
         for (i, entry) in timer_entries.iter().enumerate() {
             buffer.push(ProcessedTimerData {
                 entry_id: entry.id,
@@ -122,7 +127,7 @@ impl<E: EventDataTrait> ZeroAllocProcessor<E> {
                 slot_index: i,
             });
         }
-        
+
         buffer
     }
 }

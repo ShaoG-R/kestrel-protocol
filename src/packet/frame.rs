@@ -95,16 +95,10 @@ pub enum ReliabilityMode {
 pub enum Frame {
     /// A PUSH frame carrying data.
     /// 携带数据的 PUSH 帧。
-    Push {
-        header: ShortHeader,
-        payload: Bytes,
-    },
+    Push { header: ShortHeader, payload: Bytes },
     /// An ACK frame carrying SACK information.
     /// 携带SACK信息的 ACK 帧。
-    Ack {
-        header: ShortHeader,
-        payload: Bytes,
-    },
+    Ack { header: ShortHeader, payload: Bytes },
     /// A PING frame.
     /// PING 帧。
     Ping { header: ShortHeader },
@@ -113,9 +107,7 @@ pub enum Frame {
     Syn { header: LongHeader },
     /// A SYN-ACK frame to acknowledge a connection. It never carries a payload.
     /// 用于确认连接的 SYN-ACK 帧。它从不携带载荷。
-    SynAck {
-        header: LongHeader,
-    },
+    SynAck { header: LongHeader },
     /// A FIN frame to close a connection.
     /// 用于关闭连接的 FIN 帧。
     Fin { header: ShortHeader },
@@ -241,11 +233,7 @@ impl Frame {
 
     /// Creates a new SYN-ACK frame.
     /// 创建一个新的 SYN-ACK 帧。
-    pub fn new_syn_ack(
-        protocol_version: u8,
-        source_cid: u32,
-        destination_cid: u32,
-    ) -> Self {
+    pub fn new_syn_ack(protocol_version: u8, source_cid: u32, destination_cid: u32) -> Self {
         let header = LongHeader {
             command: command::Command::SynAck,
             protocol_version,
@@ -319,12 +307,8 @@ impl Frame {
         if command.is_long_header() {
             let header = LongHeader::decode(cursor)?;
             return match header.command {
-                command::Command::Syn => {
-                    Some(Frame::Syn { header })
-                }
-                command::Command::SynAck => {
-                    Some(Frame::SynAck { header })
-                }
+                command::Command::Syn => Some(Frame::Syn { header }),
+                command::Command::SynAck => Some(Frame::SynAck { header }),
                 _ => None,
             };
         }
@@ -482,7 +466,7 @@ impl Frame {
             // Regular PUSH frames use full SACK-based reliability
             // 常规PUSH帧使用基于SACK的完整可靠性
             Frame::Push { .. } => ReliabilityMode::Reliable,
-            
+
             // Control frames use simple retransmission
             // 控制帧使用简单重传
             Frame::Syn { .. } | Frame::SynAck { .. } | Frame::Fin { .. } => {
@@ -491,11 +475,11 @@ impl Frame {
                     retry_interval: Duration::from_millis(500),
                 }
             }
-            
+
             // ACK and PING frames don't need retransmission
             // ACK和PING帧不需要重传
             Frame::Ack { .. } | Frame::Ping { .. } => ReliabilityMode::BestEffort,
-            
+
             // Path validation frames use simple retransmission
             // 路径验证帧使用简单重传
             Frame::PathChallenge { .. } | Frame::PathResponse { .. } => {
@@ -509,7 +493,7 @@ impl Frame {
 
     /// Updates the connection ID in frames that use ShortHeader.
     /// This is used for retransmission when the peer CID changes after handshake.
-    /// 
+    ///
     /// 更新使用ShortHeader的帧中的连接ID。
     /// 这用于握手后对端CID更改时的重传。
     pub fn update_connection_id(&mut self, new_connection_id: u32) {
@@ -561,7 +545,7 @@ impl Frame {
             // 目前，只对控制帧使用简单重传
             // 常规PUSH帧始终使用基于SACK的可靠性以获得更好的性能
             Frame::Push { .. } => ReliabilityMode::Reliable,
-            
+
             // Control frames use configured parameters
             // 控制帧使用配置的参数
             Frame::Syn { .. } | Frame::SynAck { .. } | Frame::Fin { .. } => {
@@ -570,9 +554,9 @@ impl Frame {
                     retry_interval: config.reliability.control_frame_retry_interval,
                 }
             }
-            
+
             Frame::Ack { .. } | Frame::Ping { .. } => ReliabilityMode::BestEffort,
-            
+
             Frame::PathChallenge { .. } | Frame::PathResponse { .. } => {
                 ReliabilityMode::SimpleRetransmit {
                     max_retries: 3,
@@ -612,7 +596,7 @@ impl Frame {
             Frame::Push { payload, .. } => payload.len(),
             Frame::Ack { payload, .. } => payload.len(),
             Frame::PathChallenge { .. } => 8, // 64-bit challenge data
-            Frame::PathResponse { .. } => 8, // 64-bit challenge data
+            Frame::PathResponse { .. } => 8,  // 64-bit challenge data
             Frame::Ping { .. } => 0,
             _ => 0,
         };
@@ -643,4 +627,4 @@ impl Frame {
             ReliabilityMode::BestEffort => false,
         }
     }
-} 
+}

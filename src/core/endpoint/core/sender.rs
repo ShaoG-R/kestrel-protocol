@@ -1,18 +1,20 @@
 //! Sending-related logic for the `Endpoint`.
 
 use crate::core::endpoint::Endpoint;
+use crate::core::endpoint::core::frame::{
+    create_ack_frame, create_fin_frame, create_syn_ack_frame, create_syn_frame,
+};
+use crate::core::endpoint::types::state::ConnectionState;
+use crate::core::reliability::logic::congestion::traits::CongestionController;
 use crate::socket::transport::FrameBatch;
 use crate::{
     error::{Error, Result},
     packet::frame::Frame,
-    socket::{Transport},
+    socket::Transport,
     socket::TransportCommand,
 };
 use std::{future::Future, net::SocketAddr};
 use tracing::trace;
-use crate::core::endpoint::core::frame::{create_ack_frame, create_fin_frame, create_syn_ack_frame, create_syn_frame};
-use crate::core::endpoint::types::state::ConnectionState;
-use crate::core::reliability::logic::congestion::traits::CongestionController;
 
 /// A helper to build packets that respect the configured MTU.
 ///
@@ -95,7 +97,6 @@ where
 
 impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     pub(in crate::core::endpoint) async fn packetize_and_send(&mut self) -> Result<()> {
-
         // 1. Collect all frames that need to be sent without requiring &mut self.
         // 1. 收集所有需要发送的帧，这些操作不需要 &mut self。
         let peer_recv_window = self.transport.peer_recv_window();
@@ -124,13 +125,18 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
         if !frames_to_send.is_empty() {
             // 4. Register retransmission timers for frames that need reliability tracking
             // 4. 为需要可靠传输跟踪的帧注册重传定时器
-            let timer_count = self.transport.unified_reliability_mut()
+            let timer_count = self
+                .transport
+                .unified_reliability_mut()
                 .track_frames_for_retransmission(&frames_to_send)
                 .await;
             if timer_count > 0 {
-                trace!(count = timer_count, "Registered retransmission timers for packetized frames");
+                trace!(
+                    count = timer_count,
+                    "Registered retransmission timers for packetized frames"
+                );
             }
-            
+
             let sender = |p: Vec<Frame>| self.send_raw_frames(p);
             let mut packet_builder =
                 PacketBuilder::new(self.config.connection.max_packet_size, sender);
@@ -172,7 +178,11 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     /// Sends a SYN-ACK frame. This is a high-priority control frame and is sent immediately.
     /// 发送一个SYN-ACK帧。这是一个高优先级的控制帧，会被立即发送。
     pub(in crate::core::endpoint) async fn send_syn_ack(&mut self) -> Result<()> {
-        let frame = create_syn_ack_frame(&self.config, self.identity.peer_cid(), self.identity.local_cid());
+        let frame = create_syn_ack_frame(
+            &self.config,
+            self.identity.peer_cid(),
+            self.identity.local_cid(),
+        );
         self.send_raw_frames(vec![frame]).await
     }
 
@@ -181,11 +191,15 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
         // Directly create ACK frame, no longer check if ACK is pending
         // ACK帧包含当前的接收状态，即使没有新数据也没问题
         // ACK frame contains current receive state, no problem even if no new data
-        let frame = create_ack_frame(self.identity.peer_cid(), self.transport.unified_reliability_mut(), self.timing.start_time());
-        
+        let frame = create_ack_frame(
+            self.identity.peer_cid(),
+            self.transport.unified_reliability_mut(),
+            self.timing.start_time(),
+        );
+
         // 不需要特殊的ACK发送后处理
         // No special post-ACK processing needed
-        
+
         self.send_raw_frames(vec![frame]).await
     }
 
@@ -199,7 +213,7 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
         if frames.is_empty() {
             return Ok(());
         }
-        
+
         // 添加调试信息
         if !frames.is_empty() {
             tracing::debug!(
@@ -210,12 +224,13 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                 "Sending frames to remote address"
             );
         }
-        
+
         let cmd = FrameBatch {
             remote_addr: self.identity.remote_addr(),
             frames,
         };
-        self.channels.sender
+        self.channels
+            .sender
             .send(TransportCommand::Send(cmd))
             .await
             .map_err(|_| Error::ChannelClosed)
@@ -229,8 +244,7 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
             return Ok(());
         }
         let sender = |p: Vec<Frame>| self.send_raw_frames(p);
-        let mut packet_builder =
-            PacketBuilder::new(self.config.connection.max_packet_size, sender);
+        let mut packet_builder = PacketBuilder::new(self.config.connection.max_packet_size, sender);
         packet_builder.add_frames(frames).await?;
         packet_builder.flush().await
     }
@@ -240,30 +254,37 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     ///
     /// 发送采用智能分包的0-RTT数据包。每个内部Vec<Frame>作为独立的包发送。
     /// 这保持了分包器所做的智能分包策略。
-    pub(in crate::core::endpoint) async fn send_zero_rtt_packets(&self, packet_groups: Vec<Vec<Frame>>) -> Result<()> {
+    pub(in crate::core::endpoint) async fn send_zero_rtt_packets(
+        &self,
+        packet_groups: Vec<Vec<Frame>>,
+    ) -> Result<()> {
         if packet_groups.is_empty() {
             return Ok(());
         }
-        
+
         tracing::debug!(
             cid = self.identity.local_cid(),
             packet_count = packet_groups.len(),
             "Sending 0-RTT packets with intelligent splitting"
         );
-        
+
         let sender = |p: Vec<Frame>| self.send_raw_frames(p);
-        let mut packet_builder =
-            PacketBuilder::new(self.config.connection.max_packet_size, sender);
-        
+        let mut packet_builder = PacketBuilder::new(self.config.connection.max_packet_size, sender);
+
         packet_builder.send_multiple_packets(packet_groups).await
     }
 
-    pub(in crate::core::endpoint) async fn send_frame_to(&self, frame: Frame, remote_addr: SocketAddr) -> Result<()> {
+    pub(in crate::core::endpoint) async fn send_frame_to(
+        &self,
+        frame: Frame,
+        remote_addr: SocketAddr,
+    ) -> Result<()> {
         let cmd = FrameBatch {
             remote_addr,
             frames: vec![frame],
         };
-        self.channels.sender
+        self.channels
+            .sender
             .send(TransportCommand::Send(cmd))
             .await
             .map_err(|_| Error::ChannelClosed)
@@ -495,4 +516,4 @@ mod tests {
 
         assert!(rx.try_recv().is_err());
     }
-} 
+}

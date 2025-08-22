@@ -33,7 +33,9 @@ mod tests {
             command_tx,
             None,
             timer_handle,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // 验证初始状态
         assert_eq!(endpoint.local_cid(), local_cid);

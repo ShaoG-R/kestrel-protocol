@@ -1,7 +1,7 @@
 //! Types used by endpoints.
 
-pub mod command;
-pub mod state;
-pub mod identity;
 pub mod channels;
+pub mod command;
+pub mod identity;
+pub mod state;
 pub mod transport;

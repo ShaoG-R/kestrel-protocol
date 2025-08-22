@@ -4,7 +4,7 @@ use crate::{
     config::Config,
     core::{
         endpoint::{Endpoint, StreamCommand},
-        test_utils::{spawn_endpoint, MockTransport},
+        test_utils::{MockTransport, spawn_endpoint},
     },
     packet::frame::Frame,
     socket::transport::ReceivedDatagram,
@@ -14,10 +14,7 @@ use bytes::Bytes;
 use std::{
     collections::{HashMap, VecDeque},
     net::SocketAddr,
-    sync::{
-        atomic::AtomicUsize,
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex, atomic::AtomicUsize},
     time::Duration,
 };
 use tokio::sync::mpsc;
@@ -162,16 +159,19 @@ async fn test_core_multiple_clients_concurrently() {
         // Start global timer task for testing
         let timer_handle = crate::timer::start_hybrid_timer_task();
 
-        let (server_endpoint, tx_to_server_user, rx_from_server_user) = Endpoint::new_server_with_vegas(
-            Config::default(),
-            client_addr,
-            server_cid,
-            client_cid,
-            rx_from_demux,
-            sender_task_tx.clone(),
-            server_command_tx,
-            timer_handle,
-        ).await.unwrap();
+        let (server_endpoint, tx_to_server_user, rx_from_server_user) =
+            Endpoint::new_server_with_vegas(
+                Config::default(),
+                client_addr,
+                server_cid,
+                client_cid,
+                rx_from_demux,
+                sender_task_tx.clone(),
+                server_command_tx,
+                timer_handle,
+            )
+            .await
+            .unwrap();
         server_handles.push((rx_from_server_user, tx_to_server_user.clone()));
 
         spawn_endpoint(
@@ -191,16 +191,19 @@ async fn test_core_multiple_clients_concurrently() {
             // Start global timer task for testing
             let timer_handle = crate::timer::start_hybrid_timer_task();
 
-            let (mut endpoint, tx_to_client_user, mut rx_from_client_user) = Endpoint::new_client_with_vegas(
-                Config::default(),
-                server_addr,
-                client_cid,
-                rx_from_socket,
-                sender_task_tx,
-                client_command_tx,
-                None,
-                timer_handle,
-            ).await.unwrap();
+            let (mut endpoint, tx_to_client_user, mut rx_from_client_user) =
+                Endpoint::new_client_with_vegas(
+                    Config::default(),
+                    server_addr,
+                    client_cid,
+                    rx_from_socket,
+                    sender_task_tx,
+                    client_command_tx,
+                    None,
+                    timer_handle,
+                )
+                .await
+                .unwrap();
             endpoint.set_peer_cid(server_cid);
             spawn_endpoint(
                 endpoint,
@@ -225,7 +228,7 @@ async fn test_core_multiple_clients_concurrently() {
             // hasher.update(&msg);
             // let hash = hasher.finalize();
             // println!("[CLIENT {}] SENDING PAYLOAD -> len: {}, hash: {:x}", i, msg.len(), hash);
-            // --- END DEBUG LOG ---    
+            // --- END DEBUG LOG ---
 
             tx_to_client_user
                 .send(StreamCommand::SendData(msg.clone()))
@@ -294,4 +297,4 @@ async fn test_core_multiple_clients_concurrently() {
     for handle in server_verification_handles {
         handle.await.unwrap();
     }
-} 
+}

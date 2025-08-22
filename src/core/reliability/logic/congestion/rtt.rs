@@ -78,7 +78,11 @@ impl RttEstimator {
         // TODO: Consider adding a max_rto to config
         let old_rto = self.rto;
         self.rto *= 2;
-        debug!(old_rto_ms = old_rto.as_millis(), new_rto_ms = self.rto.as_millis(), "RTO backoff");
+        debug!(
+            old_rto_ms = old_rto.as_millis(),
+            new_rto_ms = self.rto.as_millis(),
+            "RTO backoff"
+        );
     }
 
     /// Returns the current smoothed RTT estimate.
@@ -170,4 +174,4 @@ mod tests {
         assert!(estimator.rto() >= min_rto);
         assert_eq!(estimator.rto(), min_rto);
     }
-} 
+}

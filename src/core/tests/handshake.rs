@@ -11,7 +11,6 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn test_1rtt_handshake_with_server_data() {
-
     // This test simulates a 1-RTT handshake where the server application
     // sends data immediately upon accepting a connection, which is coalesced
     // with the SYN-ACK frame.
@@ -98,7 +97,6 @@ async fn test_1rtt_handshake_with_server_data() {
 
 #[tokio::test]
 async fn test_0rtt_handshake_with_client_data() {
-
     // This test simulates a 0-RTT handshake where the client sends data
     // immediately with its initial SYN packet.
 

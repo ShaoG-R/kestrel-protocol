@@ -7,19 +7,22 @@
 //! This module specifically handles ACK frames, including SACK information parsing,
 //! RTT calculation, congestion control updates, etc.
 
-use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::AckFrame};
-use crate::{
-    error::{Result, ProcessorErrorContext},
-    packet::{frame::Frame, sack::decode_sack_ranges},
-    socket::{Transport},
+use super::{
+    FrameProcessingContext, TypeSafeFrameProcessor, TypeSafeFrameValidator, UnifiedFrameProcessor,
+    frame_types::AckFrame,
 };
+use crate::{
+    error::{ProcessorErrorContext, Result},
+    packet::{frame::Frame, sack::decode_sack_ranges},
+    socket::Transport,
+};
+use async_trait::async_trait;
 use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, trace, warn};
-use async_trait::async_trait;
 
+use super::super::traits::ProcessorOperations;
 use crate::core::endpoint::types::state::ConnectionState;
-use super::super::traits::{ProcessorOperations};
 
 /// ACK 帧处理器
 /// ACK frame processor
@@ -53,18 +56,16 @@ impl<T: Transport> TypeSafeFrameProcessor<T> for AckProcessor {
 // Implement type-safe validation interface
 impl TypeSafeFrameValidator for AckProcessor {
     type FrameTypeMarker = AckFrame;
-    
+
     /// 验证帧类型是否为 ACK 帧
     /// Validate that the frame type is an ACK frame
     fn validate_frame_type(frame: &Frame) -> Result<()> {
         match frame {
             Frame::Ack { .. } => Ok(()),
-            _ => Err(crate::error::Error::InvalidFrame(
-                format!(
-                    "AckProcessor can only handle ACK frames, got: {:?}", 
-                    std::mem::discriminant(frame)
-                )
-            ))
+            _ => Err(crate::error::Error::InvalidFrame(format!(
+                "AckProcessor can only handle ACK frames, got: {:?}",
+                std::mem::discriminant(frame)
+            ))),
         }
     }
 }
@@ -85,12 +86,13 @@ impl AckProcessor {
                     "ACK frame".to_string(),
                     format!("{:?}", std::mem::discriminant(&frame)),
                     error_context,
-                ).into(),
+                )
+                .into(),
             });
         };
 
         let context = FrameProcessingContext::new(endpoint, src_addr, now);
-        
+
         trace!(
             cid = context.local_cid,
             recv_next_seq = header.recv_next_sequence,
@@ -133,8 +135,6 @@ impl AckProcessor {
     }
 }
 
-
-
 // 统一接口实现
 // Unified interface implementation
 #[async_trait]
@@ -158,8 +158,6 @@ impl<T: Transport> UnifiedFrameProcessor<T> for AckProcessor {
         Self::process_ack_frame_internal(endpoint, frame, src_addr, now).await
     }
 }
-
-
 
 impl AckProcessor {
     /// 创建处理器错误上下文
@@ -189,11 +187,11 @@ impl AckProcessor {
         // 更新对端接收窗口大小
         // Update peer receive window size
         endpoint.set_peer_recv_window(header.recv_window_size as u32);
-        
+
         // 解析 SACK 范围
         // Parse SACK ranges
         let sack_ranges = decode_sack_ranges(payload);
-        
+
         debug!(
             cid = endpoint.local_cid(),
             recv_next_seq = header.recv_next_sequence,
@@ -204,15 +202,14 @@ impl AckProcessor {
 
         // 使用高级接口处理 ACK 并获取需要重传的帧
         // Use high-level interface to process ACK and get frames that need retransmission
-        let sack_tuples: Vec<(u32, u32)> = sack_ranges.into_iter()
+        let sack_tuples: Vec<(u32, u32)> = sack_ranges
+            .into_iter()
             .map(|range| (range.start, range.end))
             .collect();
 
-        let frames_to_retx = endpoint.process_ack_and_get_retx_frames(
-            header.recv_next_sequence,
-            sack_tuples,
-            now,
-        ).await?;
+        let frames_to_retx = endpoint
+            .process_ack_and_get_retx_frames(header.recv_next_sequence, sack_tuples, now)
+            .await?;
 
         // 如果有需要重传的帧，立即发送
         // If there are frames to retransmit, send them immediately
@@ -284,10 +281,7 @@ impl AckProcessor {
         payload: bytes::Bytes,
         now: Instant,
     ) -> Result<()> {
-        debug!(
-            cid = endpoint.local_cid(),
-            "Handling ACK in FinWait state"
-        );
+        debug!(cid = endpoint.local_cid(), "Handling ACK in FinWait state");
 
         Self::process_ack_common(endpoint, header, payload, now).await
     }
@@ -300,10 +294,7 @@ impl AckProcessor {
         payload: bytes::Bytes,
         now: Instant,
     ) -> Result<()> {
-        debug!(
-            cid = endpoint.local_cid(),
-            "Handling ACK in Closing state"
-        );
+        debug!(cid = endpoint.local_cid(), "Handling ACK in Closing state");
 
         Self::process_ack_common(endpoint, header, payload, now).await
     }
@@ -328,11 +319,11 @@ impl AckProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_utils::MockTransport;
+    use crate::packet::command::Command;
     use crate::packet::frame::Frame;
     use crate::packet::header::ShortHeader;
-    use crate::packet::command::Command;
     use bytes::Bytes;
-    use crate::core::test_utils::MockTransport;
 
     #[test]
     fn test_ack_processor_can_handle() {
@@ -369,6 +360,9 @@ mod tests {
 
     #[test]
     fn test_processor_name() {
-        assert_eq!(<AckProcessor as UnifiedFrameProcessor<MockTransport>>::name(), "AckProcessor");
+        assert_eq!(
+            <AckProcessor as UnifiedFrameProcessor<MockTransport>>::name(),
+            "AckProcessor"
+        );
     }
 }

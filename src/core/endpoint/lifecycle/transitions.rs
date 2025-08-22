@@ -21,7 +21,10 @@ use tracing::{trace, warn};
 pub enum LifecycleEvent {
     /// 连接初始化
     /// Connection initialization
-    ConnectionInitialized { local_cid: u32, remote_addr: std::net::SocketAddr },
+    ConnectionInitialized {
+        local_cid: u32,
+        remote_addr: std::net::SocketAddr,
+    },
     /// 连接建立中
     /// Connection establishing
     ConnectionEstablishing,
@@ -118,12 +121,12 @@ impl StateTransitionExecutor {
         if old_state_discriminant != new_state_discriminant {
             let from_state = Self::state_name_for(current_state);
             let to_state = Self::state_name_for(&new_state);
-            
+
             self.trigger_event(LifecycleEvent::StateTransition {
                 from: from_state.to_string(),
                 to: to_state.to_string(),
             });
-            
+
             trace!(
                 cid = self.cid,
                 from = from_state,
@@ -156,7 +159,10 @@ impl StateTransitionExecutor {
 
     /// 执行优雅关闭的状态转换逻辑
     /// Execute graceful shutdown state transition logic
-    pub fn execute_graceful_shutdown(&self, current_state: &ConnectionState) -> Result<ConnectionState> {
+    pub fn execute_graceful_shutdown(
+        &self,
+        current_state: &ConnectionState,
+    ) -> Result<ConnectionState> {
         let target_state = match current_state {
             ConnectionState::Connecting => {
                 // 在连接建立前关闭，转换到Closing状态以正确发送FIN
@@ -168,9 +174,7 @@ impl StateTransitionExecutor {
                 // Close in server waiting state, transition to Closing to properly send FIN
                 ConnectionState::Closing
             }
-            ConnectionState::Established => {
-                ConnectionState::Closing
-            }
+            ConnectionState::Established => ConnectionState::Closing,
             ConnectionState::FinWait => {
                 // 如果已经在等待对方的FIN，则可以直接转换到Closing
                 // If already waiting for peer's FIN, can directly transition to Closing
@@ -276,30 +280,40 @@ mod tests {
 
     #[test]
     fn test_state_name_for() {
-        assert_eq!(StateTransitionExecutor::state_name_for(&ConnectionState::Connecting), "Connecting");
-        assert_eq!(StateTransitionExecutor::state_name_for(&ConnectionState::Established), "Established");
-        assert_eq!(StateTransitionExecutor::state_name_for(&ConnectionState::Closed), "Closed");
-        
+        assert_eq!(
+            StateTransitionExecutor::state_name_for(&ConnectionState::Connecting),
+            "Connecting"
+        );
+        assert_eq!(
+            StateTransitionExecutor::state_name_for(&ConnectionState::Established),
+            "Established"
+        );
+        assert_eq!(
+            StateTransitionExecutor::state_name_for(&ConnectionState::Closed),
+            "Closed"
+        );
+
         let validating_state = ConnectionState::ValidatingPath {
             new_addr: create_test_address(),
             challenge_data: 12345,
             notifier: None,
         };
-        assert_eq!(StateTransitionExecutor::state_name_for(&validating_state), "ValidatingPath");
+        assert_eq!(
+            StateTransitionExecutor::state_name_for(&validating_state),
+            "ValidatingPath"
+        );
     }
 
     #[test]
     fn test_execute_valid_transition() {
         let executor = StateTransitionExecutor::new(12345);
-        
-        let result = executor.execute_transition(
-            &ConnectionState::Connecting,
-            ConnectionState::Established,
-        );
-        
+
+        let result =
+            executor.execute_transition(&ConnectionState::Connecting, ConnectionState::Established);
+
         assert!(result.is_ok());
         match result.unwrap() {
-            ConnectionState::Established => {},
+            ConnectionState::Established => {}
             _ => panic!("Expected Established state"),
         }
     }
@@ -307,12 +321,10 @@ mod tests {
     #[test]
     fn test_execute_invalid_transition() {
         let executor = StateTransitionExecutor::new(12345);
-        
-        let result = executor.execute_transition(
-            &ConnectionState::Closed,
-            ConnectionState::Established,
-        );
-        
+
+        let result =
+            executor.execute_transition(&ConnectionState::Closed, ConnectionState::Established);
+
         assert!(result.is_err());
     }
 
@@ -324,7 +336,7 @@ mod tests {
         let result = executor.execute_graceful_shutdown(&ConnectionState::Established);
         assert!(result.is_ok());
         match result.unwrap() {
-            ConnectionState::Closing => {},
+            ConnectionState::Closing => {}
             _ => panic!("Expected Closing state"),
         }
 
@@ -332,7 +344,7 @@ mod tests {
         let result = executor.execute_graceful_shutdown(&ConnectionState::Connecting);
         assert!(result.is_ok());
         match result.unwrap() {
-            ConnectionState::Closing => {},
+            ConnectionState::Closing => {}
             _ => panic!("Expected Closing state"),
         }
 
@@ -340,7 +352,7 @@ mod tests {
         let result = executor.execute_graceful_shutdown(&ConnectionState::Closed);
         assert!(result.is_ok());
         match result.unwrap() {
-            ConnectionState::Closed => {},
+            ConnectionState::Closed => {}
             _ => panic!("Expected Closed state"),
         }
     }
@@ -364,20 +376,32 @@ mod tests {
         // 检查收集到的事件
         let captured_events = events.lock().unwrap();
         assert_eq!(captured_events.len(), 3);
-        
-        assert!(captured_events.iter().any(|e| matches!(e, LifecycleEvent::ConnectionInitialized { .. })));
-        assert!(captured_events.iter().any(|e| matches!(e, LifecycleEvent::ConnectionTimeout)));
-        assert!(captured_events.iter().any(|e| matches!(e, LifecycleEvent::ForceClose)));
+
+        assert!(
+            captured_events
+                .iter()
+                .any(|e| matches!(e, LifecycleEvent::ConnectionInitialized { .. }))
+        );
+        assert!(
+            captured_events
+                .iter()
+                .any(|e| matches!(e, LifecycleEvent::ConnectionTimeout))
+        );
+        assert!(
+            captured_events
+                .iter()
+                .any(|e| matches!(e, LifecycleEvent::ForceClose))
+        );
     }
 
     #[test]
     fn test_clear_event_listeners() {
         let mut executor = StateTransitionExecutor::new(12345);
-        
+
         // 注册监听器
         executor.register_event_listener(Box::new(|_| {}));
         assert_eq!(executor.event_listeners.len(), 1);
-        
+
         // 清除监听器
         executor.clear_event_listeners();
         assert_eq!(executor.event_listeners.len(), 0);
@@ -385,4 +409,4 @@ mod tests {
 
     // 注意：路径验证清理逻辑现在在 DefaultLifecycleManager 层面处理
     // Note: Path validation cleanup logic is now handled at the DefaultLifecycleManager level
-} 
+}

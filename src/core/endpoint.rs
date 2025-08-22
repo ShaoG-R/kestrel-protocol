@@ -2,10 +2,10 @@
 //!
 //! 连接的端点，是新分层协议的“大脑”。
 
-pub mod core;
-pub mod processing;
-pub mod lifecycle;
 pub mod builder;
+pub mod core;
+pub mod lifecycle;
+pub mod processing;
 pub mod types;
 
 #[cfg(test)]
@@ -15,7 +15,6 @@ pub mod unified_scheduler;
 
 pub use types::command::StreamCommand;
 
-use lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use crate::{
     config::Config,
     core::reliability::{
@@ -25,21 +24,15 @@ use crate::{
     error::Result,
     socket::{SocketActorCommand, Transport},
 };
+use lifecycle::{ConnectionLifecycleManager, DefaultLifecycleManager};
 use std::net::SocketAddr;
-use tokio::{
-    sync::mpsc,
-    time::Instant,
-};
-use tracing::trace;
 use timing::{TimeoutEvent, TimingManager};
+use tokio::{sync::mpsc, time::Instant};
+use tracing::trace;
 use types::{
-    channels::ChannelManager,
-    identity::ConnectionIdentity,
-    state::ConnectionState,
+    channels::ChannelManager, identity::ConnectionIdentity, state::ConnectionState,
     transport::TransportManager,
 };
-
-
 
 /// A guard that ensures the connection is cleaned up in the `SocketActor`
 /// when the `Endpoint` is dropped.
@@ -57,8 +50,14 @@ impl<T: Transport> Drop for ConnectionCleaner<T> {
         // Use `try_send` to avoid blocking in a drop implementation. This is a
         // "best-effort" cleanup. If the channel is full or closed, the actor
         // will eventually clean up the connection via timeout.
-        if let Err(e) = self.command_tx.try_send(SocketActorCommand::RemoveConnection { cid: self.cid }) {
-            trace!(cid = self.cid, "Failed to send remove command during drop: {}", e);
+        if let Err(e) = self
+            .command_tx
+            .try_send(SocketActorCommand::RemoveConnection { cid: self.cid })
+        {
+            trace!(
+                cid = self.cid,
+                "Failed to send remove command during drop: {}", e
+            );
         }
     }
 }
@@ -68,11 +67,11 @@ pub struct Endpoint<T: Transport, C: CongestionController = VegasController> {
     /// 新的连接标识管理器
     /// New connection identity manager
     identity: ConnectionIdentity,
-    
+
     /// 新的时间管理器
     /// New timing manager
     timing: TimingManager,
-    
+
     /// 新的传输层管理器
     /// New transport manager
     transport: TransportManager<C>,
@@ -85,11 +84,9 @@ pub struct Endpoint<T: Transport, C: CongestionController = VegasController> {
     /// New lifecycle manager
     lifecycle_manager: DefaultLifecycleManager,
     config: Config,
-    
 }
 
 impl<T: Transport, C: CongestionController> Endpoint<T, C> {
-
     /// 获取生命周期管理器的引用
     /// Gets a reference to the lifecycle manager
     pub fn lifecycle_manager(&self) -> &DefaultLifecycleManager {
@@ -104,7 +101,7 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
 
     /// 处理定时器事件 - 事件驱动架构的核心方法
     /// Handle timer event - core method of event-driven architecture
-    /// 
+    ///
     /// 此方法处理从全局定时器系统接收到的超时事件，替代了原有的轮询式超时检查
     /// This method handles timeout events received from the global timer system,
     /// replacing the original polling-based timeout checks
@@ -118,26 +115,32 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                 // 处理空闲超时 - 连接长时间无活动
                 // Handle idle timeout - connection has been inactive for too long
                 trace!(cid = self.identity.local_cid(), "Processing idle timeout");
-                
+
                 // 转换到关闭状态
                 // Transition to closed state
                 let _ = self.transition_state(ConnectionState::Closed);
-                
+
                 // 可以在这里添加额外的清理逻辑
                 // Additional cleanup logic can be added here
             }
-            
+
             TimeoutEvent::ConnectionTimeout => {
                 // 处理连接超时 - 连接建立超时
                 // Handle connection timeout - connection establishment timed out
-                trace!(cid = self.identity.local_cid(), "Processing connection timeout");
-                
+                trace!(
+                    cid = self.identity.local_cid(),
+                    "Processing connection timeout"
+                );
+
                 // 转换到关闭状态
                 // Transition to closed state
                 let _ = self.transition_state(ConnectionState::Closed);
             }
-            
-            TimeoutEvent::PacketRetransmissionTimeout { sequence_number, timer_id } => {
+
+            TimeoutEvent::PacketRetransmissionTimeout {
+                sequence_number,
+                timer_id,
+            } => {
                 // 新的基于数据包的重传处理逻辑
                 // New packet-based retransmission logic
                 trace!(
@@ -146,13 +149,16 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                     timer_id = timer_id,
                     "Processing packet-based retransmission timeout"
                 );
-                
+
                 let context = self.create_retransmission_context();
-                
+
                 // 使用PacketTimerManager处理特定数据包的超时
                 // Use PacketTimerManager to handle specific packet timeout
-                if let Some(retx_frame) = self.transport.unified_reliability_mut()
-                    .handle_packet_timer_timeout(timer_id, &context).await 
+                if let Some(retx_frame) = self
+                    .transport
+                    .unified_reliability_mut()
+                    .handle_packet_timer_timeout(timer_id, &context)
+                    .await
                 {
                     trace!(
                         cid = self.identity.local_cid(),
@@ -160,11 +166,11 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                         timer_id = timer_id,
                         "Retransmitting specific packet using PacketTimerManager"
                     );
-                    
+
                     // 发送重传的单个帧
                     // Send the retransmitted single frame
                     self.send_frames(vec![retx_frame]).await?;
-                    
+
                     trace!(
                         cid = self.identity.local_cid(),
                         seq = sequence_number,
@@ -179,33 +185,50 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                     );
                 }
             }
-            
+
             TimeoutEvent::PathValidationTimeout => {
                 // 处理路径验证超时
                 // Handle path validation timeout
-                trace!(cid = self.identity.local_cid(), "Processing path validation timeout");
-                
+                trace!(
+                    cid = self.identity.local_cid(),
+                    "Processing path validation timeout"
+                );
+
                 // 委托给TimingManager处理路径验证超时
                 // Delegate to TimingManager to handle path validation timeout
                 if let Err(e) = self.timing.handle_timeout_event(timeout_event).await {
-                    tracing::warn!(cid = self.identity.local_cid(), error = e, "Failed to handle path validation timeout");
+                    tracing::warn!(
+                        cid = self.identity.local_cid(),
+                        error = e,
+                        "Failed to handle path validation timeout"
+                    );
                 }
             }
-            
+
             TimeoutEvent::FinProcessingTimeout => {
                 // 处理FIN处理超时 - 检查是否可以发送EOF
                 // Handle FIN processing timeout - check if EOF can be sent
-                trace!(cid = self.identity.local_cid(), "Processing FIN processing timeout");
-                
+                trace!(
+                    cid = self.identity.local_cid(),
+                    "Processing FIN processing timeout"
+                );
+
                 // 委托给TimingManager处理FIN处理超时
                 // Delegate to TimingManager to handle FIN processing timeout
                 if let Err(e) = self.timing.handle_timeout_event(timeout_event).await {
-                    tracing::warn!(cid = self.identity.local_cid(), error = e, "Failed to handle FIN processing timeout");
+                    tracing::warn!(
+                        cid = self.identity.local_cid(),
+                        error = e,
+                        "Failed to handle FIN processing timeout"
+                    );
                 }
-                
+
                 // 检查是否可以发送EOF
                 // Check if EOF can be sent
-                if self.timing.should_send_eof(self.transport.is_recv_buffer_empty()) {
+                if self
+                    .timing
+                    .should_send_eof(self.transport.is_recv_buffer_empty())
+                {
                     if let Some(tx) = self.channels.tx_to_stream_mut().take() {
                         trace!(
                             cid = self.identity.local_cid(),
@@ -232,7 +255,10 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     /// Creates a retransmission context with current endpoint state
     /// 使用当前端点状态创建重传上下文
     pub fn create_retransmission_context(&self) -> crate::packet::frame::RetransmissionContext {
-        let (recv_next_sequence, recv_window_size) = self.transport.unified_reliability().get_receive_window_info();
+        let (recv_next_sequence, recv_window_size) = self
+            .transport
+            .unified_reliability()
+            .get_receive_window_info();
 
         crate::packet::frame::RetransmissionContext::new(
             self.timing.start_time(),
@@ -279,7 +305,8 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
         challenge_data: u64,
         notifier: tokio::sync::oneshot::Sender<crate::error::Result<()>>,
     ) -> crate::error::Result<()> {
-        self.lifecycle_manager.start_path_validation(new_addr, challenge_data, notifier)
+        self.lifecycle_manager
+            .start_path_validation(new_addr, challenge_data, notifier)
     }
 
     /// 完成路径验证（使用生命周期管理器）
@@ -287,9 +314,15 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     pub async fn complete_path_validation(&mut self, success: bool) -> crate::error::Result<()> {
         // 取消路径验证超时定时器
         // Cancel path validation timeout timer
-        let cancelled = self.timing.cancel_timer(&crate::core::endpoint::timing::TimeoutEvent::PathValidationTimeout).await;
-        tracing::debug!("Path validation timeout timer cancelled on completion: {}", cancelled);
-        
+        let cancelled = self
+            .timing
+            .cancel_timer(&crate::core::endpoint::timing::TimeoutEvent::PathValidationTimeout)
+            .await;
+        tracing::debug!(
+            "Path validation timeout timer cancelled on completion: {}",
+            cancelled
+        );
+
         self.lifecycle_manager.complete_path_validation(success)
     }
 
@@ -316,8 +349,6 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     pub fn state(&self) -> &ConnectionState {
         self.lifecycle_manager.current_state()
     }
-
-
 
     /// 更新最后接收时间
     /// Updates the last receive time
@@ -372,22 +403,24 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     /// 该方法计算下一次唤醒时间，平衡性能优化和代码复杂性。
     /// 在新的重传系统中，主要依赖全局定时器系统和连接级超时。
     ///
-    /// This method calculates the next wakeup time, balancing performance optimization 
-    /// and code complexity. In the new retransmission system, it mainly relies on the 
+    /// This method calculates the next wakeup time, balancing performance optimization
+    /// and code complexity. In the new retransmission system, it mainly relies on the
     /// global timer system and connection-level timeouts.
     pub fn calculate_next_wakeup_time(&self) -> Instant {
         // 在新系统中，RTO超时由PacketTimerManager通过全局定时器系统管理
         // In the new system, RTO timeouts are managed by PacketTimerManager through the global timer system
-        
+
         // 获取连接级超时截止时间
         // Get connection-level timeout deadline
         let connection_deadline = self.timing.next_connection_timeout_deadline(&self.config);
-        
+
         // 使用连接级截止时间，或回退到默认检查间隔
         // Use connection-level deadline, or fallback to default check interval
         let fallback_interval = Instant::now() + std::time::Duration::from_millis(50);
-        
-        connection_deadline.unwrap_or(fallback_interval).min(fallback_interval)
+
+        connection_deadline
+            .unwrap_or(fallback_interval)
+            .min(fallback_interval)
     }
 
     /// 统一的超时事件处理方法（新版本 - 支持分离接口）
@@ -432,13 +465,13 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
                 }
             }
         }
-        
+
         // 处理重传帧
         // Handle retransmission frames
         if !retransmission_frames.is_empty() {
             self.send_frames(retransmission_frames).await?;
         }
-        
+
         Ok(())
     }
 
@@ -460,9 +493,14 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
             {
                 // 取消路径验证超时定时器
                 // Cancel path validation timeout timer
-                let cancelled = self.timing.cancel_timer(&crate::core::endpoint::timing::TimeoutEvent::PathValidationTimeout).await;
+                let cancelled = self
+                    .timing
+                    .cancel_timer(
+                        &crate::core::endpoint::timing::TimeoutEvent::PathValidationTimeout,
+                    )
+                    .await;
                 tracing::debug!("Path validation timeout timer cancelled: {}", cancelled);
-                
+
                 if let Some(notifier) = notifier {
                     let _ = notifier.send(Err(crate::error::Error::PathValidationTimeout));
                 }
@@ -473,6 +511,4 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
         }
         Ok(())
     }
-
-
 }

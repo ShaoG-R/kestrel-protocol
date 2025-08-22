@@ -8,19 +8,22 @@
 //! including PUSH frame reception, sequence number validation,
 //! data reassembly logic, etc.
 
-use super::{FrameProcessingContext, UnifiedFrameProcessor, TypeSafeFrameProcessor, TypeSafeFrameValidator, frame_types::PushFrame};
-use crate::{
-    error::{Result, ProcessorErrorContext},
-    packet::frame::Frame,
-    socket::{Transport},
+use super::{
+    FrameProcessingContext, TypeSafeFrameProcessor, TypeSafeFrameValidator, UnifiedFrameProcessor,
+    frame_types::PushFrame,
 };
+use crate::{
+    error::{ProcessorErrorContext, Result},
+    packet::frame::Frame,
+    socket::Transport,
+};
+use async_trait::async_trait;
 use std::net::SocketAddr;
 use tokio::time::Instant;
 use tracing::{debug, trace};
-use async_trait::async_trait;
 
-use crate::core::endpoint::types::state::ConnectionState;
 use super::super::traits::ProcessorOperations;
+use crate::core::endpoint::types::state::ConnectionState;
 
 /// PUSH 帧处理器
 /// PUSH frame processor
@@ -45,7 +48,7 @@ impl<T: Transport> TypeSafeFrameProcessor<T> for PushProcessor {
         // 类型安全验证：编译时保证只能处理PUSH帧
         // Type-safe validation: compile-time guarantee that only PUSH frames can be processed
         <Self as TypeSafeFrameValidator>::validate_frame_type(&frame)?;
-        
+
         let Frame::Push { header, payload } = frame else {
             // 这个分支在类型安全验证后应该永远不会到达
             // This branch should never be reached after type-safe validation
@@ -53,7 +56,7 @@ impl<T: Transport> TypeSafeFrameProcessor<T> for PushProcessor {
         };
 
         let context = FrameProcessingContext::new(endpoint, src_addr, now);
-        
+
         trace!(
             cid = context.local_cid,
             seq = header.sequence_number,
@@ -100,18 +103,16 @@ impl<T: Transport> TypeSafeFrameProcessor<T> for PushProcessor {
 // Type-safe frame validator implementation
 impl TypeSafeFrameValidator for PushProcessor {
     type FrameTypeMarker = PushFrame;
-    
+
     /// 验证帧类型是否为 PUSH 帧
     /// Validate that the frame type is a PUSH frame
     fn validate_frame_type(frame: &Frame) -> Result<()> {
         match frame {
             Frame::Push { .. } => Ok(()),
-            _ => Err(crate::error::Error::InvalidFrame(
-                format!(
-                    "PushProcessor can only handle PUSH frames, got: {:?}", 
-                    std::mem::discriminant(frame)
-                )
-            ))
+            _ => Err(crate::error::Error::InvalidFrame(format!(
+                "PushProcessor can only handle PUSH frames, got: {:?}",
+                std::mem::discriminant(frame)
+            ))),
         }
     }
 }
@@ -143,12 +144,13 @@ impl<T: Transport> UnifiedFrameProcessor<T> for PushProcessor {
                     "PUSH frame".to_string(),
                     format!("{:?}", std::mem::discriminant(&frame)),
                     error_context,
-                ).into(),
+                )
+                .into(),
             });
         };
 
         let context = FrameProcessingContext::new(endpoint, src_addr, now);
-        
+
         trace!(
             cid = context.local_cid,
             seq = header.sequence_number,
@@ -190,8 +192,6 @@ impl<T: Transport> UnifiedFrameProcessor<T> for PushProcessor {
     }
 }
 
-
-
 impl PushProcessor {
     /// 创建处理器错误上下文
     /// Create processor error context
@@ -226,8 +226,10 @@ impl PushProcessor {
         // ACK 将被捎带到最终的 SYN-ACK 上
         // For 0-RTT PUSH frames received during the SynReceived state,
         // the ACK will be piggybacked onto the eventual SYN-ACK
-        endpoint.unified_reliability_mut().receive_packet(header.sequence_number, payload);
-        
+        endpoint
+            .unified_reliability_mut()
+            .receive_packet(header.sequence_number, payload);
+
         Ok(())
     }
 
@@ -247,8 +249,10 @@ impl PushProcessor {
 
         // 使用高级接口接收数据并自动发送 ACK（如果需要）
         // Use high-level interface to receive data and automatically send ACK if needed
-        endpoint.receive_data_and_maybe_ack(header.sequence_number, payload).await?;
-        
+        endpoint
+            .receive_data_and_maybe_ack(header.sequence_number, payload)
+            .await?;
+
         Ok(())
     }
 
@@ -267,8 +271,10 @@ impl PushProcessor {
 
         // 在路径验证期间继续处理数据帧，使用高级接口
         // Continue processing data frames during path validation using high-level interface
-        endpoint.receive_data_and_maybe_ack(header.sequence_number, payload).await?;
-        
+        endpoint
+            .receive_data_and_maybe_ack(header.sequence_number, payload)
+            .await?;
+
         Ok(())
     }
 
@@ -287,8 +293,10 @@ impl PushProcessor {
 
         // 即使在 FinWait 状态下也要处理数据，使用高级接口
         // Process data even in FinWait state using high-level interface
-        endpoint.receive_data_and_maybe_ack(header.sequence_number, payload).await?;
-        
+        endpoint
+            .receive_data_and_maybe_ack(header.sequence_number, payload)
+            .await?;
+
         Ok(())
     }
 
@@ -307,8 +315,10 @@ impl PushProcessor {
 
         // 在关闭过程中仍可能收到数据，使用高级接口处理
         // Process data during closing using high-level interface
-        endpoint.receive_data_and_maybe_ack(header.sequence_number, payload).await?;
-        
+        endpoint
+            .receive_data_and_maybe_ack(header.sequence_number, payload)
+            .await?;
+
         Ok(())
     }
 }
@@ -318,7 +328,7 @@ mod tests {
     use super::*;
     use crate::{
         core::test_utils::MockTransport,
-        packet::{frame::Frame, header::ShortHeader, command::Command},
+        packet::{command::Command, frame::Frame, header::ShortHeader},
     };
     use bytes::Bytes;
 
@@ -341,7 +351,7 @@ mod tests {
     }
 
     // 测试工具函数 - 创建测试用的ACK帧
-    // Test utility function - Create test ACK frame  
+    // Test utility function - Create test ACK frame
     fn create_test_ack_frame() -> Frame {
         Frame::Ack {
             header: ShortHeader {
@@ -372,8 +382,14 @@ mod tests {
 
     #[test]
     fn test_processor_name() {
-        assert_eq!(<PushProcessor as UnifiedFrameProcessor<MockTransport>>::name(), "PushProcessor");
-        assert_eq!(<PushProcessor as TypeSafeFrameProcessor<MockTransport>>::name(), "PushProcessor");
+        assert_eq!(
+            <PushProcessor as UnifiedFrameProcessor<MockTransport>>::name(),
+            "PushProcessor"
+        );
+        assert_eq!(
+            <PushProcessor as TypeSafeFrameProcessor<MockTransport>>::name(),
+            "PushProcessor"
+        );
     }
 
     #[test]
@@ -381,28 +397,44 @@ mod tests {
         // 测试类型安全验证
         // Test type-safe validation
         let push_frame = create_test_push_frame(1, "test");
-        assert!(<PushProcessor as TypeSafeFrameValidator>::validate_frame_type(&push_frame).is_ok());
+        assert!(
+            <PushProcessor as TypeSafeFrameValidator>::validate_frame_type(&push_frame).is_ok()
+        );
 
         let ack_frame = create_test_ack_frame();
-        assert!(<PushProcessor as TypeSafeFrameValidator>::validate_frame_type(&ack_frame).is_err());
+        assert!(
+            <PushProcessor as TypeSafeFrameValidator>::validate_frame_type(&ack_frame).is_err()
+        );
     }
 
     #[test]
     fn test_processor_type_identification() {
         use super::super::ProcessorType;
-        
+
         let push_frame = create_test_push_frame(1, "test");
         let ack_frame = create_test_ack_frame();
 
         // 测试统一的帧类型识别 - 使用 ProcessorType
         // Test unified frame type identification using ProcessorType
-        assert_eq!(ProcessorType::from_frame(&push_frame), Some(ProcessorType::Push));
-        assert_eq!(ProcessorType::from_frame(&ack_frame), Some(ProcessorType::Ack));
-        
+        assert_eq!(
+            ProcessorType::from_frame(&push_frame),
+            Some(ProcessorType::Push)
+        );
+        assert_eq!(
+            ProcessorType::from_frame(&ack_frame),
+            Some(ProcessorType::Ack)
+        );
+
         // 测试不匹配的情况
         // Test non-matching cases
-        assert_ne!(ProcessorType::from_frame(&push_frame), Some(ProcessorType::Ack));
-        assert_ne!(ProcessorType::from_frame(&ack_frame), Some(ProcessorType::Push));
+        assert_ne!(
+            ProcessorType::from_frame(&push_frame),
+            Some(ProcessorType::Ack)
+        );
+        assert_ne!(
+            ProcessorType::from_frame(&ack_frame),
+            Some(ProcessorType::Push)
+        );
 
         // 测试处理器名称
         // Test processor names
@@ -413,17 +445,18 @@ mod tests {
     #[test]
     fn test_all_processor_interfaces_consistency() {
         let push_frame = create_test_push_frame(1, "test");
-        
+
         // 确保所有接口实现的行为一致
         // Ensure all interface implementations behave consistently
-        let unified_can_handle = <PushProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&push_frame);
+        let unified_can_handle =
+            <PushProcessor as UnifiedFrameProcessor<MockTransport>>::can_handle(&push_frame);
         assert!(unified_can_handle);
-        
+
         // 确保名称一致
         // Ensure names are consistent
         let unified_name = <PushProcessor as UnifiedFrameProcessor<MockTransport>>::name();
         let type_safe_name = <PushProcessor as TypeSafeFrameProcessor<MockTransport>>::name();
-        
+
         assert_eq!(unified_name, type_safe_name);
         assert_eq!(unified_name, "PushProcessor");
     }

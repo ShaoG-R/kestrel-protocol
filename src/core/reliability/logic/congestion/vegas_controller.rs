@@ -10,15 +10,13 @@
 use crate::{
     config::Config,
     core::reliability::logic::congestion::traits::{
-        CongestionController, CongestionDecision, CongestionState, CongestionStats,
-        ConfigurableCongestionController,
+        ConfigurableCongestionController, CongestionController, CongestionDecision,
+        CongestionState, CongestionStats,
     },
 };
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::{debug, trace};
-
-
 
 /// Vegas拥塞控制器
 /// Vegas congestion controller
@@ -27,23 +25,23 @@ pub struct VegasController {
     /// 当前拥塞窗口
     /// Current congestion window
     congestion_window: u32,
-    
+
     /// 慢启动阈值
     /// Slow start threshold
     slow_start_threshold: u32,
-    
+
     /// 当前状态
     /// Current state
     state: CongestionState,
-    
+
     /// 最小RTT
     /// Minimum RTT
     min_rtt: Duration,
-    
+
     /// 最后测量的RTT
     /// Last measured RTT
     last_rtt: Duration,
-    
+
     /// 配置参数
     /// Configuration parameters
     config: Config,
@@ -63,17 +61,17 @@ impl VegasController {
             config,
         }
     }
-    
+
     /// 处理ACK并做出拥塞控制决策
     /// Handle ACK and make congestion control decision
     pub fn handle_ack(&mut self, rtt: Duration) -> CongestionDecision {
         let old_window = self.congestion_window;
         let old_threshold = self.slow_start_threshold;
         let old_state = self.state;
-        
+
         // 更新RTT统计
         self.update_rtt_stats(rtt);
-        
+
         // 根据当前状态进行拥塞控制
         match self.state {
             CongestionState::SlowStart => {
@@ -88,14 +86,14 @@ impl VegasController {
                 self.handle_congestion_avoidance(rtt);
             }
         }
-        
+
         // 检查是否需要状态转换
         self.check_state_transition();
-        
+
         let significant_change = old_window != self.congestion_window
             || old_threshold != self.slow_start_threshold
             || old_state != self.state;
-        
+
         CongestionDecision {
             new_congestion_window: self.congestion_window,
             new_slow_start_threshold: self.slow_start_threshold,
@@ -104,25 +102,25 @@ impl VegasController {
             suggested_send_rate: None, // Vegas doesn't suggest specific rates
         }
     }
-    
+
     /// 处理丢包事件
     /// Handle packet loss event
     pub fn handle_packet_loss(&mut self, _now: Instant) -> CongestionDecision {
         let old_window = self.congestion_window;
         let old_threshold = self.slow_start_threshold;
-        
+
         // 判断是拥塞性丢包还是随机丢包
         let is_congestive_loss = self.is_congestive_loss();
-        
+
         if is_congestive_loss {
             self.handle_congestive_loss();
         } else {
             self.handle_random_loss();
         }
-        
-        let significant_change = old_window != self.congestion_window
-            || old_threshold != self.slow_start_threshold;
-        
+
+        let significant_change =
+            old_window != self.congestion_window || old_threshold != self.slow_start_threshold;
+
         CongestionDecision {
             new_congestion_window: self.congestion_window,
             new_slow_start_threshold: self.slow_start_threshold,
@@ -131,61 +129,61 @@ impl VegasController {
             suggested_send_rate: None, // Vegas doesn't suggest specific rates
         }
     }
-    
+
     /// 获取当前拥塞窗口
     /// Get current congestion window
     pub fn congestion_window(&self) -> u32 {
         self.congestion_window
     }
-    
+
     /// 获取当前状态
     /// Get current state
     pub fn current_state(&self) -> CongestionState {
         self.state
     }
-    
+
     /// 获取慢启动阈值
     /// Get slow start threshold
     pub fn slow_start_threshold(&self) -> u32 {
         self.slow_start_threshold
     }
-    
+
     /// 获取最小RTT
     /// Get minimum RTT
     pub fn min_rtt(&self) -> Duration {
         self.min_rtt
     }
-    
+
     /// 获取最后RTT
     /// Get last RTT
     pub fn last_rtt(&self) -> Duration {
         self.last_rtt
     }
-    
+
     /// 更新RTT统计
     /// Update RTT statistics
     fn update_rtt_stats(&mut self, rtt: Duration) {
         self.last_rtt = rtt;
         self.min_rtt = self.min_rtt.min(rtt);
-        
+
         trace!(
             rtt_ms = rtt.as_millis(),
             min_rtt_ms = self.min_rtt.as_millis(),
             "RTT statistics updated"
         );
     }
-    
+
     /// 处理慢启动阶段
     /// Handle slow start phase
     fn handle_slow_start(&mut self) {
         self.congestion_window += 1;
-        
+
         trace!(
             cwnd = self.congestion_window,
             "Slow start: congestion window increased"
         );
     }
-    
+
     /// 处理拥塞避免阶段
     /// Handle congestion avoidance phase
     fn handle_congestion_avoidance(&mut self, rtt: Duration) {
@@ -194,13 +192,13 @@ impl VegasController {
             trace!("Skipping congestion avoidance: invalid RTT values");
             return;
         }
-        
+
         // 优化版Vegas算法：使用整数运算避免浮点精度问题
         // diff = cwnd * (rtt - min_rtt) / min_rtt
         // 通过重新排列避免浮点除法：diff = cwnd * (rtt - min_rtt) / min_rtt
         let rtt_micros = rtt.as_micros();
         let min_rtt_micros = self.min_rtt.as_micros();
-        
+
         if rtt_micros <= min_rtt_micros {
             // RTT没有增加，增加窗口
             self.congestion_window += 1;
@@ -212,15 +210,16 @@ impl VegasController {
             );
             return;
         }
-        
+
         // 计算差值，使用微秒精度避免浮点运算
         let rtt_diff_micros = rtt_micros - min_rtt_micros;
-        let diff_packets_scaled = (self.congestion_window as u128 * rtt_diff_micros) / min_rtt_micros;
+        let diff_packets_scaled =
+            (self.congestion_window as u128 * rtt_diff_micros) / min_rtt_micros;
         let diff_packets = diff_packets_scaled as u32;
-        
+
         let alpha = self.config.congestion_control.vegas_alpha_packets;
         let beta = self.config.congestion_control.vegas_beta_packets;
-        
+
         if diff_packets < alpha {
             self.congestion_window += 1;
             trace!(
@@ -230,8 +229,8 @@ impl VegasController {
                 "Congestion avoidance: increasing window"
             );
         } else if diff_packets > beta {
-            self.congestion_window = (self.congestion_window - 1)
-                .max(self.config.congestion_control.min_cwnd_packets);
+            self.congestion_window =
+                (self.congestion_window - 1).max(self.config.congestion_control.min_cwnd_packets);
             trace!(
                 cwnd = self.congestion_window,
                 diff = diff_packets,
@@ -246,17 +245,18 @@ impl VegasController {
             );
         }
     }
-    
+
     /// 检查状态转换
     /// Check state transition
     fn check_state_transition(&mut self) {
-        if self.state == CongestionState::SlowStart 
-            && self.congestion_window >= self.slow_start_threshold {
+        if self.state == CongestionState::SlowStart
+            && self.congestion_window >= self.slow_start_threshold
+        {
             self.state = CongestionState::CongestionAvoidance;
             trace!("State transitioned to congestion avoidance");
         }
     }
-    
+
     /// 判断是否为拥塞性丢包
     /// Determine if loss is congestive
     fn is_congestive_loss(&self) -> bool {
@@ -265,39 +265,41 @@ impl VegasController {
         if self.min_rtt.is_zero() {
             return false;
         }
-        
+
         self.last_rtt > self.min_rtt + (self.min_rtt / 5)
     }
-    
+
     /// 处理拥塞性丢包
     /// Handle congestive loss
     fn handle_congestive_loss(&mut self) {
-        self.slow_start_threshold = (self.congestion_window / 2)
-            .max(self.config.congestion_control.min_cwnd_packets);
+        self.slow_start_threshold =
+            (self.congestion_window / 2).max(self.config.congestion_control.min_cwnd_packets);
         self.congestion_window = self.slow_start_threshold;
         self.state = CongestionState::SlowStart;
-        
+
         debug!(
             new_ssthresh = self.slow_start_threshold,
             new_cwnd = self.congestion_window,
             "Congestive loss: severe reduction"
         );
     }
-    
+
     /// 处理随机丢包
     /// Handle random loss
     fn handle_random_loss(&mut self) {
-        self.congestion_window = ((self.congestion_window as f32) 
-            * self.config.congestion_control.vegas_gentle_decrease_factor) as u32;
-        self.congestion_window = self.congestion_window
+        self.congestion_window = ((self.congestion_window as f32)
+            * self.config.congestion_control.vegas_gentle_decrease_factor)
+            as u32;
+        self.congestion_window = self
+            .congestion_window
             .max(self.config.congestion_control.min_cwnd_packets);
-        
+
         debug!(
             new_cwnd = self.congestion_window,
             "Random loss: gentle reduction"
         );
     }
-    
+
     /// 重置控制器状态
     /// Reset controller state
     pub fn reset(&mut self) {
@@ -307,10 +309,10 @@ impl VegasController {
         // 使用与构造函数相同的初始值
         self.min_rtt = Duration::from_millis(1000);
         self.last_rtt = Duration::from_millis(1000);
-        
+
         debug!("Vegas controller reset to initial state");
     }
-    
+
     /// 获取拥塞控制统计信息
     /// Get congestion control statistics
     pub fn get_statistics(&self) -> VegasStats {
@@ -339,19 +341,19 @@ impl CongestionStats for VegasStats {
     fn congestion_window(&self) -> u32 {
         self.congestion_window
     }
-    
+
     fn slow_start_threshold(&self) -> u32 {
         self.slow_start_threshold
     }
-    
+
     fn state(&self) -> CongestionState {
         self.state
     }
-    
+
     fn min_rtt(&self) -> Duration {
         self.min_rtt
     }
-    
+
     fn last_rtt(&self) -> Duration {
         self.last_rtt
     }
@@ -373,43 +375,43 @@ impl std::fmt::Display for VegasStats {
 
 impl CongestionController for VegasController {
     type Stats = VegasStats;
-    
+
     fn handle_ack(&mut self, rtt: Duration) -> CongestionDecision {
         self.handle_ack(rtt)
     }
-    
+
     fn handle_packet_loss(&mut self, now: Instant) -> CongestionDecision {
         self.handle_packet_loss(now)
     }
-    
+
     fn congestion_window(&self) -> u32 {
         self.congestion_window
     }
-    
+
     fn current_state(&self) -> CongestionState {
         self.state
     }
-    
+
     fn slow_start_threshold(&self) -> u32 {
         self.slow_start_threshold
     }
-    
+
     fn min_rtt(&self) -> Duration {
         self.min_rtt
     }
-    
+
     fn last_rtt(&self) -> Duration {
         self.last_rtt
     }
-    
+
     fn reset(&mut self) {
         self.reset()
     }
-    
+
     fn get_statistics(&self) -> Self::Stats {
         self.get_statistics()
     }
-    
+
     fn algorithm_name(&self) -> &'static str {
         "Vegas"
     }
@@ -417,16 +419,16 @@ impl CongestionController for VegasController {
 
 impl ConfigurableCongestionController for VegasController {
     type Config = Config;
-    
+
     fn new(config: Self::Config) -> Self {
         Self::new(config)
     }
-    
+
     fn update_config(&mut self, config: Self::Config) {
         self.config = config;
         // 可以选择是否重置状态，这里保持当前状态
     }
-    
+
     fn get_config(&self) -> &Self::Config {
         &self.config
     }

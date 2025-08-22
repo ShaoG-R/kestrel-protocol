@@ -59,7 +59,7 @@ impl<T: Transport> Endpoint<T> {
                 Some(timer_event_data) = self.channels.timer_event_rx.recv() => {
                     let timeout_event = timer_event_data.timeout_event;
                     trace!(cid = self.identity.local_cid(), timeout_event = ?timeout_event, "Received timer event");
-                    
+
                     // 处理定时器事件
                     self.handle_timeout_event(timeout_event).await?;
                 }
@@ -162,7 +162,10 @@ impl<T: Transport> Endpoint<T> {
             && self.transport.unified_reliability().is_in_flight_empty()
         {
             if let Ok(()) = self.transition_state(ConnectionState::Closed) {
-                self.transport.unified_reliability_mut().cleanup_all_retransmission_timers().await;
+                self.transport
+                    .unified_reliability_mut()
+                    .cleanup_all_retransmission_timers()
+                    .await;
                 // 连接关闭时，关闭用户流接收器（发送EOF）。
                 // Close user stream receiver (send EOF) when connection is fully closed.
                 *self.channels.tx_to_stream_mut() = None;
