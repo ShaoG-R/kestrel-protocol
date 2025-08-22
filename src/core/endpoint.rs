@@ -397,32 +397,6 @@ impl<T: Transport, C: CongestionController> Endpoint<T, C> {
     // 轮询式统一超时检查接口已移除，改用事件驱动
     // Polling-based unified timeout check interface removed; using event-driven
 
-    /// 统一的下次唤醒时间计算
-    /// Unified next wakeup time calculation - optimized approach
-    ///
-    /// 该方法计算下一次唤醒时间，平衡性能优化和代码复杂性。
-    /// 在新的重传系统中，主要依赖全局定时器系统和连接级超时。
-    ///
-    /// This method calculates the next wakeup time, balancing performance optimization
-    /// and code complexity. In the new retransmission system, it mainly relies on the
-    /// global timer system and connection-level timeouts.
-    pub fn calculate_next_wakeup_time(&self) -> Instant {
-        // 在新系统中，RTO超时由PacketTimerManager通过全局定时器系统管理
-        // In the new system, RTO timeouts are managed by PacketTimerManager through the global timer system
-
-        // 获取连接级超时截止时间
-        // Get connection-level timeout deadline
-        let connection_deadline = self.timing.next_connection_timeout_deadline(&self.config);
-
-        // 使用连接级截止时间，或回退到默认检查间隔
-        // Use connection-level deadline, or fallback to default check interval
-        let fallback_interval = Instant::now() + std::time::Duration::from_millis(50);
-
-        connection_deadline
-            .unwrap_or(fallback_interval)
-            .min(fallback_interval)
-    }
-
     /// 统一的超时事件处理方法（新版本 - 支持分离接口）
     /// Unified timeout event handling method (new version - supports separated interfaces)
     ///

@@ -8,7 +8,7 @@
 //! including connection start time, last receive time, timeout checks, etc.
 
 use crate::config::Config;
-use crate::core::endpoint::unified_scheduler::{TimeoutLayer, UnifiedTimeoutScheduler};
+// 统一调度器相关已移除，全面事件驱动
 use crate::timer::{
     HybridTimerTaskHandle, TimerActorHandle,
     actor::ActorTimerId,
@@ -276,10 +276,7 @@ pub struct TimingManager {
     /// 路径验证统计信息
     /// Path validation statistics
     path_validation_stats: PathValidationStats,
-
-    /// 统一超时事件调度器
-    /// Unified timeout event scheduler
-    unified_scheduler: UnifiedTimeoutScheduler,
+    // 统一调度器已移除，全面事件驱动
 }
 
 impl TimingManager {
@@ -304,7 +301,6 @@ impl TimingManager {
             fin_sent: false,
             timer_manager,
             path_validation_stats: PathValidationStats::default(),
-            unified_scheduler: UnifiedTimeoutScheduler::new(),
         };
 
         (timing_manager, timer_rx)
@@ -331,7 +327,6 @@ impl TimingManager {
             fin_sent: false,
             timer_manager,
             path_validation_stats: PathValidationStats::default(),
-            unified_scheduler: UnifiedTimeoutScheduler::new(),
         };
 
         (timing_manager, timer_rx)
@@ -467,17 +462,7 @@ impl TimingManager {
         Instant::now().duration_since(self.last_recv_time)
     }
 
-    /// 检查是否超过了指定的空闲超时时间
-    /// Check if exceeded specified idle timeout
-    pub fn is_idle_timeout(&self, idle_timeout: Duration) -> bool {
-        self.time_since_last_recv() > idle_timeout
-    }
-
-    /// 检查是否超过了指定的连接超时时间
-    /// Check if exceeded specified connection timeout
-    pub fn is_connection_timeout(&self, connection_timeout: Duration) -> bool {
-        self.connection_duration() > connection_timeout
-    }
+    // 手动超时检查接口已移除，改为事件驱动
 
     /// 获取FIN挂起EOF标志
     /// Get FIN pending EOF flag
@@ -674,241 +659,22 @@ impl TimingManager {
         self.timer_manager.timeout_tx.clone()
     }
 
-    // === 超时控制逻辑封装 Timeout Control Logic Encapsulation ===
-
-    /// 计算下一次唤醒时间，用于事件循环的超时控制
-    /// Calculate next wakeup time for event loop timeout control
-    ///
-    /// 该方法封装了事件循环中的超时计算逻辑，根据连接状态和RTO截止时间
-    /// 来确定下一次唤醒的时间点。
-    ///
-    /// This method encapsulates the timeout calculation logic in the event loop,
-    /// determining the next wakeup time based on connection state and RTO deadline.
-    pub fn calculate_next_wakeup(
-        &self,
-        config: &Config,
-        is_syn_received: bool,
-        rto_deadline: Option<Instant>,
-    ) -> Instant {
-        if is_syn_received {
-            // 在SynReceived状态下，我们不设置超时，等待用户接受
-            // In SynReceived state, we don't set a timeout, wait for user to accept
-            Instant::now() + config.connection.idle_timeout
-        } else {
-            // 使用RTO截止时间，如果没有则使用空闲超时
-            // Use RTO deadline, or idle timeout if none
-            rto_deadline.unwrap_or_else(|| Instant::now() + config.connection.idle_timeout)
-        }
-    }
-
-    /// 检查是否发生了空闲超时
-    /// Check if idle timeout has occurred
-    ///
-    /// 该方法封装了空闲超时检查逻辑，用于判断连接是否因为长时间无活动而超时。
-    ///
-    /// This method encapsulates idle timeout checking logic to determine if
-    /// the connection has timed out due to prolonged inactivity.
-    pub fn check_idle_timeout(&self, config: &Config, now: Instant) -> bool {
-        now.saturating_duration_since(self.last_recv_time) > config.connection.idle_timeout
-    }
-
-    /// 检查路径验证是否超时
-    /// Check if path validation has timed out
-    ///
-    /// 该方法封装了路径验证超时检查逻辑，用于判断路径验证过程是否超时。
-    /// 注意：实际的路径验证状态现在由lifecycle manager管理
-    ///
-    /// This method encapsulates path validation timeout checking logic to determine
-    /// if the path validation process has timed out.
-    /// Note: Actual path validation state is now managed by lifecycle manager
-    pub fn check_path_validation_timeout(&self, config: &Config, now: Instant) -> bool {
-        // 这里使用通用的空闲超时检查，实际的路径验证超时由lifecycle manager和定时器系统处理
-        // Use generic idle timeout check here, actual path validation timeout is handled by lifecycle manager and timer system
-        now.saturating_duration_since(self.last_recv_time) > config.connection.idle_timeout
-    }
-
-    /// 获取超时检查结果
-    /// Get timeout check results
-    ///
-    /// 该方法提供了一个统一的接口来检查各种超时情况，返回超时事件的可选值。
-    ///
-    /// This method provides a unified interface to check various timeout conditions,
-    /// returning an optional timeout event.
-    pub fn check_timeouts(&self, config: &Config, now: Instant) -> Option<TimeoutEvent> {
-        // 检查空闲超时
-        // Check idle timeout
-        if self.check_idle_timeout(config, now) {
-            return Some(TimeoutEvent::IdleTimeout);
-        }
-
-        // 如果没有超时，返回None
-        // If no timeout, return None
-        None
-    }
-
     /// 更新最后接收时间并重置相关超时状态
     /// Update last receive time and reset related timeout states
     ///
-    /// 该方法在接收到数据包时调用，用于更新时间戳并重置超时相关的状态。
+    /// 该方法在接收到数据包时调用，用于更新时间戳
     ///
     /// This method is called when receiving packets to update timestamps
-    /// and reset timeout-related states.
     pub fn on_packet_received(&mut self, now: Instant) {
         self.last_recv_time = now;
         // 可以在这里添加其他接收数据包时需要重置的状态
         // Can add other states that need to be reset when receiving packets here
     }
 
-    /// 获取距离下次超时检查的剩余时间
-    /// Get remaining time until next timeout check
-    ///
-    /// 该方法计算距离下次可能发生超时的剩余时间，用于优化事件循环的等待时间。
-    ///
-    /// This method calculates the remaining time until the next possible timeout,
-    /// used to optimize the event loop's wait time.
-    pub fn time_until_next_timeout(&self, config: &Config) -> Duration {
-        // 返回最小的剩余时间
-        // Return the minimum remaining time
-        config
-            .connection
-            .idle_timeout
-            .saturating_sub(self.time_since_last_recv())
-    }
-
-    /// 检查是否应该触发超时处理
-    /// Check if timeout handling should be triggered
-    ///
-    /// 该方法结合了超时检查和时间判断，用于确定是否需要在事件循环中触发超时处理。
-    ///
-    /// This method combines timeout checking and time judgment to determine
-    /// if timeout handling should be triggered in the event loop.
-    pub fn should_trigger_timeout_handling(&self, config: &Config, now: Instant) -> bool {
-        self.check_timeouts(config, now).is_some()
-    }
-
-    /// 获取超时相关的调试信息
-    /// Get timeout-related debug information
-    ///
-    /// 该方法返回包含超时状态的调试信息字符串，用于日志记录和调试。
-    ///
-    /// This method returns a debug information string containing timeout states
-    /// for logging and debugging purposes.
-    pub fn timeout_debug_info(&self, config: &Config) -> String {
-        format!(
-            "TimeoutDebug {{ time_since_last_recv: {:?}, idle_timeout: {:?}, remaining: {:?} }}",
-            self.time_since_last_recv(),
-            config.connection.idle_timeout,
-            self.time_until_next_timeout(config)
-        )
-    }
-
-    // === 分层超时管理接口 Layered Timeout Management Interface ===
-
-    /// 检查连接级超时事件
-    /// Check connection-level timeout events
-    ///
-    /// 该方法检查所有连接级的超时情况，返回发生的超时事件列表。
-    /// 这是分层超时管理架构中连接层的统一入口。
-    ///
-    /// This method checks all connection-level timeout conditions and returns
-    /// a list of timeout events that have occurred. This is the unified entry
-    /// point for the connection layer in the layered timeout management architecture.
-    pub fn check_connection_timeouts(&self, config: &Config, now: Instant) -> Vec<TimeoutEvent> {
-        let mut events = Vec::new();
-
-        // 检查空闲超时
-        // Check idle timeout
-        if self.check_idle_timeout(config, now) {
-            events.push(TimeoutEvent::IdleTimeout);
-        }
-
-        // 检查路径验证超时
-        // Check path validation timeout
-        if self.check_path_validation_timeout(config, now) {
-            events.push(TimeoutEvent::PathValidationTimeout);
-        }
-
-        events
-    }
-
-    /// 获取下一个连接级超时的截止时间
-    /// Get the deadline for the next connection-level timeout
-    ///
-    /// 该方法计算所有连接级超时中最早的截止时间，用于事件循环的等待时间优化。
-    ///
-    /// This method calculates the earliest deadline among all connection-level
-    /// timeouts, used for optimizing event loop wait times.
-    pub fn next_connection_timeout_deadline(&self, config: &Config) -> Option<Instant> {
-        let idle_deadline = self.last_recv_time + config.connection.idle_timeout;
-
-        // 目前只有空闲超时，未来可以添加其他连接级超时
-        // Currently only idle timeout, can add other connection-level timeouts in the future
-        Some(idle_deadline)
-    }
-
-    // === 统一调度器方法 Unified Scheduler Methods ===
-
-    /// 使用统一调度器计算下一次唤醒时间
-    /// Calculate next wakeup time using unified scheduler
-    pub fn calculate_unified_wakeup(&mut self, layers: &[&dyn TimeoutLayer]) -> Instant {
-        self.unified_scheduler.calculate_unified_deadline(layers)
-    }
-
-    // 轮询式统一超时事件检查已移除
-    // Polling-based unified timeout event check has been removed
-
-    /// 获取统一调度器的性能统计
-    /// Get performance statistics from unified scheduler
-    pub fn unified_scheduler_stats(&self) -> String {
-        let stats = self.unified_scheduler.stats();
-        format!(
-            "UnifiedScheduler {{ total_checks: {}, cache_hits: {}, cache_hit_rate: {:.2}%, batch_checks: {}, prediction_hits: {}, avg_check_duration: {:?} }}",
-            stats.total_checks,
-            stats.cache_hits,
-            self.unified_scheduler.cache_hit_rate() * 100.0,
-            stats.batch_checks,
-            stats.prediction_hits,
-            self.unified_scheduler.avg_check_duration()
-        )
-    }
-
-    /// 清理统一调度器的过期数据
-    /// Cleanup expired data in unified scheduler
-    pub fn cleanup_unified_scheduler(&mut self) {
-        let now = Instant::now();
-        self.unified_scheduler.cleanup_expired_data(now);
-    }
-
-    /// 重置统一调度器的统计信息
-    /// Reset unified scheduler statistics
-    pub fn reset_unified_scheduler_stats(&mut self) {
-        self.unified_scheduler.reset_stats();
-    }
+    // 统一调度器方法已移除
 }
 
-// === TimeoutLayer trait 实现 TimeoutLayer trait implementation ===
-
-impl TimeoutLayer for TimingManager {
-    fn next_deadline(&self) -> Option<Instant> {
-        // 使用默认的空闲超时配置计算下一个截止时间
-        // Calculate next deadline using default idle timeout config
-        let default_idle_timeout = Duration::from_secs(30);
-        Some(self.last_recv_time + default_idle_timeout)
-    }
-
-    fn layer_name(&self) -> &'static str {
-        "TimingManager"
-    }
-
-    fn stats(&self) -> Option<String> {
-        Some(format!(
-            "connection_duration: {:?}, time_since_last_recv: {:?}, fin_pending_eof: {}",
-            self.connection_duration(),
-            self.time_since_last_recv(),
-            self.fin_pending_eof
-        ))
-    }
-}
+// 统一调度器的 TimeoutLayer 实现已移除
 
 // 注意：TimingManager 不再实现 Default 和 Clone，因为它需要明确的参数
 // Note: TimingManager no longer implements Default and Clone as it requires explicit parameters
@@ -921,7 +687,7 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
-    use tokio::time::{Duration, sleep};
+    use tokio::time::{Duration, sleep, timeout};
 
     // 创建测试用的定时器句柄
     fn create_test_timer_handle()
@@ -1126,21 +892,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_timeout_checking() {
-        let connection_id = 1;
+    async fn test_event_driven_idle_timeout() {
+        let connection_id = 42;
         let timer_handle = create_test_timer_handle();
-        let (manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
-        let config = Config::default();
-        let now = Instant::now();
+        let (mut manager, mut timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
 
-        // 刚创建时不应该超时
-        assert!(!manager.check_idle_timeout(&config, now));
-        assert!(!manager.should_trigger_timeout_handling(&config, now));
+        // 使用较小的空闲超时，验证事件驱动模型
+        let mut config = Config::default();
+        config.connection.idle_timeout = Duration::from_millis(50);
 
-        // 模拟超时情况
-        let timeout_time = now + config.connection.idle_timeout + Duration::from_millis(100);
-        assert!(manager.check_idle_timeout(&config, timeout_time));
-        assert!(manager.should_trigger_timeout_handling(&config, timeout_time));
+        // 注册空闲超时定时器
+        let res = manager.register_idle_timeout(&config).await;
+        assert!(res.is_ok());
+
+        // 在合理时间窗口内应收到 IdleTimeout 事件
+        let recv_result = timeout(Duration::from_millis(500), timer_rx.recv()).await;
+        assert!(recv_result.is_ok());
+        let evt = recv_result.unwrap();
+        assert!(evt.is_some());
+        let evt = evt.unwrap();
+        assert_eq!(evt.connection_id, connection_id);
+        assert_eq!(evt.timeout_event, TimeoutEvent::IdleTimeout);
 
         // 清理定时器任务
         let _ = timer_handle.shutdown().await;
@@ -1168,29 +940,7 @@ mod tests {
         let _ = timer_handle.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn test_connection_timeout_deadline() {
-        let connection_id = 1;
-        let timer_handle = create_test_timer_handle();
-        let (mut manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
-        let config = Config::default();
-
-        let initial_deadline = manager.next_connection_timeout_deadline(&config);
-        assert!(initial_deadline.is_some());
-
-        // 等待一段时间后更新活动时间
-        sleep(Duration::from_millis(50)).await;
-        manager.touch_last_recv_time();
-
-        let updated_deadline = manager.next_connection_timeout_deadline(&config);
-        assert!(updated_deadline.is_some());
-
-        // 新的截止时间应该比初始截止时间晚
-        assert!(updated_deadline.unwrap() > initial_deadline.unwrap());
-
-        // 清理定时器任务
-        let _ = timer_handle.shutdown().await;
-    }
+    // 手动计算连接级截止时间相关方法已移除，改为事件驱动，不再测试
 
     #[tokio::test]
     async fn test_reset_operations() {
@@ -1228,23 +978,5 @@ mod tests {
         assert_eq!(stats.average_validation_time, Duration::ZERO);
     }
 
-    #[tokio::test]
-    async fn test_unified_scheduler_integration() {
-        let connection_id = 1;
-        let timer_handle = create_test_timer_handle();
-        let (mut manager, _timer_rx) = TimingManager::new(connection_id, timer_handle.clone());
-
-        // 测试统一调度器的基本功能
-        let stats = manager.unified_scheduler_stats();
-        assert!(stats.contains("UnifiedScheduler"));
-
-        // 清理过期数据
-        manager.cleanup_unified_scheduler();
-
-        // 重置统计信息
-        manager.reset_unified_scheduler_stats();
-
-        // 清理定时器任务
-        let _ = timer_handle.shutdown().await;
-    }
+    // 统一调度器相关接口已移除
 }
